@@ -10,11 +10,13 @@ ext.tellus = [
 	fabricDependencyConfiguration: 'modImplementation',
 	javaVersion: 21,
 	distantHorizonsRuntimeProperty: 'mc1211_distant_horizons_runtime_path',
-	sharedSourceLayers: ['post-1201', 'pre-26', 'mc1211', 'fabric', 'pre-26-fabric'],
+	sharedSourceLayers: ['post-1201', 'pre-26', 'mc1211', 'fabric', 'pre-26-fabric', 'modmenu'],
 	mapboxVersion: '24.1.1',
 	protobufVersion: '4.28.2',
 	officialMappings: true,
 	testDistantHorizonsRuntime: false,
+	// Mod Menu 编译期依赖版本：11.0.5 对应 Minecraft 1.21.1
+	modmenuVersion: '11.0.5',
 ]
 
 apply from: rootProject.file('gradle/tellus-fabric.gradle')

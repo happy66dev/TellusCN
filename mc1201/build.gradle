@@ -11,11 +11,13 @@ ext.tellus = [
 	fabricDependencyConfiguration: 'modImplementation',
 	javaVersion: 17,
 	distantHorizonsRuntimeProperty: 'mc1201_distant_horizons_runtime_path',
-	sharedSourceLayers: ['pre-26', 'mc1201', 'fabric', 'pre-26-fabric'],
+	sharedSourceLayers: ['pre-26', 'mc1201', 'fabric', 'pre-26-fabric', 'modmenu'],
 	mapboxVersion: '23.2.0',
 	protobufVersion: '3.25.5',
 	officialMappings: true,
 	testDistantHorizonsRuntime: false,
+	// Mod Menu 编译期依赖版本：7.1.0 对应 Minecraft 1.20.1
+	modmenuVersion: '7.1.0',
 	overriddenSharedMainSources: [
 		'com/yucareux/tellus/network/GeoTpOpenMapPayload.java',
 		'com/yucareux/tellus/network/GeoTpTeleportPayload.java',
