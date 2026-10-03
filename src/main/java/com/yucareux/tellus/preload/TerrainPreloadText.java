@@ -16,6 +16,7 @@ public final class TerrainPreloadText {
    );
    private static final Pattern OCEAN_CLIMATE = Pattern.compile("Ocean climate ([0-9]+)\\/([0-9]+)");
    private static final Pattern CACHED_TILE = Pattern.compile("Cached (.+) tile ([0-9]+)\\/([0-9]+) \\((.+)\\)");
+   private static final Pattern CACHED_BLOCK = Pattern.compile("Cached (.+) block ([0-9]+)\\/([0-9]+) \\((.+)\\)");
    private static final Pattern LOADED_TILE = Pattern.compile("Loaded (.+) tile ([0-9]+)\\/([0-9]+) \\((.+)\\)");
    private static final Map<String, String> STATUS_KEYS = Map.ofEntries(
       Map.entry("Idle", "tellus.preload.status.idle"),
@@ -41,7 +42,7 @@ public final class TerrainPreloadText {
       ),
       Map.entry("Preload stopped. Completed downloads remain cached.", "tellus.preload.detail.cancelled"),
       Map.entry("Compressing fast terrain package", "tellus.preload.detail.compressing_package"),
-      Map.entry("Skipping Overture land cover; selected area is outside tile coverage", "tellus.preload.detail.skip_land_cover"),
+      Map.entry("Skipping land cover; selected area is outside source coverage", "tellus.preload.detail.skip_land_cover"),
       Map.entry("Skipping land mask preload because land mask data is unavailable", "tellus.preload.detail.skip_land_mask"),
       Map.entry("Skipping DEM elevation preload because world scale is invalid", "tellus.preload.detail.skip_dem_scale"),
       Map.entry("No DEM elevation tiles intersect the selected area", "tellus.preload.detail.no_dem_tiles"),
@@ -53,7 +54,7 @@ public final class TerrainPreloadText {
    );
    private static final Map<String, String> SOURCE_KEYS = Map.ofEntries(
       Map.entry("DEM elevation", "tellus.preload.source.dem"),
-      Map.entry("Overture land cover", "tellus.preload.source.land_cover"),
+      Map.entry("ESA WorldCover land cover", "tellus.preload.source.land_cover"),
       Map.entry("land mask", "tellus.preload.source.land_mask"),
       Map.entry("OSM sand", "tellus.preload.source.sand"),
       Map.entry("Overture water", "tellus.preload.source.water"),
@@ -62,7 +63,8 @@ public final class TerrainPreloadText {
       Map.entry("OSM buildings", "tellus.preload.source.buildings")
    );
    private static final Map<String, String> DOWNLOAD_PREFIX_KEYS = Map.ofEntries(
-      Map.entry(" Overture land-cover source tiles", "tellus.preload.detail.downloading_land_cover"),
+      Map.entry(" ESA WorldCover data blocks", "tellus.preload.detail.downloading_land_cover"),
+      Map.entry(" Overture land-cover source tiles", "tellus.preload.detail.downloading_land_cover_fallback"),
       Map.entry(" land-mask source tiles", "tellus.preload.detail.downloading_land_mask"),
       Map.entry(" DEM source tiles with bounded parallelism", "tellus.preload.detail.downloading_dem"),
       Map.entry(" OSM infrastructure source tiles", "tellus.preload.detail.downloading_infrastructure"),
@@ -72,7 +74,8 @@ public final class TerrainPreloadText {
       Map.entry(" OSM road source tiles", "tellus.preload.detail.downloading_roads")
    );
    private static final Map<String, String> TILE_SOURCE_KEYS = Map.ofEntries(
-      Map.entry("Overture land-cover", "tellus.preload.source.land_cover"),
+      Map.entry("WorldCover", "tellus.preload.source.land_cover"),
+      Map.entry("Overture land-cover", "tellus.preload.source.land_cover_fallback"),
       Map.entry("land-mask", "tellus.preload.source.land_mask"),
       Map.entry("DEM source", "tellus.preload.source.dem"),
       Map.entry("OSM infrastructure", "tellus.preload.source.infrastructure"),
@@ -135,6 +138,10 @@ public final class TerrainPreloadText {
       Component cached = translateTileProgress(detail, CACHED_TILE, "tellus.preload.detail.cached_tile");
       if (cached != null) {
          return cached;
+      }
+      Component cachedBlock = translateTileProgress(detail, CACHED_BLOCK, "tellus.preload.detail.cached_block");
+      if (cachedBlock != null) {
+         return cachedBlock;
       }
       Component loaded = translateTileProgress(detail, LOADED_TILE, "tellus.preload.detail.loaded_tile");
       return loaded == null ? Component.translatable("tellus.preload.detail.unexpected_error") : loaded;

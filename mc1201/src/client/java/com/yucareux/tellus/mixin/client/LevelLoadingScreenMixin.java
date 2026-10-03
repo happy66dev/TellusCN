@@ -1,5 +1,6 @@
 package com.yucareux.tellus.mixin.client;
 
+import com.yucareux.tellus.client.LoadingAttributionLayout;
 import com.yucareux.tellus.client.LoadingTerrainScreenTiming;
 import com.yucareux.tellus.worldgen.EarthChunkGenerator;
 import java.util.ArrayList;
@@ -14,9 +15,12 @@ import net.minecraft.client.gui.screens.LevelLoadingScreen;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.progress.StoringChunkProgressListener;
 import net.minecraft.util.FormattedCharSequence;
 import net.minecraft.world.level.Level;
+import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
@@ -28,14 +32,18 @@ public abstract class LevelLoadingScreenMixin {
    private static final int TEXT_PADDING = 20;
    private static final int LINE_SPACING = 2;
    private static final int MAX_TEXT_WIDTH = 420;
-   private static final int LOADING_WIDGET_HALF_HEIGHT = 100;
-   private static final int LOADING_WIDGET_TEXT_GAP = 16;
+   private static final int LOADING_WIDGET_TEXT_GAP = 8;
+   private static final float[] TEXT_SCALES = {1.0F, 0.95F, 0.9F, 0.85F, 0.8F, 0.75F};
    private static final List<Component> CONTRIBUTIONS = List.of(
       Component.translatable("tellus.loading.attribution.land_cover"),
       Component.translatable("tellus.loading.attribution.climate"),
       Component.translatable("tellus.loading.attribution.elevation"),
       Component.translatable("tellus.loading.attribution.weather")
    );
+   @Shadow
+   @Final
+   private StoringChunkProgressListener progressListener;
+
    @Inject(
       method = {"render"},
       at = {@At("HEAD")}
@@ -56,40 +64,82 @@ public abstract class LevelLoadingScreenMixin {
       Font font = Minecraft.getInstance().font;
       int width = Minecraft.getInstance().getWindow().getGuiScaledWidth();
       int height = Minecraft.getInstance().getWindow().getGuiScaledHeight();
-      int availableWidth = Math.max(TEXT_PADDING * 2, width - TEXT_PADDING * 2);
-      int wrapWidth = Math.min(MAX_TEXT_WIDTH, availableWidth);
-      List<FormattedCharSequence> lines = new ArrayList<>();
-
-      for (Component line : CONTRIBUTIONS) {
-         for (FormattedCharSequence wrapped : font.split(line, wrapWidth)) {
-            lines.add(Objects.requireNonNull(wrapped, "wrappedLine"));
-         }
-      }
-
-      if (!lines.isEmpty()) {
-         int totalHeight = lines.size() * font.lineHeight + (lines.size() - 1) * LINE_SPACING;
-         int centerX = width / 2;
-         int y = tellus$getTextY(height, totalHeight);
-
-         for (FormattedCharSequence line : lines) {
-            int lineWidth = font.width(line);
-            int x = centerX - lineWidth / 2;
-            graphics.drawString(font, line, x, y, TEXT_COLOR, true);
-            y += font.lineHeight + LINE_SPACING;
-         }
+      int centerY = height / 2;
+      int chunkDisplayRadius = this.progressListener.getDiameter();
+      int chunkDisplayCenterY = centerY + 30;
+      int progressTextY = centerY - font.lineHeight / 2 - 30;
+      int loadingWidgetTop = Math.min(progressTextY, chunkDisplayCenterY - chunkDisplayRadius);
+      int loadingWidgetBottom = chunkDisplayCenterY + chunkDisplayRadius;
+      AttributionRenderPlan plan = tellus$createAttributionPlan(
+         font, width, height, loadingWidgetTop, loadingWidgetBottom
+      );
+      if (plan != null) {
+         tellus$drawAttributions(graphics, font, width / 2, plan);
       }
    }
 
-   private static int tellus$getTextY(int height, int totalHeight) {
-      int centerY = height / 2;
-      int bottomY = height - totalHeight - TEXT_PADDING;
-      int belowLoadingWidgetY = centerY + LOADING_WIDGET_HALF_HEIGHT + LOADING_WIDGET_TEXT_GAP;
-      if (belowLoadingWidgetY <= bottomY) {
-         return belowLoadingWidgetY;
-      }
+   private static AttributionRenderPlan tellus$createAttributionPlan(
+      Font font, int width, int height, int loadingWidgetTop, int loadingWidgetBottom
+   ) {
+      int renderedWrapWidth = Math.max(1, Math.min(MAX_TEXT_WIDTH, width - TEXT_PADDING * 2));
+      for (float scale : TEXT_SCALES) {
+         int logicalWrapWidth = Math.max(1, (int)Math.floor(renderedWrapWidth / scale));
+         List<FormattedCharSequence> lines = new ArrayList<>();
+         List<Integer> groupLineCounts = new ArrayList<>();
+         for (Component contribution : CONTRIBUTIONS) {
+            int firstLine = lines.size();
+            for (FormattedCharSequence wrapped : font.split(contribution, logicalWrapWidth)) {
+               lines.add(Objects.requireNonNull(wrapped, "wrappedLine"));
+            }
+            groupLineCounts.add(lines.size() - firstLine);
+         }
 
-      int aboveLoadingWidgetY = centerY - LOADING_WIDGET_HALF_HEIGHT - LOADING_WIDGET_TEXT_GAP - totalHeight;
-      return Math.max(TEXT_PADDING, Math.min(aboveLoadingWidgetY, bottomY));
+         LoadingAttributionLayout.Layout layout = LoadingAttributionLayout.arrange(
+               groupLineCounts,
+               font.lineHeight * scale,
+               LINE_SPACING * scale,
+               TEXT_PADDING,
+               loadingWidgetTop - LOADING_WIDGET_TEXT_GAP,
+               loadingWidgetBottom + LOADING_WIDGET_TEXT_GAP,
+               height - TEXT_PADDING,
+               true
+            )
+            .orElseGet(
+               () -> LoadingAttributionLayout.arrange(
+                     groupLineCounts,
+                     font.lineHeight * scale,
+                     LINE_SPACING * scale,
+                     TEXT_PADDING,
+                     loadingWidgetTop - LOADING_WIDGET_TEXT_GAP,
+                     loadingWidgetBottom + LOADING_WIDGET_TEXT_GAP,
+                     height - TEXT_PADDING,
+                     false
+                  )
+                  .orElse(null)
+            );
+         if (layout != null) {
+            return new AttributionRenderPlan(lines, layout, scale);
+         }
+      }
+      return null;
+   }
+
+   private static void tellus$drawAttributions(
+      GuiGraphics graphics, Font font, int centerX, AttributionRenderPlan plan
+   ) {
+      for (LoadingAttributionLayout.Block block : plan.layout().blocks()) {
+         graphics.pose().pushPose();
+         graphics.pose().translate(centerX, block.y(), 0.0F);
+         graphics.pose().scale(plan.scale(), plan.scale(), 1.0F);
+         int y = 0;
+         int endLine = block.firstLine() + block.lineCount();
+         for (int lineIndex = block.firstLine(); lineIndex < endLine; lineIndex++) {
+            FormattedCharSequence line = plan.lines().get(lineIndex);
+            graphics.drawString(font, line, -font.width(line) / 2, y, TEXT_COLOR, true);
+            y += font.lineHeight + LINE_SPACING;
+         }
+         graphics.pose().popPose();
+      }
    }
 
    private static boolean tellus$isLoadingTellusWorld() {
@@ -100,5 +150,10 @@ public abstract class LevelLoadingScreenMixin {
 
       ServerLevel overworld = server.getLevel(Level.OVERWORLD);
       return overworld != null && overworld.getChunkSource().getGenerator() instanceof EarthChunkGenerator;
+   }
+
+   private record AttributionRenderPlan(
+      List<FormattedCharSequence> lines, LoadingAttributionLayout.Layout layout, float scale
+   ) {
    }
 }

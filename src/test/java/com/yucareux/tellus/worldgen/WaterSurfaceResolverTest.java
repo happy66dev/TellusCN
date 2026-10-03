@@ -176,10 +176,13 @@ class WaterSurfaceResolverTest {
    }
 
    @Test
-   void appliesTerrainFollowingModeOnlyToComponentsMadeEntirelyFromLines() {
+   void appliesTerrainFollowingModeToExclusiveLineCellsInsideMixedComponents() {
       assertTrue(WaterSurfaceResolver.isLineOnlyWaterComponent(20, 20, 20));
       assertFalse(WaterSurfaceResolver.isLineOnlyWaterComponent(20, 19, 20));
       assertFalse(WaterSurfaceResolver.isLineOnlyWaterComponent(20, 20, 19));
+      assertTrue(WaterSurfaceResolver.shouldUseDirectLineWaterCell(true, false));
+      assertFalse(WaterSurfaceResolver.shouldUseDirectLineWaterCell(true, true));
+      assertFalse(WaterSurfaceResolver.shouldUseDirectLineWaterCell(false, true));
       assertEquals(90, WaterSurfaceResolver.directLineRiverWaterSurface(90));
       assertEquals(89, WaterSurfaceResolver.directLineRiverTerrainSurface(90));
    }

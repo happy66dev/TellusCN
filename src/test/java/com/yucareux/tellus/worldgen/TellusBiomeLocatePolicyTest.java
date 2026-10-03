@@ -10,17 +10,17 @@ import org.junit.jupiter.api.Test;
 
 class TellusBiomeLocatePolicyTest {
    @Test
-   void samplesEveryEligibleQuartLayerWithoutCrossingVanillaDepthLimit() {
+   void samplesEveryEligibleQuartLayerAcrossTheConfiguredShell() {
       int surfaceY = 130;
       List<Integer> samples = TellusBiomeLocatePolicy.caveBiomeQuartYs(surfaceY, 512, 64);
 
       assertFalse(samples.isEmpty());
-      assertEquals(14, samples.size());
+      assertEquals(126, samples.size());
       for (int y : samples) {
          int depth = surfaceY - y;
          assertEquals(0, Math.floorMod(y, 4));
          assertTrue(TellusCaveBiomeDepthPolicy.isCaveBiomeDepth(depth, 512));
-         assertTrue(depth < UndergroundGenerationDepthPolicy.MAX_DEPTH_BELOW_SURFACE);
+         assertTrue(depth < 512);
       }
    }
 

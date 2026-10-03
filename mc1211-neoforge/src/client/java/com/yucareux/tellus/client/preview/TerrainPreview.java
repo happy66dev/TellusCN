@@ -172,6 +172,7 @@ public final class TerrainPreview implements AutoCloseable {
    private TerrainPreview.PreviewMesh uploadedPreviewMesh;
    private VertexBuffer terrainVertexBuffer;
    private VertexBuffer detailVertexBuffer;
+   private VertexBuffer cloudVertexBuffer;
 
    public TerrainPreview() {
       this.executor = Executors.newSingleThreadExecutor(new TerrainPreview.PreviewThreadFactory());
@@ -241,7 +242,8 @@ public final class TerrainPreview implements AutoCloseable {
       float rotationX,
       float rotationY,
       float cameraDistance,
-      TerrainPreviewWidget.RenderMode renderMode
+      TerrainPreviewWidget.RenderMode renderMode,
+      boolean cloudsVisible
    ) {
       if (width <= 0 || height <= 0) {
          return;
@@ -258,6 +260,7 @@ public final class TerrainPreview implements AutoCloseable {
       if (vertexBuffer == null || vertexBuffer.isInvalid()) {
          return;
       }
+      VertexBuffer clouds = cloudsVisible ? this.previewCloudVertexBuffer(preview) : null;
 
       Matrix4f modelView = buildModelView(rotationX, rotationY, cameraDistance);
       Matrix4f projection = buildProjection(width, height);
@@ -282,6 +285,10 @@ public final class TerrainPreview implements AutoCloseable {
          RenderSystem.defaultBlendFunc();
          vertexBuffer.bind();
          vertexBuffer.drawWithShader(modelView, projection, Objects.requireNonNull(GameRenderer.getPositionColorShader(), "positionColorShader"));
+         if (clouds != null && !clouds.isInvalid()) {
+            clouds.bind();
+            clouds.drawWithShader(modelView, projection, Objects.requireNonNull(GameRenderer.getPositionColorShader(), "positionColorShader"));
+         }
       } finally {
          VertexBuffer.unbind();
          RenderSystem.disableBlend();
@@ -364,7 +371,23 @@ public final class TerrainPreview implements AutoCloseable {
    }
 
    private static VertexBuffer buildPreviewVertexBuffer(TerrainPreview.PreviewMesh mesh, TerrainPreviewWidget.RenderMode renderMode) {
-      TerrainPreview.PreviewGeometry geometry = mesh.geometryFor(renderMode);
+      return buildPreviewVertexBuffer(mesh.geometryFor(renderMode));
+   }
+
+   private VertexBuffer previewCloudVertexBuffer(TerrainPreview.PreviewMesh mesh) {
+      if (this.uploadedPreviewMesh != mesh) {
+         this.releasePreviewVertexBuffers();
+         this.uploadedPreviewMesh = mesh;
+      }
+
+      if (this.cloudVertexBuffer == null) {
+         this.cloudVertexBuffer = buildPreviewVertexBuffer(mesh.cloudGeometry());
+      }
+
+      return this.cloudVertexBuffer;
+   }
+
+   private static VertexBuffer buildPreviewVertexBuffer(TerrainPreview.PreviewGeometry geometry) {
       if (geometry.vertexCount() == 0) {
          return null;
       }
@@ -395,10 +418,12 @@ public final class TerrainPreview implements AutoCloseable {
    private void releasePreviewVertexBuffers() {
       VertexBuffer terrain = this.terrainVertexBuffer;
       VertexBuffer detail = this.detailVertexBuffer;
+      VertexBuffer clouds = this.cloudVertexBuffer;
       this.terrainVertexBuffer = null;
       this.detailVertexBuffer = null;
+      this.cloudVertexBuffer = null;
       this.uploadedPreviewMesh = null;
-      if (terrain == null && detail == null) {
+      if (terrain == null && detail == null && clouds == null) {
          return;
       }
 
@@ -409,6 +434,10 @@ public final class TerrainPreview implements AutoCloseable {
 
          if (detail != null && detail != terrain) {
             detail.close();
+         }
+
+         if (clouds != null && clouds != terrain && clouds != detail) {
+            clouds.close();
          }
       };
       if (RenderSystem.isOnRenderThread()) {
@@ -733,6 +762,7 @@ public final class TerrainPreview implements AutoCloseable {
       float[] detailHeights = heights.clone();
       int[] terrainColors = new int[size * size];
       int[] detailColors = new int[size * size];
+      boolean[] desertMask = new boolean[size * size];
       boolean[] badlandsMask = new boolean[size * size];
       float[] detailHeightOffsets = new float[size * size];
       int[] waterColors = new int[size * size];
@@ -776,6 +806,7 @@ public final class TerrainPreview implements AutoCloseable {
                climateCodes[climateIdx],
                previewRegionalReliefMeters(elevations, size, idx, step, settings.worldScale())
             );
+            boolean desert = !badlands && isPreviewDesert(rawCoverClass, visualCoverClass, climateCodes[climateIdx]);
             int color = colorForPreview(
                rawCoverClass,
                visualCoverClass,
@@ -792,12 +823,14 @@ public final class TerrainPreview implements AutoCloseable {
                !waterPreviewEnabled,
                settings.enableWater(),
                false,
+               desert,
                badlands,
                (int)Math.round(blockX),
                (int)Math.round(blockZ)
             );
             terrainColors[idx] = color;
             detailColors[idx] = color;
+            desertMask[idx] = desert;
             int surfaceCoverClass = MountainSurfaceRules.resolveSurfaceCoverClass(rawCoverClass, visualCoverClass);
             double waterDepth = previewWaterDepthBlocks(
                surfaceCoverClass,
@@ -949,6 +982,7 @@ public final class TerrainPreview implements AutoCloseable {
          visualCoverClasses,
          climateGroups,
          climateBasedBuiltUpCoverClasses,
+         desertMask,
          badlandsMask,
          heights,
          center,
@@ -1063,6 +1097,7 @@ public final class TerrainPreview implements AutoCloseable {
                !waterPreviewEnabled,
                settings.enableWater(),
                false,
+               snapshot.desertMask()[idx],
                snapshot.badlandsMask()[idx],
                (int)Math.round(blockX),
                (int)Math.round(blockZ)
@@ -1381,6 +1416,7 @@ public final class TerrainPreview implements AutoCloseable {
    private static TerrainPreview.PreviewMesh preparePreviewMesh(TerrainPreview.PreviewMesh mesh) {
       mesh.geometryFor(TerrainPreviewWidget.RenderMode.TERRAIN_ONLY);
       mesh.geometryFor(TerrainPreviewWidget.RenderMode.FULL_DETAIL);
+      mesh.cloudGeometry();
       return mesh;
    }
 
@@ -3016,6 +3052,7 @@ public final class TerrainPreview implements AutoCloseable {
       boolean fallbackInlandWaterEnabled,
       boolean flattenWaterColor,
       boolean remaSnowTerrain,
+      boolean desert,
       boolean badlands,
       int worldX,
       int worldZ
@@ -3034,6 +3071,10 @@ public final class TerrainPreview implements AutoCloseable {
          }
          if (DeepslateSlopePolicy.shouldCover(worldX, worldZ, demSlopeDegrees)) {
             return PREVIEW_DEEPSLATE_COLOR;
+         }
+         if (MountainSurfaceRules.preservesBiomeSurfacePalette(desert, badlands)) {
+            int base = baseColorForCover(MountainSurfaceRules.ESA_BARE, elevationMeters);
+            return applyClimateTint(base, climateGroup, MountainSurfaceRules.ESA_BARE);
          }
          if (snowSource) {
             return mountainPreviewColor(MountainSurfaceRules.ApproximatePalette.STONE);
@@ -3062,6 +3103,16 @@ public final class TerrainPreview implements AutoCloseable {
             return applyRockTint(tinted, slope);
          }
       }
+   }
+
+   private static boolean isPreviewDesert(int terrainCoverClass, int visualCoverClass, String koppen) {
+      int surfaceCoverClass = MountainSurfaceRules.resolveSurfaceCoverClass(terrainCoverClass, visualCoverClass);
+      var biomeKey = BiomeClassification.findBiomeKey(surfaceCoverClass, koppen);
+      if (biomeKey == null) {
+         biomeKey = BiomeClassification.findFallbackKey(surfaceCoverClass);
+      }
+
+      return Biomes.DESERT.equals(biomeKey);
    }
 
    private static boolean isPreviewBadlands(int terrainCoverClass, int visualCoverClass, String koppen, double regionalReliefMeters) {
@@ -3485,6 +3536,7 @@ public final class TerrainPreview implements AutoCloseable {
       int[] visualCoverClasses,
       byte[] climateGroups,
       byte[] climateBasedBuiltUpCoverClasses,
+      boolean[] desertMask,
       boolean[] badlandsMask,
       float[] heights,
       float heightCenter,
@@ -3556,6 +3608,7 @@ public final class TerrainPreview implements AutoCloseable {
       private final TerrainPreview.PreviewInfo info;
       private volatile TerrainPreview.PreviewGeometry terrainGeometry;
       private volatile TerrainPreview.PreviewGeometry detailGeometry;
+      private volatile TerrainPreview.PreviewGeometry clouds;
 
       private PreviewMesh(
          int size,
@@ -3610,6 +3663,23 @@ public final class TerrainPreview implements AutoCloseable {
                } else {
                   this.terrainGeometry = cached;
                }
+            }
+         }
+
+         return cached;
+      }
+
+      private TerrainPreview.PreviewGeometry cloudGeometry() {
+         TerrainPreview.PreviewGeometry cached = this.clouds;
+         if (cached != null) {
+            return cached;
+         }
+
+         synchronized (this) {
+            cached = this.clouds;
+            if (cached == null) {
+               cached = buildPreviewCloudGeometry(this);
+               this.clouds = cached;
             }
          }
 
@@ -4043,13 +4113,26 @@ public final class TerrainPreview implements AutoCloseable {
 
       addPreviewSolidTerrainVolume(builder, mesh.axis, cellHeights, cellCount, stride, verticalUnit);
       addPreviewWaterVolumeSides(builder, mesh.axis, cellHeights, surfaceHeights, cellColors, waterCells, cellCount, stride, verticalUnit);
-      float cloudBase = previewCloudBaseHeight(mesh, verticalUnit);
-      addPreviewClouds(builder, cloudBase, verticalUnit);
 
       if (renderMode == TerrainPreviewWidget.RenderMode.FULL_DETAIL) {
          addPreviewTreeGeometry(builder, mesh, cellHeights, cellCount, cellSize, verticalUnit);
       }
 
+      return builder.build();
+   }
+
+   private static TerrainPreview.PreviewGeometry buildPreviewCloudGeometry(TerrainPreview.PreviewMesh mesh) {
+      int stride = Math.max(1, mesh.granularity);
+      int cellCount = (mesh.size - 1) / stride;
+      if (cellCount <= 0) {
+         return new TerrainPreview.PreviewGeometry(new float[0], new int[0], 0);
+      }
+
+      float cellSize = Math.abs(mesh.axis[stride] - mesh.axis[0]);
+      float verticalUnit = Math.max(1.0E-5F, cellSize * PREVIEW_VERTICAL_CELL_RATIO);
+      TerrainPreview.PreviewGeometryBuilder builder = new TerrainPreview.PreviewGeometryBuilder(2048);
+      float cloudBase = previewCloudBaseHeight(mesh, verticalUnit);
+      addPreviewClouds(builder, cloudBase, verticalUnit);
       return builder.build();
    }
 

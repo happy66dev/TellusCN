@@ -29,6 +29,7 @@ public record EarthGeneratorSettings(
    boolean shorelineBlendCliffLimit,
    boolean caveGeneration,
    boolean oreDistribution,
+   boolean geologicalStonePatches,
    boolean lavaPools,
    boolean addStrongholds,
    boolean addVillages,
@@ -139,6 +140,7 @@ public record EarthGeneratorSettings(
       false,
       false,
       false,
+      false,
       FIXED_DH_OSM_FEATURES,
       FIXED_DH_OSM_ROAD_MAX_DETAIL,
       FIXED_DH_OSM_BUILDING_MAX_DETAIL,
@@ -173,6 +175,10 @@ public record EarthGeneratorSettings(
             Codec.BOOL.optionalFieldOf("large_caves").forGetter(EarthGeneratorSettings.BaseToggles::largeCaves),
             Codec.BOOL.optionalFieldOf("canyon_carvers").forGetter(EarthGeneratorSettings.BaseToggles::canyonCarvers),
             Codec.BOOL.fieldOf("ore_distribution").orElse(DEFAULT.oreDistribution()).forGetter(EarthGeneratorSettings.BaseToggles::oreDistribution),
+            Codec.BOOL
+               .fieldOf("geological_stone_patches")
+               .orElse(false)
+               .forGetter(EarthGeneratorSettings.BaseToggles::geologicalStonePatches),
             Codec.BOOL.fieldOf("lava_pools").orElse(DEFAULT.lavaPools()).forGetter(EarthGeneratorSettings.BaseToggles::lavaPools)
          )
          .apply(instance, EarthGeneratorSettings::createBaseToggles)
@@ -212,6 +218,7 @@ public record EarthGeneratorSettings(
                   Optional.empty(),
                   Optional.empty(),
                   settings.oreDistribution(),
+                  settings.geologicalStonePatches(),
                   settings.lavaPools()
                )
             )
@@ -232,6 +239,7 @@ public record EarthGeneratorSettings(
                shorelineBlendCliffLimit,
                toggles.resolveCaveGeneration(),
                toggles.oreDistribution(),
+               toggles.geologicalStonePatches(),
                toggles.lavaPools()
             )
          )
@@ -609,6 +617,7 @@ public record EarthGeneratorSettings(
       boolean shorelineBlendCliffLimit,
       boolean caveGeneration,
       boolean oreDistribution,
+      boolean geologicalStonePatches,
       boolean lavaPools,
       boolean addStrongholds,
       boolean addVillages,
@@ -688,6 +697,7 @@ public record EarthGeneratorSettings(
       this.shorelineBlendCliffLimit = shorelineBlendCliffLimit;
       this.caveGeneration = caveGeneration;
       this.oreDistribution = oreDistribution;
+      this.geologicalStonePatches = geologicalStonePatches;
       this.lavaPools = lavaPools;
       this.addStrongholds = addStrongholds;
       this.addVillages = addVillages;
@@ -822,6 +832,7 @@ public record EarthGeneratorSettings(
       Boolean shorelineBlendCliffLimit,
       Boolean caveGeneration,
       Boolean oreDistribution,
+      Boolean geologicalStonePatches,
       Boolean lavaPools
    ) {
       int resolvedHeightOffset = Objects.requireNonNull(heightOffset, "heightOffset");
@@ -840,6 +851,7 @@ public record EarthGeneratorSettings(
          Objects.requireNonNull(shorelineBlendCliffLimit, "shorelineBlendCliffLimit"),
          Objects.requireNonNull(caveGeneration, "caveGeneration"),
          Objects.requireNonNull(oreDistribution, "oreDistribution"),
+         Objects.requireNonNull(geologicalStonePatches, "geologicalStonePatches"),
          Objects.requireNonNull(lavaPools, "lavaPools"),
          DEFAULT.distantHorizonsWaterResolver(),
          DEFAULT.distantHorizonsOsmFeatures(),
@@ -860,6 +872,7 @@ public record EarthGeneratorSettings(
       Optional<Boolean> largeCaves,
       Optional<Boolean> canyonCarvers,
       Boolean oreDistribution,
+      Boolean geologicalStonePatches,
       Boolean lavaPools
    ) {
       return new EarthGeneratorSettings.BaseToggles(
@@ -868,6 +881,7 @@ public record EarthGeneratorSettings(
          largeCaves,
          canyonCarvers,
          Objects.requireNonNull(oreDistribution, "oreDistribution"),
+         Objects.requireNonNull(geologicalStonePatches, "geologicalStonePatches"),
          Objects.requireNonNull(lavaPools, "lavaPools")
       );
    }
@@ -974,7 +988,7 @@ public record EarthGeneratorSettings(
       return new EarthGeneratorSettings(
          this.worldScale, this.terrestrialHeightScale, this.oceanicHeightScale, this.heightOffset,
          this.spawnLatitude, this.spawnLongitude, this.minAltitude, this.maxAltitude, this.riverLakeShorelineBlend,
-         this.oceanShorelineBlend, this.shorelineBlendCliffLimit, this.caveGeneration, this.oreDistribution, this.lavaPools,
+         this.oceanShorelineBlend, this.shorelineBlendCliffLimit, this.caveGeneration, this.oreDistribution, this.geologicalStonePatches, this.lavaPools,
          this.addStrongholds, this.addVillages, this.addMineshafts, this.addOceanMonuments, this.addWoodlandMansions,
          this.addDesertTemples, this.addJungleTemples, this.addPillagerOutposts, this.addRuinedPortals, this.addShipwrecks,
          this.addOceanRuins, this.addBuriedTreasure, this.addIgloos, this.addWitchHuts, this.addAncientCities,
@@ -993,7 +1007,7 @@ public record EarthGeneratorSettings(
       return new EarthGeneratorSettings(
          this.worldScale, this.terrestrialHeightScale, this.oceanicHeightScale, this.heightOffset,
          this.spawnLatitude, this.spawnLongitude, this.minAltitude, this.maxAltitude, this.riverLakeShorelineBlend,
-         this.oceanShorelineBlend, this.shorelineBlendCliffLimit, this.caveGeneration, this.oreDistribution, this.lavaPools,
+         this.oceanShorelineBlend, this.shorelineBlendCliffLimit, this.caveGeneration, this.oreDistribution, this.geologicalStonePatches, this.lavaPools,
          this.addStrongholds, this.addVillages, this.addMineshafts, this.addOceanMonuments, this.addWoodlandMansions,
          this.addDesertTemples, this.addJungleTemples, this.addPillagerOutposts, this.addRuinedPortals, this.addShipwrecks,
          this.addOceanRuins, this.addBuriedTreasure, this.addIgloos, this.addWitchHuts, this.addAncientCities,
@@ -1035,6 +1049,7 @@ public record EarthGeneratorSettings(
          this.shorelineBlendCliffLimit,
          this.caveGeneration,
          this.oreDistribution,
+         this.geologicalStonePatches,
          this.lavaPools,
          structures.addStrongholds(),
          structures.addVillages(),
@@ -1112,6 +1127,7 @@ public record EarthGeneratorSettings(
          this.shorelineBlendCliffLimit,
          this.caveGeneration,
          this.oreDistribution,
+         this.geologicalStonePatches,
          this.lavaPools,
          this.addStrongholds,
          this.addVillages,
@@ -1177,6 +1193,7 @@ public record EarthGeneratorSettings(
          this.shorelineBlendCliffLimit,
          this.caveGeneration,
          this.oreDistribution,
+         this.geologicalStonePatches,
          this.lavaPools,
          this.addStrongholds,
          this.addVillages,
@@ -1242,6 +1259,7 @@ public record EarthGeneratorSettings(
          this.shorelineBlendCliffLimit,
          this.caveGeneration,
          this.oreDistribution,
+         this.geologicalStonePatches,
          this.lavaPools,
          this.addStrongholds,
          this.addVillages,
@@ -1307,6 +1325,7 @@ public record EarthGeneratorSettings(
          this.shorelineBlendCliffLimit,
          this.caveGeneration,
          this.oreDistribution,
+         this.geologicalStonePatches,
          this.lavaPools,
          this.addStrongholds,
          this.addVillages,
@@ -1372,6 +1391,7 @@ public record EarthGeneratorSettings(
          this.shorelineBlendCliffLimit,
          this.caveGeneration,
          this.oreDistribution,
+         this.geologicalStonePatches,
          this.lavaPools,
          this.addStrongholds,
          this.addVillages,
@@ -1437,6 +1457,7 @@ public record EarthGeneratorSettings(
          this.shorelineBlendCliffLimit,
          this.caveGeneration,
          this.oreDistribution,
+         this.geologicalStonePatches,
          this.lavaPools,
          this.addStrongholds,
          this.addVillages,
@@ -1502,6 +1523,7 @@ public record EarthGeneratorSettings(
          this.shorelineBlendCliffLimit,
          this.caveGeneration,
          this.oreDistribution,
+         this.geologicalStonePatches,
          this.lavaPools,
          this.addStrongholds,
          this.addVillages,
@@ -1567,6 +1589,7 @@ public record EarthGeneratorSettings(
          this.shorelineBlendCliffLimit,
          this.caveGeneration,
          this.oreDistribution,
+         this.geologicalStonePatches,
          this.lavaPools,
          this.addStrongholds,
          this.addVillages,
@@ -1632,6 +1655,7 @@ public record EarthGeneratorSettings(
          this.shorelineBlendCliffLimit,
          this.caveGeneration,
          this.oreDistribution,
+         this.geologicalStonePatches,
          this.lavaPools,
          this.addStrongholds,
          this.addVillages,
@@ -1697,6 +1721,7 @@ public record EarthGeneratorSettings(
          this.shorelineBlendCliffLimit,
          this.caveGeneration,
          this.oreDistribution,
+         this.geologicalStonePatches,
          this.lavaPools,
          this.addStrongholds,
          this.addVillages,
@@ -1762,6 +1787,7 @@ public record EarthGeneratorSettings(
          this.shorelineBlendCliffLimit,
          this.caveGeneration,
          this.oreDistribution,
+         this.geologicalStonePatches,
          this.lavaPools,
          this.addStrongholds,
          this.addVillages,
@@ -1845,6 +1871,7 @@ public record EarthGeneratorSettings(
          this.shorelineBlendCliffLimit,
          this.caveGeneration,
          this.oreDistribution,
+         this.geologicalStonePatches,
          this.lavaPools,
          this.addStrongholds,
          this.addVillages,
@@ -1941,6 +1968,7 @@ public record EarthGeneratorSettings(
          this.shorelineBlendCliffLimit,
          this.caveGeneration,
          this.oreDistribution,
+         this.geologicalStonePatches,
          this.lavaPools,
          this.addStrongholds,
          this.addVillages,
@@ -2099,6 +2127,7 @@ public record EarthGeneratorSettings(
       Optional<Boolean> largeCaves,
       Optional<Boolean> canyonCarvers,
       boolean oreDistribution,
+      boolean geologicalStonePatches,
       boolean lavaPools
    ) {
       private boolean resolveCaveGeneration() {
@@ -2278,6 +2307,7 @@ public record EarthGeneratorSettings(
       boolean shorelineBlendCliffLimit,
       boolean caveGeneration,
       boolean oreDistribution,
+      boolean geologicalStonePatches,
       boolean lavaPools,
       boolean distantHorizonsWaterResolver,
       boolean distantHorizonsOsmFeatures,
@@ -2305,6 +2335,7 @@ public record EarthGeneratorSettings(
             settings.shorelineBlendCliffLimit(),
             settings.caveGeneration(),
             settings.oreDistribution(),
+            settings.geologicalStonePatches(),
             settings.lavaPools(),
             settings.distantHorizonsWaterResolver(),
             settings.distantHorizonsOsmFeatures(),
@@ -2334,6 +2365,7 @@ public record EarthGeneratorSettings(
             this.shorelineBlendCliffLimit,
             this.caveGeneration,
             this.oreDistribution,
+            this.geologicalStonePatches,
             this.lavaPools,
             enabled,
             this.distantHorizonsOsmFeatures,
@@ -2363,6 +2395,7 @@ public record EarthGeneratorSettings(
             this.shorelineBlendCliffLimit,
             this.caveGeneration,
             this.oreDistribution,
+            this.geologicalStonePatches,
             this.lavaPools,
             this.distantHorizonsWaterResolver,
             enabled,
@@ -2392,6 +2425,7 @@ public record EarthGeneratorSettings(
             this.shorelineBlendCliffLimit,
             this.caveGeneration,
             this.oreDistribution,
+            this.geologicalStonePatches,
             this.lavaPools,
             this.distantHorizonsWaterResolver,
             this.distantHorizonsOsmFeatures,
@@ -2421,6 +2455,7 @@ public record EarthGeneratorSettings(
             this.shorelineBlendCliffLimit,
             this.caveGeneration,
             this.oreDistribution,
+            this.geologicalStonePatches,
             this.lavaPools,
             this.distantHorizonsWaterResolver,
             this.distantHorizonsOsmFeatures,
@@ -2450,6 +2485,7 @@ public record EarthGeneratorSettings(
             this.shorelineBlendCliffLimit,
             this.caveGeneration,
             this.oreDistribution,
+            this.geologicalStonePatches,
             this.lavaPools,
             this.distantHorizonsWaterResolver,
             this.distantHorizonsOsmFeatures,
@@ -2479,6 +2515,7 @@ public record EarthGeneratorSettings(
             this.shorelineBlendCliffLimit,
             this.caveGeneration,
             this.oreDistribution,
+            this.geologicalStonePatches,
             this.lavaPools,
             this.distantHorizonsWaterResolver,
             this.distantHorizonsOsmFeatures,
@@ -2508,6 +2545,7 @@ public record EarthGeneratorSettings(
             this.shorelineBlendCliffLimit,
             this.caveGeneration,
             this.oreDistribution,
+            this.geologicalStonePatches,
             this.lavaPools,
             this.distantHorizonsWaterResolver,
             this.distantHorizonsOsmFeatures,
@@ -2537,6 +2575,7 @@ public record EarthGeneratorSettings(
             this.shorelineBlendCliffLimit,
             this.caveGeneration,
             this.oreDistribution,
+            this.geologicalStonePatches,
             this.lavaPools,
             this.distantHorizonsWaterResolver,
             this.distantHorizonsOsmFeatures,
@@ -2566,6 +2605,7 @@ public record EarthGeneratorSettings(
             this.shorelineBlendCliffLimit,
             this.caveGeneration,
             this.oreDistribution,
+            this.geologicalStonePatches,
             this.lavaPools,
             this.distantHorizonsWaterResolver,
             this.distantHorizonsOsmFeatures,
@@ -2595,6 +2635,7 @@ public record EarthGeneratorSettings(
             this.shorelineBlendCliffLimit,
             this.caveGeneration,
             this.oreDistribution,
+            this.geologicalStonePatches,
             this.lavaPools,
             this.distantHorizonsWaterResolver,
             this.distantHorizonsOsmFeatures,
@@ -2624,6 +2665,7 @@ public record EarthGeneratorSettings(
             this.shorelineBlendCliffLimit,
             this.caveGeneration,
             this.oreDistribution,
+            this.geologicalStonePatches,
             this.lavaPools,
             EarthGeneratorSettings.DEFAULT.addStrongholds(),
             EarthGeneratorSettings.DEFAULT.addVillages(),

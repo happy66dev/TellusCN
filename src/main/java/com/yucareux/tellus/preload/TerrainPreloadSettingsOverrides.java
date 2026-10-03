@@ -11,6 +11,7 @@ public record TerrainPreloadSettingsOverrides(
    double worldScale,
    boolean caveGeneration,
    boolean oreDistribution,
+   boolean geologicalStonePatches,
    boolean addStructures,
    boolean enableRoads,
    boolean enableBuildings,
@@ -25,6 +26,7 @@ public record TerrainPreloadSettingsOverrides(
          settings.worldScale(),
          settings.caveGeneration(),
          settings.oreDistribution(),
+         settings.geologicalStonePatches(),
          structuresEnabled(settings),
          settings.enableRoads(),
          settings.enableBuildings(),
@@ -57,6 +59,7 @@ public record TerrainPreloadSettingsOverrides(
       object.addProperty("spawn_longitude", safeSpawnLongitude);
       object.addProperty("cave_generation", this.caveGeneration);
       object.addProperty("ore_distribution", this.oreDistribution);
+      object.addProperty("geological_stone_patches", this.geologicalStonePatches);
       object.addProperty("enable_roads", this.enableRoads);
       object.addProperty("enable_buildings", this.enableBuildings);
       object.addProperty("enable_water", this.enableWater);
@@ -105,6 +108,7 @@ public record TerrainPreloadSettingsOverrides(
          value,
          this.caveGeneration,
          this.oreDistribution,
+         this.geologicalStonePatches,
          this.addStructures,
          this.enableRoads,
          this.enableBuildings,
@@ -120,6 +124,7 @@ public record TerrainPreloadSettingsOverrides(
          this.worldScale,
          value,
          this.oreDistribution,
+         this.geologicalStonePatches,
          this.addStructures,
          this.enableRoads,
          this.enableBuildings,
@@ -134,6 +139,23 @@ public record TerrainPreloadSettingsOverrides(
       return new TerrainPreloadSettingsOverrides(
          this.worldScale,
          this.caveGeneration,
+         value,
+         this.geologicalStonePatches,
+         this.addStructures,
+         this.enableRoads,
+         this.enableBuildings,
+         this.enableWater,
+         this.thinShellTerrain,
+         this.experimentalIncreaseHeight,
+         this.undergroundDepth
+      );
+   }
+
+   public TerrainPreloadSettingsOverrides withGeologicalStonePatches(boolean value) {
+      return new TerrainPreloadSettingsOverrides(
+         this.worldScale,
+         this.caveGeneration,
+         this.oreDistribution,
          value,
          this.addStructures,
          this.enableRoads,
@@ -150,6 +172,7 @@ public record TerrainPreloadSettingsOverrides(
          this.worldScale,
          this.caveGeneration,
          this.oreDistribution,
+         this.geologicalStonePatches,
          value,
          this.enableRoads,
          this.enableBuildings,
@@ -165,6 +188,7 @@ public record TerrainPreloadSettingsOverrides(
          this.worldScale,
          this.caveGeneration,
          this.oreDistribution,
+         this.geologicalStonePatches,
          this.addStructures,
          value,
          this.enableBuildings,
@@ -180,6 +204,7 @@ public record TerrainPreloadSettingsOverrides(
          this.worldScale,
          this.caveGeneration,
          this.oreDistribution,
+         this.geologicalStonePatches,
          this.addStructures,
          this.enableRoads,
          value,
@@ -195,6 +220,7 @@ public record TerrainPreloadSettingsOverrides(
          this.worldScale,
          this.caveGeneration,
          this.oreDistribution,
+         this.geologicalStonePatches,
          this.addStructures,
          this.enableRoads,
          this.enableBuildings,
@@ -210,6 +236,7 @@ public record TerrainPreloadSettingsOverrides(
          this.worldScale,
          this.caveGeneration,
          this.oreDistribution,
+         this.geologicalStonePatches,
          this.addStructures,
          this.enableRoads,
          this.enableBuildings,
@@ -225,6 +252,7 @@ public record TerrainPreloadSettingsOverrides(
          this.worldScale,
          this.caveGeneration,
          this.oreDistribution,
+         this.geologicalStonePatches,
          this.addStructures,
          this.enableRoads,
          this.enableBuildings,
@@ -240,6 +268,7 @@ public record TerrainPreloadSettingsOverrides(
          this.worldScale,
          this.caveGeneration,
          this.oreDistribution,
+         this.geologicalStonePatches,
          this.addStructures,
          this.enableRoads,
          this.enableBuildings,

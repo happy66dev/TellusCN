@@ -388,6 +388,7 @@ public final class EarthChunkGenerator extends ChunkGenerator {
    private final ThreadLocal<EarthChunkGenerator.MountainSamplingCache> mountainSamplingCache = ThreadLocal.withInitial(
       () -> new MountainSamplingCache()
    );
+   private final SnowTransitionPolicy.SourceSampler snowTransitionSourceSampler = this::hasPersistentSnowSourceAt;
    private final ThreadLocal<Boolean> lodShorelineOverrideSuppressed = new ThreadLocal<>();
    private final Map<Long, EarthChunkGenerator.PreparedChunkBuildings> preparedChunkBuildings = new ConcurrentHashMap<>();
    private final Map<Long, EarthChunkGenerator.PreparedChunkRoadLights> preparedChunkRoadLights = new ConcurrentHashMap<>();
@@ -454,6 +455,28 @@ public final class EarthChunkGenerator extends ChunkGenerator {
 
    public long worldSeed() {
       return this.worldSeed;
+   }
+
+   public int getUndergroundPlacementSurfaceY(int blockX, int blockZ) {
+      EarthChunkGenerator.ChunkDecorationContext context = this.chunkDecorationContexts.get(
+         ChunkPos.pack(blockX >> 4, blockZ >> 4)
+      );
+      return UndergroundPlacementSurfacePolicy.resolve(
+         context != null ? context.terrainSurfaces() : null,
+         blockX,
+         blockZ,
+         this::sampleSurfaceHeight
+      );
+   }
+
+   public boolean isUndergroundStructureFeaturePlacementBlocked(int blockX, int blockY, int blockZ) {
+      EarthChunkGenerator.ChunkDecorationContext context = this.chunkDecorationContexts.get(
+         ChunkPos.pack(blockX >> 4, blockZ >> 4)
+      );
+      return context != null
+         && UndergroundStructureExclusion.blocksFeaturePlacement(
+            context.undergroundStructureExclusions(), blockX, blockY, blockZ
+         );
    }
 
 
@@ -675,16 +698,26 @@ public final class EarthChunkGenerator extends ChunkGenerator {
        WorldGenRegion level,
       long seed,
        RandomState random,
-       BiomeManager biomeManager,
+      BiomeManager biomeManager,
        StructureManager structures,
       ChunkAccess chunk
    ) {
+      List<UndergroundStructureExclusion.Box> structureExclusions =
+         this.collectUndergroundStructureExclusions(structures, chunk.getPos());
+      long chunkKey = ChunkPos.pack(chunk.getPos().x(), chunk.getPos().z());
+      this.chunkDecorationContexts.computeIfPresent(
+         chunkKey,
+         (ignored, context) -> context.withUndergroundStructureExclusions(structureExclusions)
+      );
+
       EarthChunkGenerator.FullChunkTrace timingTrace = EarthChunkGenerator.FullChunkPerf.beginTrace("carvers", chunk.getPos());
       try {
          long totalStartNs = beginFullChunkProfiling();
          boolean applyCaves = !SharedConstants.DEBUG_DISABLE_CARVERS && this.settings.caveGeneration();
          boolean applyOreVeins = this.settings.oreDistribution();
-         if ((applyCaves || applyOreVeins) && !this.settings.suppressesUndergroundGenerationForTerrainShell()) {
+         boolean applyGeologicalStonePatches = this.settings.geologicalStonePatches();
+         if ((applyCaves || applyOreVeins || applyGeologicalStonePatches)
+            && !this.settings.suppressesUndergroundGenerationForTerrainShell()) {
             long phaseStartNs = beginFullChunkProfiling();
             boolean[] waterFlags = new boolean[CHUNK_AREA];
             int[] terrainSurfaceYByColumn = new int[CHUNK_AREA];
@@ -746,10 +779,12 @@ public final class EarthChunkGenerator extends ChunkGenerator {
                   applyCaves,
                   this.settings.cavesReachSurface(),
                   applyOreVeins,
+                  applyGeologicalStonePatches,
                   terrainSurfaceYByColumn,
                   this::sampleSurfaceHeight,
                   floodGuardYByColumn,
-                  generationFloorYByColumn
+                  generationFloorYByColumn,
+                  structureExclusions
                );
             endFullChunkProfiling(EarthChunkGenerator.FullChunkPhase.CARVERS_RUNNER, phaseStartNs);
          }
@@ -3370,6 +3405,9 @@ public final class EarthChunkGenerator extends ChunkGenerator {
          return;
       }
 
+      record ProtectionVolume(BoundingBox box, boolean cavernEnvelope) {
+      }
+
       ChunkPos chunkPos = chunk.getPos();
       // The current chunk's references already include every structure intersecting it. Looking up
       // adjacent chunks can dereference a distant structure start outside WorldGenRegion's cache.
@@ -3379,7 +3417,24 @@ public final class EarthChunkGenerator extends ChunkGenerator {
          return;
       }
 
-      List<BoundingBox> structureCores = starts.stream().map(StructureStart::getBoundingBox).toList();
+      List<ProtectionVolume> protectionVolumes = new ArrayList<>();
+      List<BoundingBox> structureCores = new ArrayList<>();
+      for (StructureStart start : starts) {
+         boolean cavernEnvelope = UndergroundStructureProtection.usesBoundedCavernEnvelope(
+            start.getStructure().terrainAdaptation()
+         );
+         BoundingBox startBounds = start.getBoundingBox();
+         if (cavernEnvelope) {
+            for (StructurePiece piece : start.getPieces()) {
+               BoundingBox pieceBounds = piece.getBoundingBox();
+               protectionVolumes.add(new ProtectionVolume(pieceBounds, true));
+               structureCores.add(pieceBounds);
+            }
+         } else {
+            protectionVolumes.add(new ProtectionVolume(startBounds, false));
+            structureCores.add(startBounds);
+         }
+      }
       int chunkMinX = chunkPos.getMinBlockX();
       int chunkMinZ = chunkPos.getMinBlockZ();
       int chunkMaxX = chunkMinX + CHUNK_MASK;
@@ -3388,11 +3443,14 @@ public final class EarthChunkGenerator extends ChunkGenerator {
       int chunkMaxY = chunkMinY + chunk.getHeight() - 1;
       MutableBlockPos cursor = new MutableBlockPos();
 
-      for (BoundingBox box : structureCores) {
-         int expandedMinX = box.minX() - UndergroundStructureProtection.TOTAL_THICKNESS;
-         int expandedMaxX = box.maxX() + UndergroundStructureProtection.TOTAL_THICKNESS;
-         int expandedMinZ = box.minZ() - UndergroundStructureProtection.TOTAL_THICKNESS;
-         int expandedMaxZ = box.maxZ() + UndergroundStructureProtection.TOTAL_THICKNESS;
+      for (ProtectionVolume volume : protectionVolumes) {
+         BoundingBox box = volume.box();
+         int horizontalThickness =
+            UndergroundStructureProtection.horizontalProtectionThickness(volume.cavernEnvelope());
+         int expandedMinX = box.minX() - horizontalThickness;
+         int expandedMaxX = box.maxX() + horizontalThickness;
+         int expandedMinZ = box.minZ() - horizontalThickness;
+         int expandedMaxZ = box.maxZ() + horizontalThickness;
          int minX = Math.max(chunkMinX, expandedMinX);
          int maxX = Math.min(chunkMaxX, expandedMaxX);
          int minZ = Math.max(chunkMinZ, expandedMinZ);
@@ -3422,7 +3480,12 @@ public final class EarthChunkGenerator extends ChunkGenerator {
                   chunkMinY,
                   chunkMaxY
                );
-               int fillTopY = Math.min(terrainShellBottomY, chunkMaxY);
+               int fillTopY = Math.min(
+                  UndergroundStructureProtection.protectionFillTopY(
+                     terrainShellBottomY, box.minY(), volume.cavernEnvelope(), preserveStructureCores
+                  ),
+                  chunkMaxY
+               );
                if (protectionBottomY > fillTopY) {
                   continue;
                }
@@ -3440,9 +3503,12 @@ public final class EarthChunkGenerator extends ChunkGenerator {
                      protectionBottomY,
                      expandedMinZ,
                      expandedMaxX,
-                     expandedMaxZ
+                     expandedMaxZ,
+                     !volume.cavernEnvelope()
                   );
-                  BlockState state = bedrockSkin ? BEDROCK_STATE : STONE_STATE;
+                  BlockState state = bedrockSkin
+                     ? BEDROCK_STATE
+                     : volume.cavernEnvelope() ? DEEPSLATE_STATE : STONE_STATE;
                   cursor.set(worldX, y, worldZ);
                   if (!chunk.getBlockState(cursor).equals(state)) {
                      setChunkBlockStateDiscardingBlockEntity(chunk, cursor, state);
@@ -3472,6 +3538,72 @@ public final class EarthChunkGenerator extends ChunkGenerator {
       return (Holder<Biome>[])new Holder[size];
    }
 
+   private List<UndergroundStructureExclusion.Box> collectUndergroundStructureExclusions(
+      StructureManager structures, ChunkPos chunkPos
+   ) {
+      List<StructureStart> starts = structures.startsForStructure(
+         chunkPos,
+         structure -> UndergroundStructureExclusion.protectsProjectedCarving(structure.terrainAdaptation())
+      );
+      if (starts.isEmpty()) {
+         return List.of();
+      }
+
+      int chunkMinX = chunkPos.getMinBlockX();
+      int chunkMinZ = chunkPos.getMinBlockZ();
+      int chunkMaxX = chunkMinX + CHUNK_MASK;
+      int chunkMaxZ = chunkMinZ + CHUNK_MASK;
+      List<UndergroundStructureExclusion.Box> exclusions = new ArrayList<>();
+      for (StructureStart start : starts) {
+         if (start == null || !start.isValid()) {
+            continue;
+         }
+
+         TerrainAdjustment adjustment = start.getStructure().terrainAdaptation();
+         BoundingBox startBounds = start.getBoundingBox();
+         int centerX = startBounds.minX() + (startBounds.maxX() - startBounds.minX()) / 2;
+         int centerZ = startBounds.minZ() + (startBounds.maxZ() - startBounds.minZ()) / 2;
+         int terrainSurface = this.resolveAuxWaterColumn(centerX, centerZ).terrainSurface();
+         if (!UndergroundStructureExclusion.isUnderground(startBounds.maxY(), terrainSurface)) {
+            continue;
+         }
+
+         boolean cavernEnvelope = UndergroundStructureProtection.usesBoundedCavernEnvelope(adjustment);
+         boolean blocksFeaturePlacement = UndergroundStructureExclusion.protectsFeaturePlacement(adjustment);
+         int carvingMargin = cavernEnvelope
+            ? UndergroundStructureProtection.CAVERN_PIECE_CARVER_MARGIN
+            : UndergroundStructureExclusion.CARVER_MARGIN;
+         int intersectionMargin = blocksFeaturePlacement
+            ? Math.max(carvingMargin, UndergroundStructureExclusion.FEATURE_PLACEMENT_MARGIN)
+            : carvingMargin;
+
+         for (StructurePiece piece : start.getPieces()) {
+            BoundingBox bounds = piece.getBoundingBox();
+            UndergroundStructureExclusion.Box exclusion = new UndergroundStructureExclusion.Box(
+               bounds.minX(),
+               bounds.minY(),
+               bounds.minZ(),
+               bounds.maxX(),
+               bounds.maxY(),
+               bounds.maxZ(),
+               carvingMargin,
+               blocksFeaturePlacement
+            );
+            if (!exclusion.intersectsHorizontal(
+               chunkMinX,
+               chunkMinZ,
+               chunkMaxX,
+               chunkMaxZ,
+               intersectionMargin
+            )) {
+               continue;
+            }
+            exclusions.add(exclusion);
+         }
+      }
+      return exclusions.isEmpty() ? List.of() : List.copyOf(exclusions);
+   }
+
    private void carveStructureClearanceVolumes(StructureManager structures, ChunkAccess chunk) {
       if (this.settings.suppressesUndergroundGenerationForTerrainShell()) {
          return;
@@ -3492,9 +3624,16 @@ public final class EarthChunkGenerator extends ChunkGenerator {
 
          for (StructureStart start : starts) {
             if (start != null && start.isValid()) {
+               TerrainAdjustment adjustment = start.getStructure().terrainAdaptation();
+               int horizontalClearance = UndergroundStructureProtection.horizontalClearanceRadius(adjustment);
+               int clearanceBelow = UndergroundStructureProtection.clearanceBelow(adjustment);
+               int clearanceAbove = UndergroundStructureProtection.clearanceAbove(adjustment);
                for (StructurePiece piece : start.getPieces()) {
                  BoundingBox box = piece.getBoundingBox();
-                 if (box.intersects(chunkMinX, chunkMinZ, chunkMaxX, chunkMaxZ)) {
+                 if (box.maxX() + horizontalClearance + 1 >= chunkMinX
+                    && box.minX() - horizontalClearance - 1 <= chunkMaxX
+                    && box.maxZ() + horizontalClearance + 1 >= chunkMinZ
+                    && box.minZ() - horizontalClearance - 1 <= chunkMaxZ) {
                      int centerX = box.minX() + box.maxX() >> 1;
                      int centerZ = box.minZ() + box.maxZ() >> 1;
                      int terrainSurface = this.resolveAuxWaterColumn(centerX, centerZ).terrainSurface();
@@ -3503,14 +3642,18 @@ public final class EarthChunkGenerator extends ChunkGenerator {
                         int coreMaxX = box.maxX() + 1;
                         int coreMinZ = box.minZ() - 1;
                         int coreMaxZ = box.maxZ() + 1;
-                        int coreMinY = box.minY() - 0;
+                        int coreMinY =
+                           box.minY() + UndergroundStructureProtection.clearanceFloorOffset(adjustment);
                         int coreMaxY = box.maxY() + 0;
-                        int minX = Math.max(chunkMinX, coreMinX - 6);
-                        int maxX = Math.min(chunkMaxX, coreMaxX + 6);
-                        int minZ = Math.max(chunkMinZ, coreMinZ - 6);
-                        int maxZ = Math.min(chunkMaxZ, coreMaxZ + 6);
-                        int minY = Math.max(chunkMinY + 1, coreMinY - 0);
-                        int maxY = Math.min(chunkMaxY - 1, coreMaxY + 4);
+                        int minX = Math.max(chunkMinX, coreMinX - horizontalClearance);
+                        int maxX = Math.min(chunkMaxX, coreMaxX + horizontalClearance);
+                        int minZ = Math.max(chunkMinZ, coreMinZ - horizontalClearance);
+                        int maxZ = Math.min(chunkMaxZ, coreMaxZ + horizontalClearance);
+                        int minY = Math.max(chunkMinY + 1, coreMinY - clearanceBelow);
+                        int maxY = Math.min(
+                           chunkMaxY - 1,
+                           UndergroundStructureProtection.clearanceCeilingY(adjustment, coreMaxY, terrainSurface)
+                        );
                         if (maxY >= minY && maxX >= minX && maxZ >= minZ) {
                            for (int z = minZ; z <= maxZ; z++) {
                               for (int x = minX; x <= maxX; x++) {
@@ -3519,9 +3662,9 @@ public final class EarthChunkGenerator extends ChunkGenerator {
                                        continue;
                                     }
 
-                                    double nx = axisDistanceNormalized(x, coreMinX, coreMaxX, 6);
-                                    double nz = axisDistanceNormalized(z, coreMinZ, coreMaxZ, 6);
-                                    double ny = axisDistanceNormalized(y, coreMinY, coreMaxY, 0, 4);
+                                    double nx = axisDistanceNormalized(x, coreMinX, coreMaxX, horizontalClearance);
+                                    double nz = axisDistanceNormalized(z, coreMinZ, coreMaxZ, horizontalClearance);
+                                    double ny = axisDistanceNormalized(y, coreMinY, coreMaxY, clearanceBelow, clearanceAbove);
                                     double distance = Math.sqrt(nx * nx + ny * ny + nz * nz);
                                     double threshold = 1.0 + this.structureClearanceNoiseJitter(x, y, z) * 0.22;
                                     if (!(distance > threshold)) {
@@ -5716,7 +5859,7 @@ public final class EarthChunkGenerator extends ChunkGenerator {
                if (underwater) {
                   profiler.fastPathCount++;
                   resolved = palette;
-               } else if (biome.is(BiomeTags.IS_BADLANDS)) {
+               } else if (preservesBiomeSurfacePalette(biome)) {
                   profiler.fastPathCount++;
                   resolved = palette;
                } else if (snowLikeTerrain || this.shouldUseDetailedMountainSurface(coverClass, surface, slopeDiff, convexity)) {
@@ -5946,6 +6089,35 @@ public final class EarthChunkGenerator extends ChunkGenerator {
       return SnowSlopePolicy.shouldCover(worldX, worldZ, this.sampleDemSlopeDegrees(worldX, worldZ));
    }
 
+   private boolean shouldRetainPersistentSnowAt(
+      int worldX,
+      int worldZ,
+      int surfaceCoverClass,
+      int heightAboveSea,
+      int slopeDiff,
+      int convexity,
+      boolean snowLikeTerrain
+   ) {
+      if (snowLikeTerrain) {
+         return this.shouldPlaceSnowAt(worldX, worldZ);
+      }
+
+      boolean localSnowSource = surfaceCoverClass == MountainSurfaceRules.ESA_SNOW_ICE;
+      if (!localSnowSource
+         && !MountainSurfaceRules.qualifiesForMountainPalette(surfaceCoverClass, heightAboveSea, slopeDiff, convexity)) {
+         return false;
+      }
+
+      return SnowTransitionPolicy.shouldCover(
+         worldX,
+         worldZ,
+         this.sampleDemSlopeDegrees(worldX, worldZ),
+         localSnowSource,
+         this.snowTransitionSourceSampler,
+         this.worldSeed
+      );
+   }
+
    public boolean shouldPlaceDeepslateAt(int worldX, int worldZ) {
       return DeepslateSlopePolicy.shouldCover(worldX, worldZ, this.sampleDemSlopeDegrees(worldX, worldZ));
    }
@@ -6005,27 +6177,38 @@ public final class EarthChunkGenerator extends ChunkGenerator {
       int worldZ,
       OsmQueryMode mountainOsmQueryMode
    ) {
+      boolean rawSnowSource = MountainSurfaceRules.hasSnowSource(surfaceCoverClass, snowLikeTerrain);
+      boolean retainSnow = this.shouldRetainPersistentSnowAt(
+         worldX, worldZ, surfaceCoverClass, heightAboveSea, slopeDiff, convexity, snowLikeTerrain
+      );
       MountainSurfaceRules.ApproximateSurface classified = MountainSurfaceRules.classifyApproximateSurface(
          surfaceCoverClass,
          surfaceCoverClass,
          heightAboveSea,
          slopeDiff,
          convexity,
-         snowLikeTerrain,
+         snowLikeTerrain || retainSnow && !rawSnowSource,
          vegetationTransitionWeight,
          worldX,
          worldZ
       );
-      if (!MountainSurfaceRules.hasSnowSource(surfaceCoverClass, snowLikeTerrain)) {
+      if (!rawSnowSource && !retainSnow) {
          return classified;
       }
 
-      MountainSurfaceRules.ApproximatePalette snowPalette = this.shouldPlaceSnowAt(worldX, worldZ)
+      MountainSurfaceRules.ApproximatePalette snowPalette = retainSnow
          ? MountainSurfaceRules.ApproximatePalette.SNOW
          : MountainSurfaceRules.ApproximatePalette.STONE;
       return classified.palette() == snowPalette
          ? classified
          : new MountainSurfaceRules.ApproximateSurface(classified.surfaceCoverClass(), snowPalette, classified.form());
+   }
+
+   private boolean hasPersistentSnowSourceAt(int sampleX, int sampleZ) {
+      EarthChunkGenerator.LodMountainTransitionCache cache = this.lodMountainTransitionCache.get();
+      return cache != null
+         ? cache.hasSnowSource(sampleX, sampleZ)
+         : this.hasPersistentSnowSourceAtUncached(sampleX, sampleZ, this.settings.worldScale());
    }
 
    private boolean hasPersistentSnowSourceAtUncached(int sampleX, int sampleZ, double previewResolutionMeters) {
@@ -6366,7 +6549,7 @@ public final class EarthChunkGenerator extends ChunkGenerator {
       }
 
       int heightAboveSea = surface - this.seaLevel;
-      if (!underwater && !biome.is(BiomeTags.IS_BADLANDS)) {
+      if (!underwater && !preservesBiomeSurfacePalette(biome)) {
          float vegetationTransitionWeight = MountainSurfaceRules.vegetationTransitionWeightForSurfaceCoverClass(surfaceCoverClass, heightAboveSea);
          MountainSurfaceRules.ApproximateSurface mountainSurface = this.classifyMountainSurface(
             surfaceCoverClass, heightAboveSea, slopeDiff, convexity, snowLikeTerrain, vegetationTransitionWeight, worldX, worldZ, mountainOsmQueryMode
@@ -6528,10 +6711,10 @@ public final class EarthChunkGenerator extends ChunkGenerator {
    public EarthChunkGenerator.LodSharedTerrainCache buildLodSharedTerrainCache(
       int minWorldX, int maxWorldX, int minWorldZ, int maxWorldZ, double previewResolutionMeters
    ) {
-      int coverMinX = minWorldX - 48;
-      int coverMaxX = maxWorldX + 48;
-      int coverMinZ = minWorldZ - 48;
-      int coverMaxZ = maxWorldZ + 48;
+      int coverMinX = minWorldX - SnowTransitionPolicy.MAX_EDGE_DISPLACEMENT_BLOCKS;
+      int coverMaxX = maxWorldX + SnowTransitionPolicy.MAX_EDGE_DISPLACEMENT_BLOCKS;
+      int coverMinZ = minWorldZ - SnowTransitionPolicy.MAX_EDGE_DISPLACEMENT_BLOCKS;
+      int coverMaxZ = maxWorldZ + SnowTransitionPolicy.MAX_EDGE_DISPLACEMENT_BLOCKS;
       long coverWidth = (long)coverMaxX - (long)coverMinX + 1L;
       long coverHeight = (long)coverMaxZ - (long)coverMinZ + 1L;
       long coverArea = coverWidth * coverHeight;
@@ -10255,7 +10438,11 @@ public final class EarthChunkGenerator extends ChunkGenerator {
                   vanillaCarverNoiseSettings,
                   adaptedCarverNoiseSettings,
                   this.minY,
-                  this.height
+                  this.height,
+                  this.settings.undergroundDepth()
+               );
+               Tellus.LOGGER.debug(
+                  "Tellus caves use the live Overworld density router; biome-registered custom carvers remain unsupported"
                );
                this.tellusCarverRunner = cached;
             }
@@ -11126,7 +11313,7 @@ public final class EarthChunkGenerator extends ChunkGenerator {
    ) {
       if (underwater) {
          return palette;
-      } else if (biome.is(BiomeTags.IS_BADLANDS)) {
+      } else if (preservesBiomeSurfacePalette(biome)) {
          return palette;
       } else {
          int heightAboveSea = surface - this.seaLevel;
@@ -11281,6 +11468,12 @@ public final class EarthChunkGenerator extends ChunkGenerator {
 
    private static boolean isSoilPalette(EarthChunkGenerator.SurfacePalette palette) {
       return isSoilBlock(palette.filler());
+   }
+
+   private static boolean preservesBiomeSurfacePalette(Holder<Biome> biome) {
+      return MountainSurfaceRules.preservesBiomeSurfacePalette(
+         biome.is(Biomes.DESERT), biome.is(BiomeTags.IS_BADLANDS)
+      );
    }
 
    private static boolean isSoilBlock(BlockState state) {
@@ -11552,6 +11745,10 @@ public final class EarthChunkGenerator extends ChunkGenerator {
          flags |= 64;
       }
 
+      if (settings.geologicalStonePatches()) {
+         flags |= 128;
+      }
+
       return flags;
    }
 
@@ -11570,18 +11767,29 @@ public final class EarthChunkGenerator extends ChunkGenerator {
    private static boolean shouldKeepFeature(
       Holder<PlacedFeature> feature, EarthGeneratorSettings settings, boolean keepBiomeDeepDarkFeatures
    ) {
+      UndergroundFeatureClassifier.Kind featureKind = UndergroundFeatureClassifier.classify(feature.value());
       return feature.unwrapKey()
          .<Identifier>map(ResourceKey::identifier)
-         .map(id -> shouldKeepFeatureId(id.getPath(), settings, keepBiomeDeepDarkFeatures))
-         .orElse(true);
+         .map(id -> shouldKeepFeatureId(id.getPath(), featureKind, settings, keepBiomeDeepDarkFeatures))
+         .orElseGet(() -> shouldKeepFeatureId("", featureKind, settings, keepBiomeDeepDarkFeatures));
    }
 
-   private static boolean shouldKeepFeatureId(String path, EarthGeneratorSettings settings, boolean keepBiomeDeepDarkFeatures) {
+   private static boolean shouldKeepFeatureId(
+      String path,
+      UndergroundFeatureClassifier.Kind featureKind,
+      EarthGeneratorSettings settings,
+      boolean keepBiomeDeepDarkFeatures
+   ) {
       if (settings.suppressesUndergroundGenerationForTerrainShell() && isThinShellUndergroundFeatureId(path)) {
          return false;
       } else if (path.equals("freeze_top_layer") || path.equals("snow_and_freeze")) {
          return false;
-      } else if (!settings.oreDistribution() && path.startsWith("ore_")) {
+      } else if (featureKind == UndergroundFeatureClassifier.Kind.GEOLOGICAL_STONE
+         && !settings.geologicalStonePatches()) {
+         return false;
+      } else if (featureKind != UndergroundFeatureClassifier.Kind.GEOLOGICAL_STONE
+         && !settings.oreDistribution()
+         && (featureKind == UndergroundFeatureClassifier.Kind.MINEABLE_ORE || path.startsWith("ore_"))) {
          return false;
       } else if (!settings.geodes() && path.contains("geode")) {
          return false;
@@ -12001,8 +12209,9 @@ public final class EarthChunkGenerator extends ChunkGenerator {
       boolean useFastSurfacePalette, int surfaceCoverClass, int surface, int slopeDiff, int convexity, int worldX, int worldZ
    ) {
       boolean snowLikeTerrain = this.isRemaSnowTerrain(worldZ);
-      return MountainSurfaceRules.hasSnowSource(surfaceCoverClass, snowLikeTerrain)
-         && this.shouldPlaceSnowAt(worldX, worldZ);
+      return this.shouldRetainPersistentSnowAt(
+         worldX, worldZ, surfaceCoverClass, surface - this.seaLevel, slopeDiff, convexity, snowLikeTerrain
+      );
    }
 
 	   private static void applySnowCover(ChunkAccess chunk, MutableBlockPos cursor, int worldX, int worldZ, int surface, int minY) {
@@ -12789,7 +12998,13 @@ public final class EarthChunkGenerator extends ChunkGenerator {
    }
 
    private record ChunkDecorationContext(
-      ChunkPos pos, int[] terrainSurfaces, boolean[] waterFlags, int[] coverClasses, Holder<Biome>[] biomeCache, Holder<Biome> fallbackBiome
+      ChunkPos pos,
+      int[] terrainSurfaces,
+      boolean[] waterFlags,
+      int[] coverClasses,
+      Holder<Biome>[] biomeCache,
+      Holder<Biome> fallbackBiome,
+      List<UndergroundStructureExclusion.Box> undergroundStructureExclusions
    ) {
       private static EarthChunkGenerator.ChunkDecorationContext capture(
          ChunkPos pos, int[] terrainSurfaces, boolean[] waterFlags, int[] coverClasses, Holder<Biome>[] biomeCache
@@ -12806,8 +13021,24 @@ public final class EarthChunkGenerator extends ChunkGenerator {
          if (fallbackBiome == null) {
             throw new IllegalStateException("Chunk decoration context captured without a biome sample");
          } else {
-            return new EarthChunkGenerator.ChunkDecorationContext(pos, terrainSurfaces, waterFlags, coverClasses, biomeCache, fallbackBiome);
+            return new EarthChunkGenerator.ChunkDecorationContext(
+               pos, terrainSurfaces, waterFlags, coverClasses, biomeCache, fallbackBiome, List.of()
+            );
          }
+      }
+
+      private EarthChunkGenerator.ChunkDecorationContext withUndergroundStructureExclusions(
+         List<UndergroundStructureExclusion.Box> exclusions
+      ) {
+         return new EarthChunkGenerator.ChunkDecorationContext(
+            this.pos,
+            this.terrainSurfaces,
+            this.waterFlags,
+            this.coverClasses,
+            this.biomeCache,
+            this.fallbackBiome,
+            List.copyOf(exclusions)
+         );
       }
 
       private int terrainSurface(int localX, int localZ) {

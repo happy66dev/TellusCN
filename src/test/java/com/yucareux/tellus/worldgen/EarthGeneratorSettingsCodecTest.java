@@ -27,6 +27,7 @@ class EarthGeneratorSettingsCodecTest {
       assertEquals(List.of("terrarium"), EarthGeneratorSettings.DEFAULT.demSelection().enabledProviderIds());
       assertFalse(EarthGeneratorSettings.DEFAULT.experimentalIncreaseHeight());
       assertFalse(EarthGeneratorSettings.DEFAULT.cavesReachSurface());
+      assertFalse(EarthGeneratorSettings.DEFAULT.geologicalStonePatches());
       assertEquals(256, EarthGeneratorSettings.DEFAULT.undergroundDepth());
       assertTrue(EarthGeneratorSettings.DEFAULT.usesTerrainShell());
       assertFalse(EarthGeneratorSettings.DEFAULT.suppressesUndergroundGenerationForTerrainShell());
@@ -148,6 +149,7 @@ class EarthGeneratorSettingsCodecTest {
            "caves_reach_surface": true,
            "underground_depth": 192,
            "ore_distribution": true,
+           "geological_stone_patches": true,
            "lava_pools": true,
            "add_strongholds": false,
            "add_villages": false,
@@ -201,6 +203,7 @@ class EarthGeneratorSettingsCodecTest {
       assertFalse(encoded.getAsJsonObject().has("sea_level"));
       assertTrue(decoded.thinShellTerrain());
       assertTrue(decoded.cavesReachSurface());
+      assertTrue(decoded.geologicalStonePatches());
       assertEquals(192, decoded.undergroundDepth());
       assertTrue(decoded.climateBasedBuiltUpTerrain());
       assertTrue(decoded.randomBiomes());
@@ -212,6 +215,7 @@ class EarthGeneratorSettingsCodecTest {
       assertEquals(List.of("desert", "warm_ocean", "lush_caves"), decoded.randomBiomeIds());
       assertTrue(reparsed.thinShellTerrain());
       assertTrue(reparsed.cavesReachSurface());
+      assertTrue(reparsed.geologicalStonePatches());
       assertEquals(192, reparsed.undergroundDepth());
       assertTrue(reparsed.climateBasedBuiltUpTerrain());
       assertTrue(reparsed.randomBiomes());
@@ -232,6 +236,7 @@ class EarthGeneratorSettingsCodecTest {
       assertEquals("detailed", encodedObject.get("distant_horizons_render_mode").getAsString());
       assertTrue(encodedObject.get("thin_shell_terrain").getAsBoolean());
       assertTrue(encodedObject.get("caves_reach_surface").getAsBoolean());
+      assertTrue(encodedObject.get("geological_stone_patches").getAsBoolean());
       assertEquals(192, encodedObject.get("underground_depth").getAsInt());
       assertTrue(encodedObject.get("climate_based_built_up_terrain").getAsBoolean());
       assertTrue(encodedObject.get("random_biomes").getAsBoolean());
@@ -268,6 +273,7 @@ class EarthGeneratorSettingsCodecTest {
       assertFalse(decoded.randomBiomes());
       assertFalse(decoded.experimentalIncreaseHeight());
       assertFalse(decoded.cavesReachSurface());
+      assertFalse(decoded.geologicalStonePatches());
       assertFalse(decoded.tellusManagedTerrainDownloads());
       assertFalse(decoded.showTerrainDownloadOverlay());
       assertEquals(EarthGeneratorSettings.DEFAULT_RANDOM_BIOME_DENSITY, decoded.randomBiomeDensity());

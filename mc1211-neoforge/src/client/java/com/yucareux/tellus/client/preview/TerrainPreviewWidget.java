@@ -1,5 +1,6 @@
 package com.yucareux.tellus.client.preview;
 
+import com.yucareux.tellus.Tellus;
 import com.yucareux.tellus.world.data.elevation.TellusElevationSource;
 import com.yucareux.tellus.worldgen.EarthGeneratorSettings;
 import java.util.Locale;
@@ -12,6 +13,7 @@ import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.narration.NarrationElementOutput;
 import net.minecraft.network.chat.Component;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.util.Mth;
 
 public final class TerrainPreviewWidget extends AbstractWidget implements AutoCloseable {
@@ -43,6 +45,14 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
    private static final int INFO_BAD = 0xFFF06262;
    private static final int FULLSCREEN_BUTTON_SIZE = 20;
    private static final int FULLSCREEN_BUTTON_PADDING = 6;
+   private static final int CLOUD_BUTTON_SIZE = 20;
+   private static final int CLOUD_BUTTON_SPACING = 4;
+   private static final int CLOUD_ICON_SIZE = 16;
+   private static final int CLOUD_ICON_TEXTURE_WIDTH = 32;
+   private static final int CLOUD_ICON_TEXTURE_HEIGHT = 16;
+   private static final ResourceLocation CLOUD_TOGGLE_TEXTURE = Objects.requireNonNull(
+      Tellus.id("textures/gui/cloud_toggle.png"), "cloudToggleTexture"
+   );
    
    private static final Component FULLSCREEN_LABEL = Component.literal("[ ]");
    private static final Component INFO_LABEL = Component.literal("i");
@@ -57,10 +67,12 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
    private final Button modeButton;
    private final Button infoButton;
    private final Button fullscreenButton;
+   private final Button cloudButton;
 
    private Runnable fullscreenAction;
    private boolean dragging;
    private boolean infoPanelVisible;
+   private boolean cloudsVisible = true;
    private float rotationX = DEFAULT_ROTATION_X;
    private float rotationY = DEFAULT_ROTATION_Y;
    private float cameraDistance = DEFAULT_CAMERA_DISTANCE;
@@ -93,6 +105,10 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
          }
       }).bounds(0, 0, FULLSCREEN_BUTTON_SIZE, FULLSCREEN_BUTTON_SIZE).build();
       this.fullscreenButton.active = false;
+      this.cloudButton = Button.builder(Component.empty(), button -> this.toggleClouds())
+         .bounds(0, 0, CLOUD_BUTTON_SIZE, CLOUD_BUTTON_SIZE)
+         .build();
+      this.updateCloudButtonTooltip();
    }
 
    public void requestRebuild(EarthGeneratorSettings settings) {
@@ -109,7 +125,7 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
    }
 
    public TerrainPreviewWidget.ViewState getViewState() {
-      return new TerrainPreviewWidget.ViewState(this.rotationX, this.rotationY, this.cameraDistance, this.renderMode);
+      return new TerrainPreviewWidget.ViewState(this.rotationX, this.rotationY, this.cameraDistance, this.renderMode, this.cloudsVisible);
    }
 
    public void setViewState(TerrainPreviewWidget.ViewState state) {
@@ -117,7 +133,9 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
       this.rotationY = state.rotationY();
       this.cameraDistance = Mth.clamp(state.cameraDistance(), MIN_CAMERA_DISTANCE, MAX_CAMERA_DISTANCE);
       this.renderMode = state.renderMode();
+      this.cloudsVisible = state.cloudsVisible();
       this.updateModeButtonLabel();
+      this.updateCloudButtonTooltip();
    }
 
    public void tick() {
@@ -136,12 +154,24 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
       int contentWidth = Math.max(1, this.width - inset * 2);
       int contentHeight = Math.max(1, this.height - inset * 2);
       this.preview
-         .render(graphics, contentX, contentY, contentWidth, contentHeight, this.rotationX, this.rotationY, this.cameraDistance, this.renderMode);
+         .render(
+            graphics,
+            contentX,
+            contentY,
+            contentWidth,
+            contentHeight,
+            this.rotationX,
+            this.rotationY,
+            this.cameraDistance,
+            this.renderMode,
+            this.cloudsVisible
+         );
       this.renderLoadingOverlay(graphics, contentX, contentY, contentWidth, contentHeight);
       this.renderModeButton(graphics, mouseX, mouseY, delta);
       this.renderInfoButton(graphics, mouseX, mouseY, delta);
       this.renderInfoPanel(graphics, mouseX, mouseY, delta);
       this.renderFullscreenButton(graphics, mouseX, mouseY, delta);
+      this.renderCloudButton(graphics, mouseX, mouseY, delta);
    }
 
    @Override
@@ -158,6 +188,9 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
          return true;
       } else if (this.fullscreenAction != null && this.fullscreenButton.isMouseOver(mouseX, mouseY)) {
          this.fullscreenButton.mouseClicked(mouseX, mouseY, button);
+         return true;
+      } else if (this.fullscreenAction != null && this.cloudButton.isMouseOver(mouseX, mouseY)) {
+         this.cloudButton.mouseClicked(mouseX, mouseY, button);
          return true;
       } else if (this.infoPanelVisible && this.isMouseOverInfoPanel(mouseX, mouseY)) {
          this.lastInteractionTime = System.currentTimeMillis();
@@ -181,6 +214,8 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
          this.lastInteractionTime = System.currentTimeMillis();
       } else if (this.fullscreenAction != null && this.fullscreenButton.isMouseOver(mouseX, mouseY)) {
          this.fullscreenButton.mouseClicked(mouseX, mouseY, 0);
+      } else if (this.fullscreenAction != null && this.cloudButton.isMouseOver(mouseX, mouseY)) {
+         this.cloudButton.mouseClicked(mouseX, mouseY, 0);
       } else if (this.infoPanelVisible && this.isMouseOverInfoPanel(mouseX, mouseY)) {
          this.lastInteractionTime = System.currentTimeMillis();
       } else {
@@ -202,6 +237,7 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
       this.infoButton.mouseReleased(mouseX, mouseY, 0);
       if (this.fullscreenAction != null) {
          this.fullscreenButton.mouseReleased(mouseX, mouseY, 0);
+         this.cloudButton.mouseReleased(mouseX, mouseY, 0);
       }
 
       this.dragging = false;
@@ -212,7 +248,8 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
       if (this.modeButton.isMouseOver(mouseX, mouseY)
          || this.infoButton.isMouseOver(mouseX, mouseY)
          || this.infoPanelVisible && this.isMouseOverInfoPanel(mouseX, mouseY)
-         || this.fullscreenAction != null && this.fullscreenButton.isMouseOver(mouseX, mouseY)) {
+         || this.fullscreenAction != null
+            && (this.fullscreenButton.isMouseOver(mouseX, mouseY) || this.cloudButton.isMouseOver(mouseX, mouseY))) {
          return false;
       } else if (this.isMouseOver(mouseX, mouseY)) {
          this.cameraDistance = Mth.clamp(
@@ -318,8 +355,20 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
       this.dragging = false;
    }
 
+   private void toggleClouds() {
+      this.cloudsVisible = !this.cloudsVisible;
+      this.updateCloudButtonTooltip();
+      this.lastInteractionTime = System.currentTimeMillis();
+      this.dragging = false;
+   }
+
    private void updateModeButtonLabel() {
       this.modeButton.setMessage(this.renderMode.buttonLabel());
+   }
+
+   private void updateCloudButtonTooltip() {
+      String key = this.cloudsVisible ? "tellus.preview.clouds.visible.tooltip" : "tellus.preview.clouds.hidden.tooltip";
+      this.cloudButton.setTooltip(Tooltip.create(Component.translatable(key)));
    }
 
    private void renderModeButton(GuiGraphics graphics, int mouseX, int mouseY, float delta) {
@@ -408,6 +457,33 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
          this.fullscreenButton.setWidth(FULLSCREEN_BUTTON_SIZE);
          this.fullscreenButton.setHeight(FULLSCREEN_BUTTON_SIZE);
          this.fullscreenButton.render(graphics, mouseX, mouseY, delta);
+      }
+   }
+
+   private void renderCloudButton(GuiGraphics graphics, int mouseX, int mouseY, float delta) {
+      if (this.fullscreenAction != null) {
+         int buttonX = this.getX() + this.width - CLOUD_BUTTON_SIZE - FULLSCREEN_BUTTON_PADDING;
+         int buttonY = this.getY() + FULLSCREEN_BUTTON_PADDING + FULLSCREEN_BUTTON_SIZE + CLOUD_BUTTON_SPACING;
+         this.cloudButton.setX(buttonX);
+         this.cloudButton.setY(buttonY);
+         this.cloudButton.setWidth(CLOUD_BUTTON_SIZE);
+         this.cloudButton.setHeight(CLOUD_BUTTON_SIZE);
+         this.cloudButton.render(graphics, mouseX, mouseY, delta);
+         int iconX = buttonX + (CLOUD_BUTTON_SIZE - CLOUD_ICON_SIZE) / 2;
+         int iconY = buttonY + (CLOUD_BUTTON_SIZE - CLOUD_ICON_SIZE) / 2;
+         float textureX = this.cloudsVisible ? 0.0F : CLOUD_ICON_SIZE;
+         graphics.blit(
+            CLOUD_TOGGLE_TEXTURE,
+            iconX,
+            iconY,
+            0,
+            textureX,
+            0.0F,
+            CLOUD_ICON_SIZE,
+            CLOUD_ICON_SIZE,
+            CLOUD_ICON_TEXTURE_WIDTH,
+            CLOUD_ICON_TEXTURE_HEIGHT
+         );
       }
    }
 
@@ -543,12 +619,25 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
       }
    }
 
-   public record ViewState(float rotationX, float rotationY, float cameraDistance, TerrainPreviewWidget.RenderMode renderMode) {
-      public ViewState(float rotationX, float rotationY, float cameraDistance, TerrainPreviewWidget.RenderMode renderMode) {
+   public record ViewState(
+      float rotationX,
+      float rotationY,
+      float cameraDistance,
+      TerrainPreviewWidget.RenderMode renderMode,
+      boolean cloudsVisible
+   ) {
+      public ViewState(
+         float rotationX,
+         float rotationY,
+         float cameraDistance,
+         TerrainPreviewWidget.RenderMode renderMode,
+         boolean cloudsVisible
+      ) {
          this.rotationX = rotationX;
          this.rotationY = rotationY;
          this.cameraDistance = cameraDistance;
          this.renderMode = Objects.requireNonNull(renderMode, "renderMode");
+         this.cloudsVisible = cloudsVisible;
       }
    }
 

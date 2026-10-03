@@ -688,6 +688,7 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
       boolean[] mapterhornLandOverride = scratch.mapterhornLandOverride;
       boolean[] landMaskLand = scratch.landMaskLand;
       boolean[] lineWaterMask = scratch.lineWaterMask;
+      boolean[] areaWaterMask = scratch.areaWaterMask;
       boolean[] flowingWaterMask = scratch.flowingWaterMask;
       long[] waterBodyKeys = scratch.waterBodyKeys;
       int[] waterBodySurfaceHints = scratch.waterBodySurfaceHints;
@@ -706,6 +707,7 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
       Arrays.fill(oceanHintMask, 0, gridArea, false);
       Arrays.fill(mapterhornLandOverride, 0, gridArea, false);
       Arrays.fill(lineWaterMask, 0, gridArea, false);
+      Arrays.fill(areaWaterMask, 0, gridArea, false);
       Arrays.fill(flowingWaterMask, 0, gridArea, false);
       Arrays.fill(waterBodyKeys, 0, gridArea, 0L);
       Arrays.fill(waterBodySurfaceHints, 0, gridArea, Integer.MIN_VALUE);
@@ -785,6 +787,7 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
                noDataMask,
                oceanHintMask,
                lineWaterMask,
+               areaWaterMask,
                flowingWaterMask,
                waterBodyKeys,
                waterBodySurfaceHints
@@ -809,6 +812,7 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
                   noDataMask[index] = true;
                   oceanHintMask[index] = true;
                   lineWaterMask[index] = false;
+                  areaWaterMask[index] = false;
                   flowingWaterMask[index] = false;
                   waterBodyKeys[index] = 0L;
                   waterBodySurfaceHints[index] = Integer.MIN_VALUE;
@@ -1000,7 +1004,10 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
 	               int cell = componentx.cells.getInt(c);
 	               if (ocean) {
 	                  oceanComponentMask[cell] = true;
-	               } else if (componentx.lineOnlyRiver) {
+	               } else if (shouldUseDirectLineWaterCell(lineWaterMask[cell], areaWaterMask[cell])) {
+	                  // Keep one-block waterways terrain-following even when they
+	                  // join a pooled polygon river. Overlap cells remain part of
+	                  // the polygon so the larger river keeps a coherent surface.
 	                  directRiverWaterMask[cell] = true;
 	               } else {
 	                  if (componentx.riverShape && this.shouldRejectWaterCell(componentx, surfaceHeights[cell], waterSurface[cell])) {
@@ -1523,6 +1530,10 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
       return cellCount > 0 && lineWaterCellCount == cellCount && flowingWaterCellCount == cellCount;
    }
 
+   static boolean shouldUseDirectLineWaterCell(boolean lineWater, boolean areaWater) {
+      return lineWater && !areaWater;
+   }
+
    static boolean isLineWaterGeometry(OsmWaterFeature feature) {
       return feature.lineGeometry();
    }
@@ -1643,6 +1654,7 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
       boolean[] noDataMask,
       boolean[] oceanHintMask,
       boolean[] lineWaterMask,
+      boolean[] areaWaterMask,
       boolean[] flowingWaterMask,
       long[] waterBodyKeys,
       int[] waterBodySurfaceHints
@@ -1673,6 +1685,7 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
                   noDataMask,
                   oceanHintMask,
                   lineWaterMask,
+                  areaWaterMask,
                   flowingWaterMask,
                   waterBodyKeys,
                   waterBodySurfaceHints
@@ -1704,6 +1717,7 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
       boolean[] noDataMask,
       boolean[] oceanHintMask,
       boolean[] lineWaterMask,
+      boolean[] areaWaterMask,
       boolean[] flowingWaterMask,
       long[] waterBodyKeys,
       int[] waterBodySurfaceHints
@@ -1782,7 +1796,8 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
                clampedMinZ,
                clampedMaxX,
                clampedMaxZ,
-               (worldX, worldZ) -> this.markOsmWaterCell(
+               (worldX, worldZ) -> {
+                  this.markOsmWaterCell(
                      worldX,
                      worldZ,
                      gridMinX,
@@ -1800,7 +1815,9 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
                      waterBodySurfaceHint,
                      waterBodyKeys,
                      waterBodySurfaceHints
-                  )
+                  );
+                  markOsmAreaWaterCell(worldX, worldZ, gridMinX, gridMinZ, gridSize, areaWaterMask);
+               }
             );
          }
       }
@@ -2142,6 +2159,16 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
                waterBodySurfaceHints[index] = waterBodySurfaceHint;
             }
          }
+      }
+   }
+
+   private static void markOsmAreaWaterCell(
+      int worldX, int worldZ, int gridMinX, int gridMinZ, int gridSize, boolean[] areaWaterMask
+   ) {
+      int localX = worldX - gridMinX;
+      int localZ = worldZ - gridMinZ;
+      if (localX >= 0 && localZ >= 0 && localX < gridSize && localZ < gridSize) {
+         areaWaterMask[localZ * gridSize + localX] = true;
       }
    }
 
@@ -3341,6 +3368,7 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
       private boolean[] mapterhornLandOverride;
       private boolean[] landMaskLand;
       private boolean[] lineWaterMask;
+      private boolean[] areaWaterMask;
       private boolean[] flowingWaterMask;
       private long[] waterBodyKeys;
       private int[] waterBodySurfaceHints;
@@ -3386,6 +3414,7 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
             this.mapterhornLandOverride = new boolean[size];
             this.landMaskLand = new boolean[size];
             this.lineWaterMask = new boolean[size];
+            this.areaWaterMask = new boolean[size];
             this.flowingWaterMask = new boolean[size];
             this.waterBodyKeys = new long[size];
             this.waterBodySurfaceHints = new int[size];

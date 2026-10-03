@@ -53,11 +53,13 @@ import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
 /**
- * Samples Overture Maps land-cover vector tiles through a compact raster cache.
+ * Samples the official ESA WorldCover 2021 COG pyramid and falls back to
+ * Overture Maps land-cover vectors when the primary source is unavailable or
+ * outside its latitude coverage.
  *
- * <p>The rest of world generation still consumes the numeric WorldCover-compatible
- * class values used by older Tellus worlds. Keeping those values stable avoids a
- * world-format migration while replacing the source, transport, and LOD behavior.</p>
+ * <p>The rest of world generation consumes stable WorldCover numeric class
+ * values. Native COG pixels preserve the original 10 m classification while
+ * built-in overview levels reduce I/O for larger world scales and LODs.</p>
  */
 public final class TellusLandCoverSource implements TellusCacheHandle {
    static final int NO_DATA_CLASS = 0;
@@ -100,6 +102,7 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
    private static final int NEAREST_LAND_NOT_FOUND = -1;
    private final Path cacheRoot;
    private final PmTilesRangeReader pmTilesReader;
+   private final WorldCoverCogSource worldCoverSource;
    private final Object initLock = new Object();
    private final LoadingCache<TileKey, RasterTile> cache;
    private final Cache<NearestLandKey, Integer> nearestLandCache;
@@ -121,6 +124,8 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
          .resolve(OvertureTileUrls.cacheNamespace(pmTilesUrls.get(0)));
       // 用候选列表共享读取器：与沙地读到同一个压缩包时可共用文件头与目录缓存
       this.pmTilesReader = PmTilesRangeReader.shared(pmTilesUrls, CONNECT_TIMEOUT_MS, READ_TIMEOUT_MS, DIRECTORY_CACHE_ENTRIES);
+      // 上游 0.8.2 新增的 ESA WorldCover COG 兜底数据源，在 Overture 数据不可用时补齐覆盖层
+      this.worldCoverSource = new WorldCoverCogSource();
       this.cache = CacheBuilder.newBuilder().maximumSize(MAX_CACHE_TILES).build(new CacheLoader<TileKey, RasterTile>() {
          @Override
          public RasterTile load(TileKey key) throws Exception {
@@ -162,6 +167,12 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
       double lon = blockX / blocksPerDegree;
       double lat = EarthProjection.blockZToLat(blockZ, worldScale);
       double resolutionMeters = effectiveSampleResolutionMeters(worldScale, previewResolutionMeters);
+      WorldCoverCogSource.Sample worldCover = this.worldCoverSource.sample(
+         lon, lat, resolutionMeters, worldCoverLookupMode(lookupMode)
+      );
+      if (worldCover.available()) {
+         return worldCover.coverClass();
+      }
       int zoom = this.queryZoom(resolutionMeters, lookupMode);
       return this.sampleAtLonLat(lon, lat, zoom, lookupMode);
    }
@@ -179,7 +190,14 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
       double lon = blockX / blocksPerDegree;
       double lat = EarthProjection.blockZToLat(blockZ, worldScale);
       LookupMode lookupMode = managedLookupMode();
-      int zoom = this.queryZoom(effectiveSampleResolutionMeters(worldScale, previewResolutionMeters), lookupMode);
+      double resolutionMeters = effectiveSampleResolutionMeters(worldScale, previewResolutionMeters);
+      WorldCoverCogSource.Sample worldCover = this.worldCoverSource.sampleSmoothed(
+         lon, lat, resolutionMeters, worldCoverLookupMode(lookupMode)
+      );
+      if (worldCover.available()) {
+         return worldCover.coverClass();
+      }
+      int zoom = this.queryZoom(resolutionMeters, lookupMode);
       TilePosition center = tilePosition(lon, lat, zoom);
       if (center == null) {
          return NO_DATA_CLASS;
@@ -228,6 +246,14 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
       return ManagedTerrainNetworkPolicy.isCacheOnly() ? LookupMode.LOCAL_ONLY : LookupMode.BLOCKING;
    }
 
+   private static WorldCoverCogSource.LookupMode worldCoverLookupMode(LookupMode lookupMode) {
+      return switch (lookupMode) {
+         case BLOCKING -> WorldCoverCogSource.LookupMode.BLOCKING;
+         case LOCAL_ONLY -> WorldCoverCogSource.LookupMode.LOCAL_ONLY;
+         case MEMORY_ONLY -> WorldCoverCogSource.LookupMode.MEMORY_ONLY;
+      };
+   }
+
    public int sampleNearestLandCoverClassLocalOnly(double blockX, double blockZ, double worldScale, int fallbackCoverClass) {
       return this.sampleNearestLandCoverClass(blockX, blockZ, worldScale, fallbackCoverClass, LookupMode.LOCAL_ONLY);
    }
@@ -246,6 +272,18 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
       double blocksPerDegree = EarthProjection.blocksPerDegree(worldScale);
       double lon = blockX / blocksPerDegree;
       double lat = EarthProjection.blockZToLat(blockZ, worldScale);
+      WorldCoverCogSource.Sample worldCover = this.worldCoverSource.sampleNearestLand(
+         lon,
+         lat,
+         Math.max(SOURCE_RESOLUTION_METERS, worldScale),
+         NEAREST_LAND_RADIUS_PIXELS,
+         fallbackCoverClass,
+         TellusLandCoverSource::isLandCoverClass,
+         worldCoverLookupMode(lookupMode)
+      );
+      if (worldCover.available()) {
+         return worldCover.coverClass();
+      }
       int zoom = this.queryZoom(Math.max(SOURCE_RESOLUTION_METERS, worldScale), lookupMode);
       TilePosition center = tilePosition(lon, lat, zoom);
       if (center == null) {
@@ -380,9 +418,16 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
          return;
       }
 
-      int zoom = this.queryZoom(effectiveSampleResolutionMeters(worldScale, previewResolutionMeters), LookupMode.BLOCKING);
       double blocksPerDegree = EarthProjection.blocksPerDegree(worldScale);
-      TilePosition center = tilePosition(blockX / blocksPerDegree, EarthProjection.blockZToLat(blockZ, worldScale), zoom);
+      double lon = blockX / blocksPerDegree;
+      double lat = EarthProjection.blockZToLat(blockZ, worldScale);
+      double resolutionMeters = effectiveSampleResolutionMeters(worldScale, previewResolutionMeters);
+      if (this.worldCoverSource.prefetch(lon, lat, resolutionMeters, radius)) {
+         return;
+      }
+
+      int zoom = this.queryZoom(resolutionMeters, LookupMode.BLOCKING);
+      TilePosition center = tilePosition(lon, lat, zoom);
       if (center == null) {
          return;
       }
@@ -403,6 +448,21 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
    public int preloadAreaTaskCount(
       double minBlockX, double minBlockZ, double maxBlockX, double maxBlockZ, double worldScale, double previewResolutionMeters
    ) {
+      List<WorldCoverCogSource.BlockKey> worldCoverBlocks = this.worldCoverSource.areaBlockKeys(
+         minBlockX,
+         minBlockZ,
+         maxBlockX,
+         maxBlockZ,
+         worldScale,
+         effectiveSampleResolutionMeters(worldScale, previewResolutionMeters)
+      );
+      if (!worldCoverBlocks.isEmpty()) {
+         int taskCount = worldCoverBlocks.size();
+         if (!this.worldCoverSource.fullyCoversArea(minBlockX, minBlockZ, maxBlockX, maxBlockZ, worldScale)) {
+            taskCount += this.areaTileKeys(minBlockX, minBlockZ, maxBlockX, maxBlockZ, worldScale, previewResolutionMeters).size();
+         }
+         return taskCount;
+      }
       return Math.max(1, this.areaTileKeys(minBlockX, minBlockZ, maxBlockX, maxBlockZ, worldScale, previewResolutionMeters).size());
    }
 
@@ -418,13 +478,42 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
    ) {
       BiConsumer<Integer, String> progress = progressConsumer == null ? (completed, detail) -> {
       } : progressConsumer;
+      List<WorldCoverCogSource.BlockKey> worldCoverBlocks = this.worldCoverSource.areaBlockKeys(
+         minBlockX,
+         minBlockZ,
+         maxBlockX,
+         maxBlockZ,
+         worldScale,
+         effectiveSampleResolutionMeters(worldScale, previewResolutionMeters)
+      );
+      boolean worldCoverFullyCoversArea = this.worldCoverSource.fullyCoversArea(
+         minBlockX, minBlockZ, maxBlockX, maxBlockZ, worldScale
+      );
+      if (!worldCoverBlocks.isEmpty()) {
+         int worldCoverStartingUnits = completedUnits;
+         progress.accept(completedUnits, "Downloading " + worldCoverBlocks.size() + " ESA WorldCover data blocks");
+         completedUnits = ParallelDownloadRunner.run(
+            ParallelDownloadRunner.scope("land-cover-worldcover-2021-v200", TellusCacheRegistry.generation(TellusCacheDomain.LAND_COVER)),
+            worldCoverBlocks,
+            completedUnits,
+            this.worldCoverSource::downloadBlock,
+            (key, completed, phaseTotal) -> progress.accept(
+               completed,
+               "Cached WorldCover block " + (completed - worldCoverStartingUnits) + "/" + phaseTotal + " (" + key.label() + ")"
+            )
+         );
+         if (worldCoverFullyCoversArea) {
+            return completedUnits;
+         }
+      }
+
       List<TileKey> keys = this.areaTileKeys(minBlockX, minBlockZ, maxBlockX, maxBlockZ, worldScale, previewResolutionMeters);
       if (keys.isEmpty()) {
-         progress.accept(completedUnits, "Skipping Overture land cover; selected area is outside tile coverage");
+         progress.accept(completedUnits, "Skipping land cover; selected area is outside source coverage");
          return completedUnits + 1;
       }
 
-      int startingUnits = completedUnits;
+      int overtureStartingUnits = completedUnits;
       progress.accept(completedUnits, "Downloading " + keys.size() + " Overture land-cover source tiles");
       return ParallelDownloadRunner.run(
          ParallelDownloadRunner.scope("land-cover", TellusCacheRegistry.generation(TellusCacheDomain.LAND_COVER)),
@@ -433,7 +522,7 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
          this::downloadRawTile,
          (key, completed, phaseTotal) -> progress.accept(
             completed,
-            "Cached Overture land-cover tile " + (completed - startingUnits) + "/" + phaseTotal + " (" + key.label() + ")"
+            "Cached Overture land-cover tile " + (completed - overtureStartingUnits) + "/" + phaseTotal + " (" + key.label() + ")"
          )
       );
    }
@@ -1171,6 +1260,7 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
 
    @Override
    public void clearCache() {
+      this.worldCoverSource.clearMemoryCache();
       this.cache.invalidateAll();
       this.cache.cleanUp();
       this.nearestLandCache.invalidateAll();

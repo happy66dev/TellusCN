@@ -1,6 +1,7 @@
 package com.yucareux.tellus.worldgen.caves;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
 
@@ -105,6 +106,51 @@ class TellusCaveDepthMapperTest {
       assertEquals(
          Integer.MIN_VALUE,
          TellusCaveDepthMapper.actualYForVirtualFeature(200, 150, 900, 773)
+      );
+   }
+
+   @Test
+   void projectsTheVanillaProfileAcrossADeepTellusShell() {
+      int surfaceY = 64;
+      int bottomY = -191;
+
+      assertEquals(
+         TellusCaveDepthMapper.VANILLA_SEA_LEVEL,
+         TellusCaveDepthMapper.virtualYForActualY(
+            surfaceY,
+            surfaceY,
+            bottomY,
+            TellusCaveDepthMapper.VANILLA_SEA_LEVEL,
+            TellusCaveDepthMapper.VANILLA_MIN_Y
+         )
+      );
+      assertEquals(
+         TellusCaveDepthMapper.VANILLA_MIN_Y,
+         TellusCaveDepthMapper.virtualYForActualY(
+            bottomY,
+            surfaceY,
+            bottomY,
+            TellusCaveDepthMapper.VANILLA_SEA_LEVEL,
+            TellusCaveDepthMapper.VANILLA_MIN_Y
+         )
+      );
+      assertEquals(
+         -181,
+         TellusCaveDepthMapper.actualYForVirtualFeature(
+            -59,
+            TellusCaveDepthMapper.VANILLA_SEA_LEVEL,
+            surfaceY,
+            bottomY
+         )
+      );
+      assertTrue(
+         TellusCaveDepthMapper.virtualYForActualY(
+            -30,
+            surfaceY,
+            bottomY,
+            TellusCaveDepthMapper.VANILLA_SEA_LEVEL,
+            TellusCaveDepthMapper.VANILLA_MIN_Y
+         ) > TellusCaveDepthMapper.VANILLA_MIN_Y
       );
    }
 }

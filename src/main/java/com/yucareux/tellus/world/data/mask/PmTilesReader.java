@@ -35,7 +35,7 @@ final class PmTilesReader {
    PmTilesReader(String url) {
       this.url = Objects.requireNonNull(url, "url");
       requireHttpUri(URI.create(this.url));
-      this.directoryCache = CacheBuilder.<PmTilesReader.DirectoryKey, PmTilesReader.Directory>newBuilder()
+      this.directoryCache = CacheBuilder.newBuilder()
          .maximumWeight(directoryCacheBudget(MAX_DIRECTORY_CACHE))
          .weigher((PmTilesReader.DirectoryKey key, PmTilesReader.Directory directory) -> directoryWeight(directory.entries.size()))
          .build(new CacheLoader<PmTilesReader.DirectoryKey, PmTilesReader.Directory>() {

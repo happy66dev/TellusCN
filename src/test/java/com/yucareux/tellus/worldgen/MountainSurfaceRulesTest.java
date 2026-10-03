@@ -65,6 +65,13 @@ class MountainSurfaceRulesTest {
    }
 
    @Test
+   void desertAndBadlandsPalettesStayAuthoritativeOverBareGroundMountainRules() {
+      assertTrue(MountainSurfaceRules.preservesBiomeSurfacePalette(true, false));
+      assertTrue(MountainSurfaceRules.preservesBiomeSurfacePalette(false, true));
+      assertFalse(MountainSurfaceRules.preservesBiomeSurfacePalette(false, false));
+   }
+
+   @Test
    void snowRequiresExistingSnowSource() {
       MountainSurfaceRules.ApproximateSurface dryHighBowl = MountainSurfaceRules.classifyApproximateSurface(
          MountainSurfaceRules.ESA_BARE, MountainSurfaceRules.ESA_BARE, 260, 1, 2, false, 0.0F, 96, 128

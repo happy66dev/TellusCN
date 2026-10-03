@@ -58,6 +58,7 @@ public class SlippyMap {
          }
       }
 
+      this.cache.updateViewport(visibleTiles);
       return visibleTiles;
    }
 

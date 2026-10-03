@@ -10,7 +10,7 @@ import java.util.Set;
 /**
  * Builds the surface-relative vertical samples used by Tellus biome locate
  * queries. Vanilla searches absolute Y levels 64 blocks apart, which can miss
- * Tellus's fixed cave band or report a coordinate below a refined terrain
+ * Tellus's surface-relative cave shell or report a coordinate below a refined terrain
  * shell.
  */
 public final class TellusBiomeLocatePolicy {
@@ -22,7 +22,7 @@ public final class TellusBiomeLocatePolicy {
    /**
     * Returns each quart-aligned cave-biome Y for a terrain column, ordered by
     * vertical distance from the command origin. Every result is guaranteed to
-    * remain inside Tellus's configured, vanilla-limited cave-biome band.
+    * remain inside Tellus's configured cave-biome shell.
     */
    public static List<Integer> caveBiomeQuartYs(int surfaceY, int undergroundDepth, int originY) {
       int generationDepth = UndergroundGenerationDepthPolicy.generationDepth(undergroundDepth);

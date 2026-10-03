@@ -3,13 +3,14 @@ package com.yucareux.tellus.worldgen.caves;
 import com.yucareux.tellus.worldgen.UndergroundGenerationDepthPolicy;
 
 /**
- * Defines where cave biomes may exist inside Tellus's fixed surface-relative
- * underground generation band.
+ * Defines where cave biomes may exist inside Tellus's configured
+ * surface-relative underground shell.
  */
 public final class TellusCaveBiomeDepthPolicy {
    public static final int MIN_CAVE_BIOME_DEPTH = 8;
    public static final int MIN_DEEP_DARK_DEPTH = 24;
    public static final int NO_STRUCTURE_PROBE_DEPTH = -1;
+   private static final int PREFERRED_STRUCTURE_PROBE_DEPTH = 104;
    private static final int STRUCTURE_PROBE_BOTTOM_CLEARANCE = 16;
 
    private TellusCaveBiomeDepthPolicy() {
@@ -41,12 +42,23 @@ public final class TellusCaveBiomeDepthPolicy {
     */
    public static int structureProbeDepth(int undergroundDepth) {
       int generationDepth = UndergroundGenerationDepthPolicy.generationDepth(undergroundDepth);
-      int deepestBiomeDepth = generationDepth - 1;
-      if (deepestBiomeDepth < MIN_DEEP_DARK_DEPTH) {
+      int deepestProbeDepth = generationDepth - STRUCTURE_PROBE_BOTTOM_CLEARANCE;
+      if (deepestProbeDepth < MIN_DEEP_DARK_DEPTH) {
          return NO_STRUCTURE_PROBE_DEPTH;
       }
 
-      int preferredDepth = Math.max(MIN_DEEP_DARK_DEPTH, generationDepth - STRUCTURE_PROBE_BOTTOM_CLEARANCE);
-      return Math.min(preferredDepth, deepestBiomeDepth);
+      return Math.min(PREFERRED_STRUCTURE_PROBE_DEPTH, deepestProbeDepth);
+   }
+
+   /**
+    * Normalizes a cave-biome depth against the usable shell so deeper worlds
+    * do not spend most of their underground interval at a saturated depth.
+    */
+   public static double normalizedDepthFactor(int depthBelowSurface, int undergroundDepth) {
+      int usableRange = UndergroundGenerationDepthPolicy.generationDepth(undergroundDepth) - MIN_CAVE_BIOME_DEPTH;
+      if (usableRange <= 0) {
+         return 0.0;
+      }
+      return Math.max(0.0, Math.min(1.0, (depthBelowSurface - MIN_CAVE_BIOME_DEPTH) / (double)usableRange));
    }
 }

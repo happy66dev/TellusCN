@@ -45,17 +45,26 @@ class BadlandsTerrainPolicyTest {
    }
 
    @Test
-   void plateauMaterialsFormBroadNonUniformPatches() {
+   void plateauWeatheringIsSparseAndAvoidsDarkGroundStains() {
       Set<Integer> materials = new HashSet<>();
-      for (int z = 0; z <= 1024; z += 32) {
-         for (int x = 0; x <= 1024; x += 32) {
-            materials.add(BadlandsTerrainPolicy.plateauMaterialIndex(x, z));
+      int redSandColumns = 0;
+      int terracottaColumns = 0;
+      for (int z = -4096; z < 4096; z += 16) {
+         for (int x = -4096; x < 4096; x += 16) {
+            int material = BadlandsTerrainPolicy.plateauMaterialIndex(x, z);
+            materials.add(material);
+            if (material == BadlandsTerrainPolicy.PLATEAU_RED_SAND) {
+               redSandColumns++;
+            } else if (material == BadlandsTerrainPolicy.PLATEAU_TERRACOTTA) {
+               terracottaColumns++;
+            }
          }
       }
 
-      assertTrue(materials.contains(BadlandsTerrainPolicy.PLATEAU_RED_SAND));
-      assertTrue(materials.contains(BadlandsTerrainPolicy.PLATEAU_COARSE_DIRT));
-      assertTrue(materials.contains(BadlandsTerrainPolicy.PLATEAU_TERRACOTTA));
-      assertTrue(materials.contains(BadlandsTerrainPolicy.PLATEAU_BROWN_TERRACOTTA));
+      int sampledColumns = redSandColumns + terracottaColumns;
+      double terracottaCoverage = terracottaColumns / (double)sampledColumns;
+      assertEquals(Set.of(BadlandsTerrainPolicy.PLATEAU_RED_SAND, BadlandsTerrainPolicy.PLATEAU_TERRACOTTA), materials);
+      assertTrue(terracottaCoverage >= 0.02, "Expected some exposed terracotta");
+      assertTrue(terracottaCoverage <= 0.05, "Exposed terracotta should remain a sparse plateau accent");
    }
 }

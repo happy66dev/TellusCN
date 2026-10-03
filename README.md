@@ -93,10 +93,15 @@ These options are currently locked and not adjustable yet. They describe what wi
 
 ### Geological Settings
 The cave and underground generation system is still work in progress, so expect changes here.
-- **Cave Generation**: Toggles underground cave generation.
-- **Ore Distribution**: Enables vanilla ore distribution in Tellus worlds.
+- **Cave Generation**: Projects modern Overworld cave density throughout the configured terrain shell, with supplemental tunnels and ravines.
+- **Ore Distribution**: Generates mineable ores and raw ore blocks independently from decorative host-rock patches.
+- **Geological Stone Patches**: Optionally generates buried granite, diorite, andesite, and tuff patches. This is disabled by default.
 - **Lava Pools**: Enables underground lava pools.
-- **Underground Depth**: Controls how far solid terrain extends below the local surface. Vanilla underground content remains in the first 64 blocks; increasing this setting adds deeper solid terrain without stretching cave or structure generation.
+- **Underground Depth**: Controls how far the terrain shell, caves, ores, cave biomes, and underground structures extend below the local surface.
+
+Tellus reads the live `minecraft:overworld` noise settings, so compatible data packs and mods that replace the Overworld density router can influence its modern cave field. Mods that add biome-registered custom carvers are not currently supported by the Tellus surface-relative carver runner.
+
+Worlds created with earlier 0.8.1 builds keep their already-generated chunks unchanged. Newly generated chunks use the corrected full-depth underground rules, so underground seams may be visible at old chunk borders.
 
 ### Structure Settings
 This section lets you toggle vanilla structures and world features on or off, such as villages, temples, monuments, ruins, and underground features like Deep Dark and amethyst geodes. Some structures (notably Deep Dark and certain ocean structures) may not generate properly yet and are still work in progress.
@@ -113,7 +118,7 @@ This section lets you toggle vanilla structures and world features on or off, su
 
 ### Cache
 - **OSM data**: Cached map, road, and water tiles used by Tellus map and OSM features. Deleting will force re-downloads as needed.
-- **Overture Maps land cover**: Cached adaptive-zoom vector tiles used for biome and vegetation lookups.
+- **ESA WorldCover land cover**: Official 10 m categorical COG pixels and internal overview levels, fetched and cached by compressed byte range for biome and vegetation lookups.
 - **Koppen climate**: Cached climate raster used for biome climate classification.
 - **Mapterhorn terrain**: Cached elevation tiles used for terrain height sampling.
 - **OpenWaters bathymetry**: Cached bathymetry tiles used for ocean and underwater terrain.
@@ -124,14 +129,16 @@ This section lets you toggle vanilla structures and world features on or off, su
 <details>
   <summary>Data Sources</summary>
 
-### Overture Maps land cover
-- Overture Maps base-theme `land_cover` vector tiles, selected at a zoom appropriate to the configured world scale and LOD resolution.
-- © Overture Maps Foundation. Base-theme license: ODbL.
-- Derived from ESA WorldCover 2020: © ESA WorldCover project / Contains modified Copernicus Sentinel data (2020) processed by ESA WorldCover consortium.
+### ESA WorldCover land cover
+- ESA WorldCover 2021 v200 is sampled at its native approximately 10 m resolution for close terrain. Its built-in 20–640 m COG overviews are selected for larger world scales and LOD requests.
+- Tellus requests only the compressed TIFF blocks needed for the explored area and stores them in a bounded local cache; it does not download complete 3° source files.
+- The decoded memory cache defaults to 64 MiB and the compressed disk cache to 512 MiB. Override them with `tellus.worldcover.memoryCacheMb` and `tellus.worldcover.diskCacheMb`; mirrors can use `tellus.worldcover.baseUrl`.
+- © ESA WorldCover project 2021 / Contains modified Copernicus Sentinel data (2021) processed by ESA WorldCover consortium.
 - ESA WorldCover license: CC BY 4.0.
+- Overture Maps base-theme land cover remains an availability and out-of-coverage fallback. © Overture Maps Foundation; base-theme license: ODbL.
+- https://esa-worldcover.org/en/data-access
 - https://docs.overturemaps.org/attribution/
-- https://docs.overturemaps.org/schema/reference/base/land_cover/
-- In-game processing: fetched with PMTiles byte ranges, rasterized to the world grid, and cached as compact tiles for fast lookup.
+- In-game processing: the primary COG is fetched with HTTP byte ranges and sampled directly; Overture fallback vectors use PMTiles byte ranges and a compact raster cache.
 
 ### Overture Maps water
 - Overture Maps base-theme water features provide inland-water geometry and definitive `ocean`/`sea` coastline polygons.

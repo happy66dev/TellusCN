@@ -1,18 +1,16 @@
 package com.yucareux.tellus.worldgen;
 
 /**
- * Defines the fixed surface-relative band used by vanilla underground content.
- * The configured underground depth controls terrain thickness only; increasing
- * it must not stretch caves, features, biomes, or structures into deeper rock.
+ * Defines the surface-relative interval used by underground content.
+ * The configured underground depth is the terrain shell: caves, features,
+ * biomes, and structures may use every block above its protected floor.
  */
 public final class UndergroundGenerationDepthPolicy {
-   public static final int MAX_DEPTH_BELOW_SURFACE = 64;
-
    private UndergroundGenerationDepthPolicy() {
    }
 
    public static int generationDepth(int undergroundDepth) {
-      return Math.min(Math.max(undergroundDepth, 0), MAX_DEPTH_BELOW_SURFACE);
+      return Math.max(undergroundDepth, 0);
    }
 
    /**

@@ -425,6 +425,7 @@ public class EarthCustomizeScreen extends Screen {
       this.setToggleValue("cave_generation", settings.caveGeneration());
       this.setToggleValue("caves_reach_surface", settings.cavesReachSurface());
       this.setToggleValue("ore_distribution", settings.oreDistribution());
+      this.setToggleValue("geological_stone_patches", settings.geologicalStonePatches());
       this.setToggleValue("enable_roads", settings.enableRoads());
       this.setToggleValue("enable_buildings", settings.enableBuildings());
       this.setToggleValue("thin_shell_terrain", settings.thinShellTerrain());
@@ -492,6 +493,7 @@ public class EarthCustomizeScreen extends Screen {
          this.findSliderValue("underground_depth", EarthGeneratorSettings.DEFAULT.undergroundDepth())
       );
       boolean oreDistribution = this.findToggleValue("ore_distribution", EarthGeneratorSettings.DEFAULT.oreDistribution());
+      boolean geologicalStonePatches = this.findToggleValue("geological_stone_patches", EarthGeneratorSettings.DEFAULT.geologicalStonePatches());
       boolean lavaPools = this.findToggleValue("lava_pools", EarthGeneratorSettings.DEFAULT.lavaPools());
       boolean enableRoads = this.findToggleValue("enable_roads", EarthGeneratorSettings.DEFAULT.enableRoads());
       boolean enableBuildings = this.findToggleValue("enable_buildings", EarthGeneratorSettings.DEFAULT.enableBuildings());
@@ -568,6 +570,7 @@ public class EarthCustomizeScreen extends Screen {
          shorelineBlendCliffLimit,
          caveGeneration,
          oreDistribution,
+         geologicalStonePatches,
          lavaPools,
          addStrongholds,
          addVillages,
@@ -656,6 +659,7 @@ public class EarthCustomizeScreen extends Screen {
       this.setToggleValue("cave_generation", initialSettings.caveGeneration());
       this.setToggleValue("caves_reach_surface", initialSettings.cavesReachSurface());
       this.setToggleValue("ore_distribution", initialSettings.oreDistribution());
+      this.setToggleValue("geological_stone_patches", initialSettings.geologicalStonePatches());
       this.setToggleValue("lava_pools", initialSettings.lavaPools());
       this.setToggleValue("enable_roads", initialSettings.enableRoads());
       this.setToggleValue("enable_buildings", initialSettings.enableBuildings());
@@ -854,6 +858,7 @@ public class EarthCustomizeScreen extends Screen {
                toggle("cave_generation", EarthGeneratorSettings.DEFAULT.caveGeneration()),
                toggle("caves_reach_surface", EarthGeneratorSettings.DEFAULT.cavesReachSurface()),
                toggle("ore_distribution", EarthGeneratorSettings.DEFAULT.oreDistribution()),
+               toggle("geological_stone_patches", EarthGeneratorSettings.DEFAULT.geologicalStonePatches()),
                toggle("lava_pools", EarthGeneratorSettings.DEFAULT.lavaPools())
             )
          )
@@ -2090,7 +2095,9 @@ public class EarthCustomizeScreen extends Screen {
       OSM("tellus.cache.section.osm", "tellus/cache/map", TellusCacheDomain.OSM),
       LAND_COVER(
          "tellus.cache.section.land_cover",
-         new String[]{"tellus/cache/land-cover-overture", "tellus/cache/worldcover2021"},
+         new String[]{
+            "tellus/cache/worldcover-2021-v200-range", "tellus/cache/land-cover-overture", "tellus/cache/worldcover2021"
+         },
          new TellusCacheDomain[]{TellusCacheDomain.LAND_COVER}
       ),
       KOPPEN("tellus.cache.section.koppen", "tellus/cache/koppen", TellusCacheDomain.KOPPEN),

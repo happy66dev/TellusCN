@@ -1,5 +1,6 @@
 package com.yucareux.tellus.worldgen.caves;
 
+import com.yucareux.tellus.worldgen.UndergroundStructureExclusion;
 import java.util.List;
 import java.util.Objects;
 import java.util.function.IntBinaryOperator;
@@ -45,7 +46,7 @@ public final class TellusVanillaCarverRunner {
 
    public TellusVanillaCarverRunner(
        BiomeSource biomeSource, Registry<Block> blockRegistry, Holder<NoiseGeneratorSettings> vanillaNoiseSettings,
-      Holder<NoiseGeneratorSettings> noiseSettings, int tellusMinY, int tellusHeight
+      Holder<NoiseGeneratorSettings> noiseSettings, int tellusMinY, int tellusHeight, int undergroundDepth
    ) {
       this.biomeSource = Objects.requireNonNull(biomeSource, "biomeSource");
       Objects.requireNonNull(blockRegistry, "blockRegistry");
@@ -53,7 +54,7 @@ public final class TellusVanillaCarverRunner {
       this.chunkMinY = tellusMinY;
       this.contextNoiseSettings = Objects.requireNonNull((NoiseGeneratorSettings)contextSettings.value(), "contextNoiseSettings");
       this.carvingContextGenerator = Objects.requireNonNull(new NoiseBasedChunkGenerator(this.biomeSource, contextSettings), "carvingContextGenerator");
-      this.configuredCarvers = TellusConfiguredCarvers.create(blockRegistry, tellusMinY, tellusHeight);
+      this.configuredCarvers = TellusConfiguredCarvers.create(blockRegistry, tellusMinY, tellusHeight, undergroundDepth);
       this.noiseCaveSampler = new TellusVanillaNoiseCaveSampler(
          Objects.requireNonNull(vanillaNoiseSettings, "vanillaNoiseSettings").value()
       );
@@ -69,10 +70,12 @@ public final class TellusVanillaCarverRunner {
       boolean applyCaves,
       boolean cavesReachSurface,
       boolean applyOreVeins,
+      boolean applyGeologicalStonePatches,
       int[] surfaceYByColumn,
       IntBinaryOperator surfaceHeightSampler,
       int[] floodGuardYByColumn,
-      int[] generationFloorYByColumn
+      int[] generationFloorYByColumn,
+      List<UndergroundStructureExclusion.Box> structureExclusions
    ) {
       StructureManager safeStructures = Objects.requireNonNull(structures, "structures");
       IntBinaryOperator safeSurfaceHeightSampler = Objects.requireNonNull(surfaceHeightSampler, "surfaceHeightSampler");
@@ -83,16 +86,18 @@ public final class TellusVanillaCarverRunner {
       this.noiseCaveSampler.apply(
          registryAccess,
          worldSeed,
-         safeStructures,
          chunk,
          this.chunkMinY,
          tellusSeaLevel,
          applyCaves,
          cavesReachSurface,
          applyOreVeins,
+         applyGeologicalStonePatches,
          surfaceYByColumn,
+         safeSurfaceHeightSampler,
          floodGuardYByColumn,
          generationFloorYByColumn,
+         structureExclusions,
          (target, pos, state, fluid) -> {
             target.setBlockState(pos, state);
             if (fluid && target instanceof ProtoChunk protoChunk) {
@@ -123,7 +128,17 @@ public final class TellusVanillaCarverRunner {
       CarvingContext carvingContext = new CarvingContext(
          safeCarvingContextGenerator, registryAccess, chunk.getHeightAccessorForGeneration(), noiseChunk, safeRandomState, safeNoiseSettings.surfaceRule()
       );
-      CarvingMask carvingMask = Objects.requireNonNull(getCarvingMask(chunk, floodGuardYByColumn, generationFloorYByColumn), "carvingMask");
+      CarvingMask carvingMask = Objects.requireNonNull(
+         getCarvingMask(
+            chunk,
+            cavesReachSurface,
+            surfaceYByColumn,
+            floodGuardYByColumn,
+            generationFloorYByColumn,
+            structureExclusions
+         ),
+         "carvingMask"
+      );
 
       for (int offsetX = -CARVER_RADIUS_CHUNKS; offsetX <= CARVER_RADIUS_CHUNKS; offsetX++) {
          for (int offsetZ = -CARVER_RADIUS_CHUNKS; offsetZ <= CARVER_RADIUS_CHUNKS; offsetZ++) {
@@ -155,7 +170,14 @@ public final class TellusVanillaCarverRunner {
    }
 
 
-   private static CarvingMask getCarvingMask(ChunkAccess chunk, int[] floodGuardYByColumn, int[] generationFloorYByColumn) {
+   private static CarvingMask getCarvingMask(
+      ChunkAccess chunk,
+      boolean cavesReachSurface,
+      int[] surfaceYByColumn,
+      int[] floodGuardYByColumn,
+      int[] generationFloorYByColumn,
+      List<UndergroundStructureExclusion.Box> structureExclusions
+   ) {
       CarvingMask baseMask;
       if (chunk instanceof ProtoChunk protoChunk) {
          baseMask = protoChunk.getOrCreateCarvingMask();
@@ -163,14 +185,25 @@ public final class TellusVanillaCarverRunner {
          baseMask = new CarvingMask(chunk.getHeight(), chunk.getMinY());
       }
 
-      if (floodGuardYByColumn == null && generationFloorYByColumn == null) {
+      if ((cavesReachSurface || surfaceYByColumn == null)
+         && floodGuardYByColumn == null
+         && generationFloorYByColumn == null
+         && (structureExclusions == null || structureExclusions.isEmpty())) {
          return Objects.requireNonNull(baseMask, "baseMask");
       } else {
+         int chunkMinX = chunk.getPos().getMinBlockX();
+         int chunkMinZ = chunk.getPos().getMinBlockZ();
          CarvingMask guardedMask = new CarvingMask(baseMask.toArray(), chunk.getMinY());
          guardedMask.setAdditionalMask((x, y, z) -> {
-            int index = chunkIndex(x & 15, z & 15);
-            return floodGuardYByColumn != null && y >= floodGuardYByColumn[index]
-               || generationFloorYByColumn != null && y <= generationFloorYByColumn[index];
+            int localX = x & 15;
+            int localZ = z & 15;
+            int index = chunkIndex(localX, localZ);
+            return !cavesReachSurface && surfaceYByColumn != null && y >= surfaceYByColumn[index] - 4
+               || floodGuardYByColumn != null && y >= floodGuardYByColumn[index]
+               || generationFloorYByColumn != null && y <= generationFloorYByColumn[index]
+               || UndergroundStructureExclusion.blocksCarving(
+                  structureExclusions, chunkMinX + localX, y, chunkMinZ + localZ
+               );
          });
          return Objects.requireNonNull(guardedMask, "guardedMask");
       }

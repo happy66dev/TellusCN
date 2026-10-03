@@ -720,7 +720,7 @@ public final class EarthBiomeSource extends BiomeSource {
          }
       }
 
-      double depthFactor = Mth.clamp((depth - TellusCaveBiomeDepthPolicy.MIN_CAVE_BIOME_DEPTH) / 80.0, 0.0, 1.0);
+      double depthFactor = TellusCaveBiomeDepthPolicy.normalizedDepthFactor(depth, this.settings.undergroundDepth());
       double noise = sampleCaveNoise(blockX, blockY, blockZ, CAVE_BIOME_GRID, CAVE_BIOME_Y_GRID);
       Holder<Biome> lushCavesBiome = this.lushCaves;
       Holder<Biome> dripstoneCavesBiome = this.dripstoneCaves;
@@ -758,7 +758,7 @@ public final class EarthBiomeSource extends BiomeSource {
          return false;
       }
 
-      double depthFactor = Mth.clamp((depth - TellusCaveBiomeDepthPolicy.MIN_CAVE_BIOME_DEPTH) / 80.0, 0.0, 1.0);
+      double depthFactor = TellusCaveBiomeDepthPolicy.normalizedDepthFactor(depth, this.settings.undergroundDepth());
       double deepNoise = sampleCaveNoise(blockX, -depth, blockZ, DEEP_DARK_GRID, DEEP_DARK_Y_GRID);
       return deepNoise < 0.28 + depthFactor * 0.22;
    }

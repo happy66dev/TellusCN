@@ -44,7 +44,8 @@ public final class BadlandsTerrainPolicy {
    };
    private static final long BAND_WARP_SALT = 12995809138867221L;
    private static final long BAND_DETAIL_SALT = -6847214812577612469L;
-   private static final long PLATEAU_PATCH_SALT = 4386340699155943953L;
+   private static final long PLATEAU_EXPOSURE_SALT = 4386340699155943953L;
+   private static final long PLATEAU_DETAIL_SALT = -2985479411584043847L;
 
    private BadlandsTerrainPolicy() {
    }
@@ -89,14 +90,14 @@ public final class BadlandsTerrainPolicy {
    }
 
    public static int plateauMaterialIndex(int worldX, int worldZ) {
-      double patch = sampleValueNoise(worldX, worldZ, 80, PLATEAU_PATCH_SALT);
-      if (patch < 0.25) {
-         return PLATEAU_COARSE_DIRT;
-      } else if (patch < 0.42) {
-         return PLATEAU_TERRACOTTA;
-      } else {
-         return patch > 0.80 ? PLATEAU_BROWN_TERRACOTTA : PLATEAU_RED_SAND;
-      }
+      // Flat badlands accumulate a mostly continuous red-sand cap. Blend a
+      // second, shorter wavelength into the exposure field so the occasional
+      // bare-terracotta pocket has a weathered edge instead of looking like a
+      // broad contour stain. Steep terrain gets the full band palette later.
+      double broadExposure = sampleValueNoise(worldX, worldZ, 56, PLATEAU_EXPOSURE_SALT);
+      double edgeDetail = sampleValueNoise(worldX, worldZ, 13, PLATEAU_DETAIL_SALT);
+      double exposure = broadExposure * 0.65 + edgeDetail * 0.35;
+      return exposure >= 0.78 ? PLATEAU_TERRACOTTA : PLATEAU_RED_SAND;
    }
 
    private static int bandOffset(int worldX, int worldZ) {

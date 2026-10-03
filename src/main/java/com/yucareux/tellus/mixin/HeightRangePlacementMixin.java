@@ -1,6 +1,9 @@
 package com.yucareux.tellus.mixin;
 
 import com.yucareux.tellus.worldgen.EarthChunkGenerator;
+import com.yucareux.tellus.worldgen.GeologicalStonePlacementPolicy;
+import com.yucareux.tellus.worldgen.OrePlacementDensityPolicy;
+import com.yucareux.tellus.worldgen.UndergroundFeatureClassifier;
 import com.yucareux.tellus.worldgen.UndergroundGenerationDepthPolicy;
 import com.yucareux.tellus.worldgen.caves.TellusCaveDepthMapper;
 import java.util.stream.Stream;
@@ -8,7 +11,6 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.level.LevelHeightAccessor;
 import net.minecraft.world.level.block.Blocks;
-import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.levelgen.WorldGenerationContext;
 import net.minecraft.world.level.levelgen.heightproviders.HeightProvider;
 import net.minecraft.world.level.levelgen.placement.HeightRangePlacement;
@@ -23,8 +25,8 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 /**
  * Vanilla underground placed features sample a fixed absolute Y profile. In a
  * Tellus terrain shell that profile may be far from the local underground
- * range. Sample it against a fixed vanilla surface and project the result into
- * Tellus's fixed 64-block generation band instead.
+ * range. Sample it against an elevation-aware vanilla surface and project the
+ * result throughout the configured Tellus shell.
  */
 @Mixin(HeightRangePlacement.class)
 public abstract class HeightRangePlacementMixin {
@@ -61,16 +63,63 @@ public abstract class HeightRangePlacementMixin {
             return TellusCaveDepthMapper.VANILLA_MAX_Y - TellusCaveDepthMapper.VANILLA_MIN_Y + 1;
          }
       };
-      int virtualY = this.height.sample(random, vanillaContext);
-      int actualSurfaceY = context.getHeight(Heightmap.Types.OCEAN_FLOOR_WG, origin.getX(), origin.getZ()) - 1;
+      int actualSurfaceY = earthGenerator.getUndergroundPlacementSurfaceY(origin.getX(), origin.getZ());
       int actualBottomY = findUsableUndergroundBottom(context, earthGenerator, origin, actualSurfaceY);
-      int virtualSurfaceY = TellusCaveDepthMapper.VANILLA_SEA_LEVEL;
-      int actualY = TellusCaveDepthMapper.actualYForVirtualFeature(
-         virtualY, virtualSurfaceY, actualSurfaceY, actualBottomY
+      int virtualSurfaceY = TellusCaveDepthMapper.virtualSurfaceForTellusColumn(
+         actualSurfaceY, earthGenerator.getSeaLevel()
       );
-      callback.setReturnValue(
-         actualY == Integer.MIN_VALUE ? Stream.empty() : Stream.of(origin.atY(actualY))
-      );
+      UndergroundFeatureClassifier.Kind featureKind = context.topFeature()
+         .map(UndergroundFeatureClassifier::classify)
+         .orElse(UndergroundFeatureClassifier.Kind.OTHER);
+      if (featureKind == UndergroundFeatureClassifier.Kind.MINEABLE_ORE && !earthGenerator.settings().oreDistribution()
+         || featureKind == UndergroundFeatureClassifier.Kind.GEOLOGICAL_STONE
+            && !earthGenerator.settings().geologicalStonePatches()) {
+         callback.setReturnValue(Stream.empty());
+         return;
+      }
+
+      int sampleCount = featureKind == UndergroundFeatureClassifier.Kind.MINEABLE_ORE
+         ? OrePlacementDensityPolicy.placementSamples(
+            actualSurfaceY - actualBottomY,
+            virtualSurfaceY - TellusCaveDepthMapper.VANILLA_MIN_Y,
+            random
+         )
+         : 1;
+      int minimumNearbySurfaceY = featureKind == UndergroundFeatureClassifier.Kind.GEOLOGICAL_STONE
+         ? minimumNearbySurfaceY(earthGenerator, origin, GeologicalStonePlacementPolicy.BLOB_SURFACE_SAMPLE_RADIUS)
+         : Integer.MAX_VALUE;
+      Stream.Builder<BlockPos> positions = Stream.builder();
+      for (int sample = 0; sample < sampleCount; sample++) {
+         int virtualY = this.height.sample(random, vanillaContext);
+         int actualY = TellusCaveDepthMapper.actualYForVirtualFeature(
+            virtualY, virtualSurfaceY, actualSurfaceY, actualBottomY
+         );
+         if (featureKind == UndergroundFeatureClassifier.Kind.GEOLOGICAL_STONE) {
+            actualY = GeologicalStonePlacementPolicy.safeBlobOriginY(
+               actualY, minimumNearbySurfaceY, actualBottomY
+            );
+         }
+         if (actualY != Integer.MIN_VALUE
+            && !earthGenerator.isUndergroundStructureFeaturePlacementBlocked(
+               origin.getX(), actualY, origin.getZ()
+            )) {
+            positions.add(origin.atY(actualY));
+         }
+      }
+      callback.setReturnValue(positions.build());
+   }
+
+   private static int minimumNearbySurfaceY(EarthChunkGenerator generator, BlockPos origin, int radius) {
+      int minimumSurfaceY = Integer.MAX_VALUE;
+      for (int dz = -radius; dz <= radius; dz++) {
+         for (int dx = -radius; dx <= radius; dx++) {
+            minimumSurfaceY = Math.min(
+               minimumSurfaceY,
+               generator.getUndergroundPlacementSurfaceY(origin.getX() + dx, origin.getZ() + dz)
+            );
+         }
+      }
+      return minimumSurfaceY;
    }
 
    private static int findUsableUndergroundBottom(

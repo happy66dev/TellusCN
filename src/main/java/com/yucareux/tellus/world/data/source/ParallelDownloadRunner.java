@@ -157,7 +157,8 @@ public final class ParallelDownloadRunner {
             if (reporter == null) {
                downloader.accept(requestedItem);
             } else {
-               try (DownloadProgressReporter.Scope ignored = DownloadProgressReporter.push(reporter)) {
+               DownloadProgressReporter.Scope progressScope = DownloadProgressReporter.push(reporter);
+               try (progressScope) {
                   downloader.accept(requestedItem);
                }
             }

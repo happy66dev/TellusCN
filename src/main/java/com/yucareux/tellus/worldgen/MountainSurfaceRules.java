@@ -102,6 +102,14 @@ public final class MountainSurfaceRules {
          || coverClass == ESA_MOSS_LICHEN;
    }
 
+   /**
+    * Keeps distinctive biome materials authoritative over generic land-cover mountain materials.
+    * ESA bare ground describes vegetation cover, so it must not turn elevated desert sand into stone.
+    */
+   public static boolean preservesBiomeSurfacePalette(boolean desertBiome, boolean badlandsBiome) {
+      return desertBiome || badlandsBiome;
+   }
+
    public static boolean isMountainRockyCover(int coverClass, int heightAboveSea) {
       // Keep vegetated land cover authoritative here. The generator can still
       // expose stone locally through its steep-slope surface fallback.

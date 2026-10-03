@@ -18,20 +18,22 @@ class TellusVanillaNoiseCaveSamplerTest {
    }
 
    @Test
-   void preservesEveryVanillaLargeOreVeinMaterial() {
-      assertPreserved(Blocks.COPPER_ORE);
-      assertPreserved(Blocks.RAW_COPPER_BLOCK);
-      assertPreserved(Blocks.GRANITE);
-      assertPreserved(Blocks.DEEPSLATE_IRON_ORE);
-      assertPreserved(Blocks.RAW_IRON_BLOCK);
-      assertPreserved(Blocks.TUFF);
+   void separatesMineableOreVeinsFromTheirGeologicalHostStone() {
+      assertPreserved(Blocks.COPPER_ORE, true, false);
+      assertPreserved(Blocks.RAW_COPPER_BLOCK, true, false);
+      assertPreserved(Blocks.DEEPSLATE_IRON_ORE, true, false);
+      assertPreserved(Blocks.RAW_IRON_BLOCK, true, false);
+      assertPreserved(Blocks.GRANITE, false, true);
+      assertPreserved(Blocks.TUFF, false, true);
+      assertNull(TellusVanillaNoiseCaveSampler.oreVeinReplacement(Blocks.GRANITE.defaultBlockState(), true, false));
+      assertNull(TellusVanillaNoiseCaveSampler.oreVeinReplacement(Blocks.COPPER_ORE.defaultBlockState(), false, true));
    }
 
    @Test
    void rejectsOrdinaryNoiseTerrain() {
-      assertNull(TellusVanillaNoiseCaveSampler.oreVeinReplacement(Blocks.STONE.defaultBlockState()));
-      assertNull(TellusVanillaNoiseCaveSampler.oreVeinReplacement(Blocks.DEEPSLATE.defaultBlockState()));
-      assertNull(TellusVanillaNoiseCaveSampler.oreVeinReplacement(Blocks.IRON_ORE.defaultBlockState()));
+      assertNull(TellusVanillaNoiseCaveSampler.oreVeinReplacement(Blocks.STONE.defaultBlockState(), true, true));
+      assertNull(TellusVanillaNoiseCaveSampler.oreVeinReplacement(Blocks.DEEPSLATE.defaultBlockState(), true, true));
+      assertNull(TellusVanillaNoiseCaveSampler.oreVeinReplacement(Blocks.IRON_ORE.defaultBlockState(), true, true));
    }
 
    @Test
@@ -41,8 +43,8 @@ class TellusVanillaNoiseCaveSamplerTest {
       assertEquals(85, TellusVanillaNoiseCaveSampler.surfaceReferenceY(80, 85, true));
    }
 
-   private static void assertPreserved(Block block) {
+   private static void assertPreserved(Block block, boolean applyOres, boolean applyGeology) {
       BlockState state = block.defaultBlockState();
-      assertSame(state, TellusVanillaNoiseCaveSampler.oreVeinReplacement(state));
+      assertSame(state, TellusVanillaNoiseCaveSampler.oreVeinReplacement(state, applyOres, applyGeology));
    }
 }

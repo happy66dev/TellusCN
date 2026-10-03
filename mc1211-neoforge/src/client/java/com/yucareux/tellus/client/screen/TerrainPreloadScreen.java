@@ -65,6 +65,7 @@ public class TerrainPreloadScreen extends Screen {
    private Button structuresButton;
    private Button cavesButton;
    private Button oresButton;
+   private Button geologyButton;
    private Button thinShellButton;
    private Button experimentalHeightButton;
    private Button startButton;
@@ -148,10 +149,11 @@ public class TerrainPreloadScreen extends Screen {
       this.structuresButton = this.addRenderableWidget(Button.builder(Component.empty(), button -> this.setOverrides(this.overrides.withAddStructures(!this.overrides.addStructures()))).bounds(rightColumnX, y + 82, columnWidth, CONTROL_HEIGHT).build());
       this.cavesButton = this.addRenderableWidget(Button.builder(Component.empty(), button -> this.setOverrides(this.overrides.withCaveGeneration(!this.overrides.caveGeneration()))).bounds(innerX, y + 104, columnWidth, CONTROL_HEIGHT).build());
       this.oresButton = this.addRenderableWidget(Button.builder(Component.empty(), button -> this.setOverrides(this.overrides.withOreDistribution(!this.overrides.oreDistribution()))).bounds(rightColumnX, y + 104, columnWidth, CONTROL_HEIGHT).build());
-      this.thinShellButton = this.addRenderableWidget(Button.builder(Component.empty(), button -> this.setOverrides(this.overrides.withThinShellTerrain(!this.overrides.thinShellTerrain()))).bounds(innerX, y + 126, columnWidth, CONTROL_HEIGHT).build());
+      this.geologyButton = this.addRenderableWidget(Button.builder(Component.empty(), button -> this.setOverrides(this.overrides.withGeologicalStonePatches(!this.overrides.geologicalStonePatches()))).bounds(innerX, y + 126, columnWidth, CONTROL_HEIGHT).build());
+      this.thinShellButton = this.addRenderableWidget(Button.builder(Component.empty(), button -> this.setOverrides(this.overrides.withThinShellTerrain(!this.overrides.thinShellTerrain()))).bounds(rightColumnX, y + 126, columnWidth, CONTROL_HEIGHT).build());
       this.experimentalHeightButton = this.addRenderableWidget(
          Button.builder(Component.empty(), button -> {
-         }).bounds(rightColumnX, y + 126, columnWidth, CONTROL_HEIGHT).build()
+         }).bounds(innerX, y + 148, innerWidth, CONTROL_HEIGHT).build()
       );
       this.experimentalHeightButton.setTooltip(Tooltip.create(experimentalIncreaseHeightTooltip()));
    }
@@ -290,6 +292,7 @@ public class TerrainPreloadScreen extends Screen {
       this.structuresButton.visible = showWorld;
       this.cavesButton.visible = showWorld;
       this.oresButton.visible = showWorld;
+      this.geologyButton.visible = showWorld;
       this.thinShellButton.visible = showWorld;
       this.experimentalHeightButton.visible = showWorld;
       this.experimentalHeightButton.active = false;
@@ -299,6 +302,7 @@ public class TerrainPreloadScreen extends Screen {
       this.structuresButton.setMessage(toggleLabel("tellus.preload.toggle.structures", this.overrides.addStructures()));
       this.cavesButton.setMessage(toggleLabel("tellus.preload.toggle.caves", this.overrides.caveGeneration()));
       this.oresButton.setMessage(toggleLabel("tellus.preload.toggle.ores", this.overrides.oreDistribution()));
+      this.geologyButton.setMessage(toggleLabel("tellus.preload.toggle.geology", this.overrides.geologicalStonePatches()));
       this.thinShellButton.setMessage(toggleLabel("tellus.preload.toggle.shell", this.overrides.thinShellTerrain()));
       this.experimentalHeightButton.setMessage(toggleLabel("tellus.preload.toggle.experimental_height", this.overrides.experimentalIncreaseHeight()));
    }
@@ -429,7 +433,7 @@ public class TerrainPreloadScreen extends Screen {
       int panelWidth = this.panelWidth();
       int x = this.width - panelWidth - PANEL_MARGIN;
       int y = this.panelY();
-      int height = this.openPanel == TerrainPreloadScreen.Panel.WORLD ? 154 : 72;
+      int height = this.openPanel == TerrainPreloadScreen.Panel.WORLD ? 176 : 72;
       graphics.fill(x, y, x + panelWidth, y + height, -1442840576);
       graphics.renderOutline(x, y, panelWidth, height, -6250336);
       graphics.drawString(
@@ -498,7 +502,9 @@ public class TerrainPreloadScreen extends Screen {
          toggleLabel("tellus.preload.toggle.caves", this.overrides.caveGeneration())
             .copy()
             .append("  ")
-            .append(toggleLabel("tellus.preload.toggle.ores", this.overrides.oreDistribution())),
+            .append(toggleLabel("tellus.preload.toggle.ores", this.overrides.oreDistribution()))
+            .append("  ")
+            .append(toggleLabel("tellus.preload.toggle.geology", this.overrides.geologicalStonePatches())),
          textX,
          textY + 84,
          12632256
@@ -555,10 +561,6 @@ public class TerrainPreloadScreen extends Screen {
          .withStyle(ChatFormatting.GRAY)
          .append(Component.literal("\n"))
          .append(Component.translatable("property.tellus.experimental_increase_height.warning").withStyle(ChatFormatting.RED));
-   }
-
-   private static String onOff(boolean value) {
-      return Component.translatable(value ? "options.on" : "options.off").getString();
    }
 
    private static String formatScale(double value) {
