@@ -8,9 +8,11 @@
 
 package com.yucareux.tellus.config;
 
+import java.util.List;
+
 /**
  * Tellus 端点配置工具类
- * 
+ *
  * 提供统一的数据源端点获取方法
  * 优先级：游戏内设置 > JVM 启动参数 > 默认官方源
  */
@@ -44,7 +46,46 @@ public final class TellusEndpointConfig {
       // 3. 返回默认值
       return defaultValue;
    }
-   
+
+   /**
+    * 获取端点候选列表：优先地址在前，官方默认地址兜底在后
+    *
+    * 用途：PMTiles 这类"整文件读取"的数据源，一旦镜像路由失效就会整体不可用，
+    * 因此需要准备一个备用地址，在优先地址读不到数据时自动降级重试。
+    *
+    * @param systemPropertyKey JVM 参数 key，用于解析优先地址
+    * @param defaultValue      官方默认地址，同时作为兜底地址
+    * @return 去重且已过滤空值的候选地址列表
+    */
+   public static List<String> getEndpointCandidates(String systemPropertyKey, String defaultValue) {
+      // 先按已有关键字解析逻辑取出优先地址，它可能是镜像地址、JVM 覆盖值或默认值
+      String primaryEndpoint = getEndpoint(systemPropertyKey, defaultValue);
+      // 交给纯函数完成空值过滤、去重与顺序编排
+      return OvertureDataConfig.sourceCandidates(primaryEndpoint, defaultValue);
+   }
+
+   /**
+    * 获取 Overture 建筑数据的候选地址列表
+    *
+    * @param officialUrl 官方默认的建筑瓦片地址
+    * @return 优先地址在前、官方地址兜底的候选列表
+    */
+   public static List<String> getOvertureBuildingsCandidates(String officialUrl) {
+      // 复用通用候选逻辑，JVM 参数 key 固定为建筑端点
+      return getEndpointCandidates("tellus.overture.buildings.endpoint", officialUrl);
+   }
+
+   /**
+    * 获取 Overture 道路数据的候选地址列表
+    *
+    * @param officialUrl 官方默认的道路瓦片地址
+    * @return 优先地址在前、官方地址兜底的候选列表
+    */
+   public static List<String> getOvertureRoadsCandidates(String officialUrl) {
+      // 复用通用候选逻辑，JVM 参数 key 固定为道路端点
+      return getEndpointCandidates("tellus.overture.roads.endpoint", officialUrl);
+   }
+
    /**
     * 根据系统属性 key 获取对应的镜像端点
     */

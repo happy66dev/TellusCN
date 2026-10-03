@@ -4,6 +4,7 @@ import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
 import com.yucareux.tellus.Tellus;
+import com.yucareux.tellus.config.OvertureDataConfig;
 import com.yucareux.tellus.config.TellusEndpointConfig;
 import com.yucareux.tellus.cache.TellusCacheDomain;
 import com.yucareux.tellus.cache.TellusCacheHandle;
@@ -36,7 +37,8 @@ import net.minecraft.util.Mth;
 import net.minecraft.Util;
 
 public final class TellusOsmBuildingSource implements TellusCacheHandle {
-   private static final String DEFAULT_PM_TILES_URL = "https://overturemaps-extras-us-west-2.s3.us-west-2.amazonaws.com/tiles/2026-02-18.0/buildings.pmtiles";
+   // 官方建筑瓦片地址：发布版本号由 OvertureDataConfig 统一管理，可用 -Dtellus.overture.release 覆盖
+   private static final String DEFAULT_PM_TILES_URL = OvertureDataConfig.officialTileUrl("buildings");
    private static final double MIN_LAT = -85.05112878;
    private static final double MAX_LAT = 85.05112878;
    private static final double MIN_LON = -180.0;
@@ -66,8 +68,10 @@ public final class TellusOsmBuildingSource implements TellusCacheHandle {
    private volatile boolean initialized;
 
    public TellusOsmBuildingSource() {
-      String pmTilesUrl = TellusEndpointConfig.getOvertureBuildingsEndpoint(DEFAULT_PM_TILES_URL);
-      this.pmTilesReader = new PmTilesRangeReader(pmTilesUrl, CONNECT_TIMEOUT_MS, READ_TIMEOUT_MS, DIRECTORY_CACHE_ENTRIES);
+      // 收集候选瓦片地址：镜像地址优先，官方地址兜底，避免单个镜像路由失效就整体禁用建筑
+      List<String> pmTilesUrls = TellusEndpointConfig.getOvertureBuildingsCandidates(DEFAULT_PM_TILES_URL);
+      // 用多地址读取器，只有读到合法文件头时才固定生效地址，防止坏地址导致建筑全部为空
+      this.pmTilesReader = new PmTilesRangeReader(pmTilesUrls, CONNECT_TIMEOUT_MS, READ_TIMEOUT_MS, DIRECTORY_CACHE_ENTRIES);
       this.cache = CacheBuilder.newBuilder().maximumSize(MAX_CACHE_TILES).build(new CacheLoader<TileKey, OsmBuildingTile>() {
          public OsmBuildingTile load(TileKey key) {
             return TellusOsmBuildingSource.this.loadTile(key);

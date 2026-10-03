@@ -11,6 +11,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.yucareux.tellus.Tellus;
+import com.yucareux.tellus.config.OvertureDataConfig;
 import com.yucareux.tellus.config.TellusEndpointConfig;
 import com.yucareux.tellus.worldgen.EarthProjection;
 import io.github.sebasbaumh.mapbox.vectortile.VectorTile.Tile;
@@ -41,7 +42,8 @@ import net.minecraft.util.Mth;
 import net.minecraft.Util;
 
 public final class TellusOsmRoadSource implements TellusCacheHandle {
-   private static final String DEFAULT_PM_TILES_URL = "https://overturemaps-extras-us-west-2.s3.us-west-2.amazonaws.com/tiles/2026-02-18.0/transportation.pmtiles";
+   // 官方道路瓦片地址：发布版本号由 OvertureDataConfig 统一管理，可用 -Dtellus.overture.release 覆盖
+   private static final String DEFAULT_PM_TILES_URL = OvertureDataConfig.officialTileUrl("transportation");
    private static final double MIN_LAT = -85.05112878;
    private static final double MAX_LAT = 85.05112878;
    private static final double MIN_LON = -180.0;
@@ -71,8 +73,10 @@ public final class TellusOsmRoadSource implements TellusCacheHandle {
    private volatile boolean initialized;
 
    public TellusOsmRoadSource() {
-      String pmTilesUrl = TellusEndpointConfig.getOvertureRoadsEndpoint(DEFAULT_PM_TILES_URL);
-      this.pmTilesReader = new PmTilesRangeReader(pmTilesUrl, CONNECT_TIMEOUT_MS, READ_TIMEOUT_MS, DIRECTORY_CACHE_ENTRIES);
+      // 收集候选瓦片地址：镜像地址优先，官方地址兜底，避免单个镜像路由失效就整体禁用道路
+      List<String> pmTilesUrls = TellusEndpointConfig.getOvertureRoadsCandidates(DEFAULT_PM_TILES_URL);
+      // 用多地址读取器，只有读到合法文件头时才固定生效地址，防止坏地址导致道路全部缺失
+      this.pmTilesReader = new PmTilesRangeReader(pmTilesUrls, CONNECT_TIMEOUT_MS, READ_TIMEOUT_MS, DIRECTORY_CACHE_ENTRIES);
       this.cache = CacheBuilder.newBuilder().maximumSize(MAX_CACHE_TILES).build(new CacheLoader<TellusOsmRoadSource.TileKey, OverpassRoadTile>() {
          public OverpassRoadTile load(TellusOsmRoadSource.TileKey key) {
             return TellusOsmRoadSource.this.loadTile(key);

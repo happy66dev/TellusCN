@@ -3,6 +3,7 @@ package com.yucareux.tellus.world.data.osm;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
+import com.yucareux.tellus.Tellus;
 import com.yucareux.tellus.world.data.source.DownloadProgressReporter;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -23,7 +24,10 @@ final class PmTilesRangeReader {
    private static final int COMPRESSION_NONE = 1;
    private static final int COMPRESSION_GZIP = 2;
    private static final int PMTILES_VERSION = 3;
-   private final URI uri;
+   // 按列表顺序尝试的候选数据源地址，第一个能读到合法文件头的会被固定下来
+   private final List<URI> candidateUris;
+   // 当前生效的数据源地址，读取期间保持不变，避免不同版本的文件偏移被混用
+   private volatile URI activeUri;
    private final int connectTimeoutMs;
    private final int readTimeoutMs;
    private final LoadingCache<PmTilesRangeReader.DirectoryKey, PmTilesRangeReader.Directory> directoryCache;
@@ -32,9 +36,32 @@ final class PmTilesRangeReader {
    
    private PmTilesRangeReader.Directory rootDirectory;
 
+   // 单地址构造：保持与水域、沙地等既有调用方兼容
    PmTilesRangeReader(String url, int connectTimeoutMs, int readTimeoutMs, int directoryCacheEntries) {
-      this.uri = URI.create(Objects.requireNonNull(url, "url"));
+      // 把单个地址包装成只有一个候选的列表，复用下面的多地址逻辑
+      this(List.of(Objects.requireNonNull(url, "url")), connectTimeoutMs, readTimeoutMs, directoryCacheEntries);
+   }
+
+   // 多地址构造：按列表顺序尝试，通常第一个是国内镜像，第二个是官方源兜底
+   PmTilesRangeReader(List<String> urls, int connectTimeoutMs, int readTimeoutMs, int directoryCacheEntries) {
+      // 预先按候选数量分配容量，避免解析过程中扩容
+      List<URI> parsedUris = new ArrayList<>(urls.size());
+      // 逐个把字符串地址解析成 URI 对象
+      for (String url : urls) {
+         // 喵~防御：地址为 null 时立刻抛错，避免后面出现难以定位的空指针异常
+         parsedUris.add(URI.create(Objects.requireNonNull(url, "url")));
+      }
+      // 喵~防御：候选列表为空时抛错，避免造出一个永远读不到数据、却又不报错的读取器
+      if (parsedUris.isEmpty()) {
+         throw new IllegalArgumentException("PMTiles requires at least one source URL");
+      }
+      // 保存不可变副本，保证读取过程中候选列表不会被外部改动
+      this.candidateUris = List.copyOf(parsedUris);
+      // 先把生效地址指向第一个候选，保证尚未解析文件头时也有可用地址
+      this.activeUri = this.candidateUris.get(0);
+      // 连接超时至少 1 毫秒，避免 0 或负数导致无限等待
       this.connectTimeoutMs = Math.max(1, connectTimeoutMs);
+      // 读取超时同样至少 1 毫秒，避免 0 或负数导致无限等待
       this.readTimeoutMs = Math.max(1, readTimeoutMs);
       this.directoryCache = CacheBuilder.newBuilder()
          .maximumSize(Math.max(1, directoryCacheEntries))
@@ -105,23 +132,61 @@ final class PmTilesRangeReader {
    }
 
    private PmTilesRangeReader.PmTilesHeader readHeader() throws IOException {
-      byte[] headerBytes = this.readBytes(0L, HEADER_SIZE);
+      // 记录最后一次失败原因，全部候选都失败时抛给调用方，便于定位问题
+      IOException lastError = null;
+      // 按顺序尝试每个候选地址，通常是"镜像在前、官方在后"
+      for (URI candidateUri : this.candidateUris) {
+         try {
+            // 从候选地址读取前 127 字节的 PMTiles 文件头
+            byte[] headerBytes = this.readBytesFromUri(candidateUri, 0L, HEADER_SIZE);
+            // 校验魔术字与版本号，并解析出各段数据的偏移量
+            PmTilesRangeReader.PmTilesHeader parsedHeader = parseHeader(headerBytes);
+            // 喵~防御：只有拿到合法文件头之后才固定生效地址。不同发布版本的文件内部偏移不同，
+            // 若在读取过程中途切换数据源，会导致后续瓦片数据读出错乱的字节
+            this.activeUri = candidateUri;
+            // 立即返回解析成功的文件头，停止继续尝试
+            return parsedHeader;
+         } catch (IOException error) {
+            // 记录本次失败原因，供全部失败时抛出
+            lastError = error;
+            // 打日志说明这个候选不可用，方便主人从日志区分是镜像坏了还是官方源也坏了
+            Tellus.LOGGER.warn("PMTiles source unavailable, trying next candidate: {}", candidateUri, error);
+         }
+      }
+      // 喵~防御：所有候选都失败时抛出最后一次的错误，绝不让调用方拿到一个空文件头
+      throw lastError != null ? lastError : new IOException("No PMTiles source available");
+   }
+
+   private static PmTilesRangeReader.PmTilesHeader parseHeader(byte[] headerBytes) throws IOException {
+      // 校验文件前 7 个字节是否为 PMTiles 魔术字，否则说明拿到的不是 PMTiles 文件
       if (!"PMTiles".equals(new String(headerBytes, 0, 7, StandardCharsets.US_ASCII))) {
          throw new IOException("PMTiles header missing");
       } else {
+         // 读取第 8 个字节作为 PMTiles 规范版本号
          int version = headerBytes[7] & 255;
+         // 喵~防御：版本号不是已知的 3 时拒绝解析，避免按错误布局读出垃圾数据
          if (version != PMTILES_VERSION) {
             throw new IOException("Unsupported PMTiles version " + version);
          } else {
+            // 从偏移 8 开始读取根目录起始位置
             long rootOffset = readUint64(headerBytes, 8);
+            // 从偏移 16 开始读取根目录长度
             long rootLength = readUint64(headerBytes, 16);
+            // 从偏移 40 开始读取叶子目录起始位置
             long leafOffset = readUint64(headerBytes, 40);
+            // 从偏移 56 开始读取瓦片数据起始位置
             long tileOffset = readUint64(headerBytes, 56);
+            // 偏移 97 表示目录内部使用的压缩算法
             int internalCompression = headerBytes[97] & 255;
+            // 偏移 98 表示瓦片数据使用的压缩算法
             int tileCompression = headerBytes[98] & 255;
+            // 偏移 99 表示瓦片类型（1 为 MVT 矢量瓦片）
             int tileType = headerBytes[99] & 255;
+            // 偏移 100 表示该文件支持的最小缩放级别
             int minZoom = headerBytes[100] & 255;
+            // 偏移 101 表示该文件支持的最大缩放级别
             int maxZoom = headerBytes[101] & 255;
+            // 把解析出的各段信息组装成不可变的文件头对象
             return new PmTilesRangeReader.PmTilesHeader(
                rootOffset,
                rootLength,
@@ -181,10 +246,16 @@ final class PmTilesRangeReader {
    }
 
    private byte[] readBytes(long offset, int length) throws IOException {
+      // 一律走当前生效地址读取，保证同一文件的所有偏移量都来自同一个数据源
+      return this.readBytesFromUri(this.activeUri, offset, length);
+   }
+
+   private byte[] readBytesFromUri(URI sourceUri, long offset, int length) throws IOException {
       if (length <= 0) {
          return new byte[0];
       } else {
-         HttpURLConnection connection = (HttpURLConnection)this.uri.toURL().openConnection();
+         // 针对指定数据源地址建立 HTTP 连接
+         HttpURLConnection connection = (HttpURLConnection)sourceUri.toURL().openConnection();
          connection.setRequestProperty("Range", "bytes=" + offset + "-" + (offset + length - 1L));
          connection.setInstanceFollowRedirects(true);
          connection.setConnectTimeout(this.connectTimeoutMs);
