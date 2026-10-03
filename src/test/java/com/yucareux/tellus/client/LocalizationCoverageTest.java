@@ -19,7 +19,10 @@ import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 
 class LocalizationCoverageTest {
-   private static final List<String> LOCALES = List.of("es_es", "ja_jp");
+   // TellusCN：把 zh_cn 也纳入检查。上游原本只校验 es_es / ja_jp，
+   // 导致 zh_cn 长期落后（曾只有 229 个 key，而 en_us 有 432 个），
+   // 未翻译的条目在游戏里会直接显示英文原文。加入后四种语言必须始终与 en_us 保持一致。
+   private static final List<String> LOCALES = List.of("es_es", "ja_jp", "zh_cn");
    private static final Pattern FORMAT_TOKEN = Pattern.compile("%(?:[0-9]+\\$)?(?:%|[A-Za-z])");
 
    @Test
