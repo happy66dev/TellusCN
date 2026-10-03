@@ -16,7 +16,8 @@ public record TerrainPreloadSettingsOverrides(
    boolean enableBuildings,
    boolean enableWater,
    boolean thinShellTerrain,
-   boolean experimentalIncreaseHeight
+   boolean experimentalIncreaseHeight,
+   int undergroundDepth
 ) {
    public static TerrainPreloadSettingsOverrides from(EarthGeneratorSettings settings) {
       Objects.requireNonNull(settings, "settings");
@@ -29,7 +30,8 @@ public record TerrainPreloadSettingsOverrides(
          settings.enableBuildings(),
          settings.enableWater(),
          settings.thinShellTerrain(),
-         settings.experimentalIncreaseHeight()
+         settings.experimentalIncreaseHeight(),
+         settings.undergroundDepth()
       );
    }
 
@@ -60,6 +62,7 @@ public record TerrainPreloadSettingsOverrides(
       object.addProperty("enable_water", this.enableWater);
       object.addProperty("thin_shell_terrain", this.thinShellTerrain);
       object.addProperty("experimental_increase_height", this.experimentalIncreaseHeight);
+      object.addProperty("underground_depth", this.undergroundDepth);
       object.addProperty("add_strongholds", this.addStructures);
       object.addProperty("add_villages", this.addStructures);
       object.addProperty("add_mineshafts", this.addStructures);
@@ -107,7 +110,8 @@ public record TerrainPreloadSettingsOverrides(
          this.enableBuildings,
          this.enableWater,
          this.thinShellTerrain,
-         this.experimentalIncreaseHeight
+         this.experimentalIncreaseHeight,
+         this.undergroundDepth
       );
    }
 
@@ -121,7 +125,8 @@ public record TerrainPreloadSettingsOverrides(
          this.enableBuildings,
          this.enableWater,
          this.thinShellTerrain,
-         this.experimentalIncreaseHeight
+         this.experimentalIncreaseHeight,
+         this.undergroundDepth
       );
    }
 
@@ -135,7 +140,8 @@ public record TerrainPreloadSettingsOverrides(
          this.enableBuildings,
          this.enableWater,
          this.thinShellTerrain,
-         this.experimentalIncreaseHeight
+         this.experimentalIncreaseHeight,
+         this.undergroundDepth
       );
    }
 
@@ -149,7 +155,8 @@ public record TerrainPreloadSettingsOverrides(
          this.enableBuildings,
          this.enableWater,
          this.thinShellTerrain,
-         this.experimentalIncreaseHeight
+         this.experimentalIncreaseHeight,
+         this.undergroundDepth
       );
    }
 
@@ -163,7 +170,8 @@ public record TerrainPreloadSettingsOverrides(
          this.enableBuildings,
          this.enableWater,
          this.thinShellTerrain,
-         this.experimentalIncreaseHeight
+         this.experimentalIncreaseHeight,
+         this.undergroundDepth
       );
    }
 
@@ -177,7 +185,8 @@ public record TerrainPreloadSettingsOverrides(
          value,
          this.enableWater,
          this.thinShellTerrain,
-         this.experimentalIncreaseHeight
+         this.experimentalIncreaseHeight,
+         this.undergroundDepth
       );
    }
 
@@ -191,7 +200,8 @@ public record TerrainPreloadSettingsOverrides(
          this.enableBuildings,
          value,
          this.thinShellTerrain,
-         this.experimentalIncreaseHeight
+         this.experimentalIncreaseHeight,
+         this.undergroundDepth
       );
    }
 
@@ -205,7 +215,8 @@ public record TerrainPreloadSettingsOverrides(
          this.enableBuildings,
          this.enableWater,
          value,
-         this.experimentalIncreaseHeight
+         this.experimentalIncreaseHeight,
+         this.undergroundDepth
       );
    }
 
@@ -219,6 +230,22 @@ public record TerrainPreloadSettingsOverrides(
          this.enableBuildings,
          this.enableWater,
          this.thinShellTerrain,
+         value,
+         this.undergroundDepth
+      );
+   }
+
+   public TerrainPreloadSettingsOverrides withUndergroundDepth(int value) {
+      return new TerrainPreloadSettingsOverrides(
+         this.worldScale,
+         this.caveGeneration,
+         this.oreDistribution,
+         this.addStructures,
+         this.enableRoads,
+         this.enableBuildings,
+         this.enableWater,
+         this.thinShellTerrain,
+         this.experimentalIncreaseHeight,
          value
       );
    }

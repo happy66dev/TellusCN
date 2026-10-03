@@ -22,6 +22,8 @@ public record TerrainPreloadArea(
    public static final int MIN_CHUNKS_PER_SIDE = 1;
    /** Covers DH's maximum 4096-chunk radius plus its 128-chunk managed safety ring. */
    public static final int DEFAULT_MAX_CHUNKS_PER_SIDE = 8480;
+   /** Keeps {@link #totalChunks()} representable as a positive {@code int}. */
+   static final int HARD_MAX_CHUNKS_PER_SIDE = 46_340;
 
    public TerrainPreloadArea {
       if (!Double.isFinite(centerLatitude) || !Double.isFinite(centerLongitude)) {
@@ -40,6 +42,26 @@ public record TerrainPreloadArea(
       if (minChunkX > maxChunkX || minChunkZ > maxChunkZ) {
          throw new IllegalArgumentException("Invalid chunk bounds");
       }
+
+      long width = (long)maxChunkX - minChunkX + 1L;
+      long depth = (long)maxChunkZ - minChunkZ + 1L;
+      if (width <= 0L || depth <= 0L || width > chunksPerSide || depth > chunksPerSide) {
+         throw new IllegalArgumentException("Chunk bounds exceed the declared area size");
+      }
+
+      checkedMinBlock(minChunkX);
+      checkedMinBlock(minChunkZ);
+      checkedMaxBlock(maxChunkX);
+      checkedMaxBlock(maxChunkZ);
+
+      if (!Double.isFinite(northLatitude)
+         || !Double.isFinite(southLatitude)
+         || !Double.isFinite(westLongitude)
+         || !Double.isFinite(eastLongitude)
+         || northLatitude < southLatitude
+         || eastLongitude < westLongitude) {
+         throw new IllegalArgumentException("Area bounds must be finite and ordered");
+      }
    }
 
    public static TerrainPreloadArea centered(double latitude, double longitude, int chunksPerSide, double worldScale) {
@@ -48,10 +70,10 @@ public record TerrainPreloadArea(
       double centerBlockX = longitude * blocksPerDegree;
       double centerBlockZ = EarthProjection.latToBlockZ(latitude, worldScale);
       double sideBlocks = safeChunks * (double)CHUNK_SIZE;
-      int minChunkX = Math.floorDiv((int)Math.floor(centerBlockX - sideBlocks * 0.5), CHUNK_SIZE);
-      int minChunkZ = Math.floorDiv((int)Math.floor(centerBlockZ - sideBlocks * 0.5), CHUNK_SIZE);
-      int maxChunkX = minChunkX + safeChunks - 1;
-      int maxChunkZ = minChunkZ + safeChunks - 1;
+      int minChunkX = Math.floorDiv(floorToIntExact(centerBlockX - sideBlocks * 0.5), CHUNK_SIZE);
+      int minChunkZ = Math.floorDiv(floorToIntExact(centerBlockZ - sideBlocks * 0.5), CHUNK_SIZE);
+      int maxChunkX = checkedChunkEnd(minChunkX, safeChunks);
+      int maxChunkZ = checkedChunkEnd(minChunkZ, safeChunks);
       return fromChunkBounds(latitude, longitude, safeChunks, worldScale, minChunkX, minChunkZ, maxChunkX, maxChunkZ);
    }
 
@@ -66,10 +88,10 @@ public record TerrainPreloadArea(
       int maxChunkZ
    ) {
       double blocksPerDegree = EarthProjection.blocksPerDegree(worldScale);
-      int minBlockX = minChunkX * CHUNK_SIZE;
-      int minBlockZ = minChunkZ * CHUNK_SIZE;
-      int maxBlockX = (maxChunkX + 1) * CHUNK_SIZE - 1;
-      int maxBlockZ = (maxChunkZ + 1) * CHUNK_SIZE - 1;
+      int minBlockX = checkedMinBlock(minChunkX);
+      int minBlockZ = checkedMinBlock(minChunkZ);
+      int maxBlockX = checkedMaxBlock(maxChunkX);
+      int maxBlockZ = checkedMaxBlock(maxChunkZ);
       double west = minBlockX / blocksPerDegree;
       double east = maxBlockX / blocksPerDegree;
       double latA = EarthProjection.blockZToLat(minBlockZ, worldScale);
@@ -97,27 +119,36 @@ public record TerrainPreloadArea(
    }
 
    public static int maxChunksPerSide() {
-      return Math.max(MIN_CHUNKS_PER_SIDE, Integer.getInteger("tellus.preload.maxChunksPerSide", DEFAULT_MAX_CHUNKS_PER_SIDE));
+      int configured = Integer.getInteger("tellus.preload.maxChunksPerSide", DEFAULT_MAX_CHUNKS_PER_SIDE);
+      return Math.max(MIN_CHUNKS_PER_SIDE, Math.min(HARD_MAX_CHUNKS_PER_SIDE, configured));
    }
 
    public int totalChunks() {
-      return this.chunksPerSide * this.chunksPerSide;
+      return this.chunkWidth() * this.chunkDepth();
+   }
+
+   public int chunkWidth() {
+      return this.maxChunkX - this.minChunkX + 1;
+   }
+
+   public int chunkDepth() {
+      return this.maxChunkZ - this.minChunkZ + 1;
    }
 
    public int minBlockX() {
-      return this.minChunkX * CHUNK_SIZE;
+      return checkedMinBlock(this.minChunkX);
    }
 
    public int minBlockZ() {
-      return this.minChunkZ * CHUNK_SIZE;
+      return checkedMinBlock(this.minChunkZ);
    }
 
    public int maxBlockX() {
-      return (this.maxChunkX + 1) * CHUNK_SIZE - 1;
+      return checkedMaxBlock(this.maxChunkX);
    }
 
    public int maxBlockZ() {
-      return (this.maxChunkZ + 1) * CHUNK_SIZE - 1;
+      return checkedMaxBlock(this.maxChunkZ);
    }
 
    public boolean containsChunk(int chunkX, int chunkZ) {
@@ -127,8 +158,8 @@ public record TerrainPreloadArea(
    public String summary() {
       return String.format(
          "%d x %d chunks, lat %.5f..%.5f, lon %.5f..%.5f",
-         this.chunksPerSide,
-         this.chunksPerSide,
+         this.chunkWidth(),
+         this.chunkDepth(),
          this.southLatitude,
          this.northLatitude,
          this.westLongitude,
@@ -148,5 +179,35 @@ public record TerrainPreloadArea(
          this.maxChunkZ
       )
          + "";
+   }
+
+   private static int checkedMinBlock(int chunk) {
+      return checkedBlockCoordinate((long)chunk * CHUNK_SIZE);
+   }
+
+   private static int checkedMaxBlock(int chunk) {
+      return checkedBlockCoordinate(((long)chunk + 1L) * CHUNK_SIZE - 1L);
+   }
+
+   private static int checkedBlockCoordinate(long value) {
+      if (value < Integer.MIN_VALUE || value > Integer.MAX_VALUE) {
+         throw new IllegalArgumentException("Area lies outside the supported block-coordinate range");
+      }
+      return (int)value;
+   }
+
+   private static int checkedChunkEnd(int minChunk, int chunksPerSide) {
+      long value = (long)minChunk + chunksPerSide - 1L;
+      if (value < Integer.MIN_VALUE || value > Integer.MAX_VALUE) {
+         throw new IllegalArgumentException("Area lies outside the supported chunk-coordinate range");
+      }
+      return (int)value;
+   }
+
+   private static int floorToIntExact(double value) {
+      if (!Double.isFinite(value) || value < Integer.MIN_VALUE || value > Integer.MAX_VALUE) {
+         throw new IllegalArgumentException("Area lies outside the supported block-coordinate range");
+      }
+      return (int)Math.floor(value);
    }
 }

@@ -10,6 +10,7 @@ import com.yucareux.tellus.preload.TerrainPreloadArea;
 import com.yucareux.tellus.preload.TerrainPreloadJob;
 import com.yucareux.tellus.preload.TerrainPreloadJobManager;
 import com.yucareux.tellus.preload.TerrainPreloadProgress;
+import com.yucareux.tellus.preload.TerrainPreloadText;
 import com.yucareux.tellus.preload.TerrainPreloadSettingsOverrides;
 import com.yucareux.tellus.preload.TerrainPreloadStage;
 import com.yucareux.tellus.world.data.source.Geocoder;
@@ -40,7 +41,7 @@ public class TerrainPreloadScreen extends Screen {
    private static final int TEXT_WHITE = 0xFFFFFFFF;
    private static final int TEXT_MUTED = 0xFFC0C0C0;
    private static final int TEXT_SUMMARY = 0xFFE0E0E0;
-   private static final Component TITLE = Component.literal("Pre-load Terrain");
+   private static final Component TITLE = Component.translatable("tellus.preload.title");
 
    private final EarthCustomizeScreen parent;
    private SlippyMapWidget mapWidget;
@@ -118,12 +119,12 @@ public class TerrainPreloadScreen extends Screen {
       int panelWidth = this.panelWidth();
       int x = this.width - panelWidth - PANEL_MARGIN;
       this.pregenerationButton = this.addRenderableWidget(
-         Button.builder(Component.literal("Pre-generation Settings"), button -> this.togglePanel(TerrainPreloadScreen.Panel.PREGENERATION))
+         Button.builder(Component.translatable("tellus.preload.panel.pregeneration"), button -> this.togglePanel(TerrainPreloadScreen.Panel.PREGENERATION))
             .bounds(x, 12, panelWidth, CONTROL_HEIGHT)
             .build()
       );
       this.worldButton = this.addRenderableWidget(
-         Button.builder(Component.literal("World Settings"), button -> this.togglePanel(TerrainPreloadScreen.Panel.WORLD))
+         Button.builder(Component.translatable("tellus.preload.panel.world"), button -> this.togglePanel(TerrainPreloadScreen.Panel.WORLD))
             .bounds(x, 12 + CONTROL_HEIGHT + CONTROL_GAP, panelWidth, CONTROL_HEIGHT)
             .build()
       );
@@ -139,10 +140,10 @@ public class TerrainPreloadScreen extends Screen {
       int columnWidth = (innerWidth - columnGap) / 2;
       int rightColumnX = innerX + columnWidth + columnGap;
       this.modeButton = this.addRenderableWidget(Button.builder(Component.empty(), button -> this.toggleAreaMode()).bounds(innerX, y + 24, innerWidth, CONTROL_HEIGHT).build());
-      this.chunkBox = new EditBox(this.font, innerX, y + 46, innerWidth, CONTROL_HEIGHT, Component.literal("Chunks per side"));
+      this.chunkBox = new EditBox(this.font, innerX, y + 46, innerWidth, CONTROL_HEIGHT, Component.translatable("tellus.preload.chunks_per_side"));
       this.chunkBox.setValue(Integer.toString(this.chunksPerSide));
       this.addRenderableWidget(this.chunkBox);
-      this.scaleBox = new EditBox(this.font, innerX, y + 36, innerWidth, CONTROL_HEIGHT, Component.literal("World scale"));
+      this.scaleBox = new EditBox(this.font, innerX, y + 36, innerWidth, CONTROL_HEIGHT, Component.translatable("tellus.preload.world_scale"));
       this.scaleBox.setValue(formatScale(this.overrides.worldScale()));
       this.addRenderableWidget(this.scaleBox);
       this.roadsButton = this.addRenderableWidget(Button.builder(Component.empty(), button -> this.setOverrides(this.overrides.withEnableRoads(!this.overrides.enableRoads()))).bounds(innerX, y + 60, columnWidth, CONTROL_HEIGHT).build());
@@ -162,40 +163,40 @@ public class TerrainPreloadScreen extends Screen {
    private void addBottomControls() {
       int buttonY = this.height - 30;
       this.startButton = this.addRenderableWidget(
-         Button.builder(Component.literal("Start Pre-loading").withStyle(ChatFormatting.GREEN, ChatFormatting.BOLD), button -> this.confirmingStart = true)
+         Button.builder(Component.translatable("tellus.preload.start").withStyle(ChatFormatting.GREEN, ChatFormatting.BOLD), button -> this.confirmingStart = true)
             .bounds(this.width / 2 - 154, buttonY, 150, 20)
             .build()
       );
       this.bottomCancelButton = this.addRenderableWidget(
          Button.builder(Component.translatable("gui.cancel"), button -> this.onClose()).bounds(this.width / 2 + 4, buttonY, 150, 20).build()
       );
-      this.pauseButton = this.addRenderableWidget(Button.builder(Component.literal("Pause"), button -> {
+      this.pauseButton = this.addRenderableWidget(Button.builder(Component.translatable("tellus.preload.pause"), button -> {
          if (this.job != null) {
             this.job.pause();
          }
       }).bounds(12, buttonY, 72, 20).build());
-      this.resumeButton = this.addRenderableWidget(Button.builder(Component.literal("Resume"), button -> {
+      this.resumeButton = this.addRenderableWidget(Button.builder(Component.translatable("tellus.preload.resume"), button -> {
          if (this.job != null) {
             this.job.resume();
          }
       }).bounds(90, buttonY, 72, 20).build());
       this.runningCancelButton = this.addRenderableWidget(
-         Button.builder(Component.literal("Cancel").withStyle(ChatFormatting.RED), button -> this.confirmingCancel = true).bounds(168, buttonY, 72, 20).build()
+         Button.builder(Component.translatable("gui.cancel").withStyle(ChatFormatting.RED), button -> this.confirmingCancel = true).bounds(168, buttonY, 72, 20).build()
       );
       this.loadNowButton = this.addRenderableWidget(
-         Button.builder(Component.literal("Load Into World Now"), button -> this.loadIntoWorld()).bounds(this.width / 2 - 184, buttonY, 180, 20).build()
+         Button.builder(Component.translatable("tellus.preload.load_now"), button -> this.loadIntoWorld()).bounds(this.width / 2 - 184, buttonY, 180, 20).build()
       );
-      this.goBackButton = this.addRenderableWidget(Button.builder(Component.literal("Go Back"), button -> this.onClose()).bounds(this.width / 2 + 4, buttonY, 180, 20).build());
+      this.goBackButton = this.addRenderableWidget(Button.builder(Component.translatable("tellus.preload.go_back"), button -> this.onClose()).bounds(this.width / 2 + 4, buttonY, 180, 20).build());
       this.confirmCancelButton = this.addRenderableWidget(
          Button.builder(Component.translatable("gui.cancel"), button -> this.confirmingStart = false).bounds(this.width / 2 - 154, this.height / 2 + 78, 150, 20).build()
       );
       this.confirmStartButton = this.addRenderableWidget(
-         Button.builder(Component.literal("Confirm").withStyle(ChatFormatting.GREEN), button -> this.startPreload())
+         Button.builder(Component.translatable("tellus.preload.confirm").withStyle(ChatFormatting.GREEN), button -> this.startPreload())
             .bounds(this.width / 2 + 4, this.height / 2 + 78, 150, 20)
             .build()
       );
       this.confirmCancelYesButton = this.addRenderableWidget(
-         Button.builder(Component.literal("Yes").withStyle(ChatFormatting.RED), button -> {
+         Button.builder(Component.translatable("gui.yes").withStyle(ChatFormatting.RED), button -> {
             if (this.job != null) {
                this.job.cancel();
             }
@@ -204,7 +205,7 @@ public class TerrainPreloadScreen extends Screen {
          }).bounds(this.width / 2 - 154, this.height / 2 + 36, 150, 20).build()
       );
       this.confirmCancelNoButton = this.addRenderableWidget(
-         Button.builder(Component.literal("No"), button -> this.confirmingCancel = false).bounds(this.width / 2 + 4, this.height / 2 + 36, 150, 20).build()
+         Button.builder(Component.translatable("gui.no"), button -> this.confirmingCancel = false).bounds(this.width / 2 + 4, this.height / 2 + 36, 150, 20).build()
       );
    }
 
@@ -280,7 +281,12 @@ public class TerrainPreloadScreen extends Screen {
       this.modeButton.visible = showPregen;
       this.chunkBox.visible = showPregen;
       this.chunkBox.active = showPregen && !this.manualMode;
-      this.modeButton.setMessage(Component.literal("Area Mode: " + (this.manualMode ? "Manual" : "Chunks")));
+      this.modeButton.setMessage(
+         Component.translatable(
+            "tellus.preload.area_mode",
+            Component.translatable(this.manualMode ? "tellus.preload.area_mode.manual" : "tellus.preload.area_mode.chunks")
+         )
+      );
       this.scaleBox.visible = showWorld;
       this.roadsButton.visible = showWorld;
       this.buildingsButton.visible = showWorld;
@@ -291,14 +297,14 @@ public class TerrainPreloadScreen extends Screen {
       this.thinShellButton.visible = showWorld;
       this.experimentalHeightButton.visible = showWorld;
       this.experimentalHeightButton.active = false;
-      this.roadsButton.setMessage(toggleLabel("Roads", this.overrides.enableRoads()));
-      this.buildingsButton.setMessage(toggleLabel("Bldgs", this.overrides.enableBuildings()));
-      this.waterButton.setMessage(toggleLabel("Water", this.overrides.enableWater()));
-      this.structuresButton.setMessage(toggleLabel("Structs", this.overrides.addStructures()));
-      this.cavesButton.setMessage(toggleLabel("Caves", this.overrides.caveGeneration()));
-      this.oresButton.setMessage(toggleLabel("Ores", this.overrides.oreDistribution()));
-      this.thinShellButton.setMessage(toggleLabel("Shell", this.overrides.thinShellTerrain()));
-      this.experimentalHeightButton.setMessage(toggleLabel("Exp Hgt", this.overrides.experimentalIncreaseHeight()));
+      this.roadsButton.setMessage(toggleLabel("tellus.preload.toggle.roads", this.overrides.enableRoads()));
+      this.buildingsButton.setMessage(toggleLabel("tellus.preload.toggle.buildings", this.overrides.enableBuildings()));
+      this.waterButton.setMessage(toggleLabel("tellus.preload.toggle.water", this.overrides.enableWater()));
+      this.structuresButton.setMessage(toggleLabel("tellus.preload.toggle.structures", this.overrides.addStructures()));
+      this.cavesButton.setMessage(toggleLabel("tellus.preload.toggle.caves", this.overrides.caveGeneration()));
+      this.oresButton.setMessage(toggleLabel("tellus.preload.toggle.ores", this.overrides.oreDistribution()));
+      this.thinShellButton.setMessage(toggleLabel("tellus.preload.toggle.shell", this.overrides.thinShellTerrain()));
+      this.experimentalHeightButton.setMessage(toggleLabel("tellus.preload.toggle.experimental_height", this.overrides.experimentalIncreaseHeight()));
    }
 
    private TerrainPreloadProgress currentProgress() {
@@ -321,8 +327,10 @@ public class TerrainPreloadScreen extends Screen {
          settings = this.selectedAreaSettings();
       } catch (IllegalStateException error) {
          this.confirmingStart = false;
-         this.startButton.setMessage(Component.literal("Invalid preload settings").withStyle(ChatFormatting.RED));
-         this.startButton.setTooltip(Tooltip.create(Component.literal(error.getMessage()).withStyle(ChatFormatting.RED)));
+         this.startButton.setMessage(Component.translatable("tellus.preload.invalid_settings").withStyle(ChatFormatting.RED));
+         this.startButton.setTooltip(
+            Tooltip.create(Component.translatable("tellus.preload.invalid_settings.detail").withStyle(ChatFormatting.RED))
+         );
          return;
       }
       this.job = TerrainPreloadJobManager.instance().start(this.area, settings);
@@ -432,11 +440,19 @@ public class TerrainPreloadScreen extends Screen {
       int height = this.openPanel == TerrainPreloadScreen.Panel.WORLD ? 154 : 72;
       graphics.fill(x, y, x + panelWidth, y + height, -1442840576);
       graphics.outline(x, y, panelWidth, height, -6250336);
-      graphics.text(this.font, this.openPanel == TerrainPreloadScreen.Panel.WORLD ? "World Settings" : "Pre-generation Settings", x + PANEL_PADDING, y + 8, TEXT_WHITE);
+      graphics.text(
+         this.font,
+         Component.translatable(
+            this.openPanel == TerrainPreloadScreen.Panel.WORLD ? "tellus.preload.panel.world" : "tellus.preload.panel.pregeneration"
+         ),
+         x + PANEL_PADDING,
+         y + 8,
+         TEXT_WHITE
+      );
       if (this.openPanel == TerrainPreloadScreen.Panel.PREGENERATION) {
-         graphics.text(this.font, "Square chunks per side", x + PANEL_PADDING, y + 58, TEXT_MUTED);
+         graphics.text(this.font, Component.translatable("tellus.preload.chunks_per_side"), x + PANEL_PADDING, y + 58, TEXT_MUTED);
       } else {
-         graphics.text(this.font, "World scale", x + PANEL_PADDING, y + 24, TEXT_MUTED);
+         graphics.text(this.font, Component.translatable("tellus.preload.world_scale"), x + PANEL_PADDING, y + 24, TEXT_MUTED);
       }
    }
 
@@ -452,10 +468,13 @@ public class TerrainPreloadScreen extends Screen {
       int y = Math.max(34, this.height - boxHeight - 42);
       graphics.fill(x, y, x + boxWidth, y + boxHeight, -1442840576);
       graphics.outline(x, y, boxWidth, boxHeight, -6250336);
-      graphics.text(this.font, this.fitText(progress.status(), boxWidth - 20), x + 10, y + 6, TEXT_WHITE);
-      String detail = this.fitText(progress.detail() == null ? "" : progress.detail(), boxWidth - 20);
+      graphics.text(this.font, this.fitText(TerrainPreloadText.status(progress.status()).getString(), boxWidth - 20), x + 10, y + 6, TEXT_WHITE);
+      String detail = this.fitText(TerrainPreloadText.detail(progress.detail()).getString(), boxWidth - 20);
       graphics.text(this.font, detail, x + 10, y + 18, TEXT_MUTED);
-      String sources = this.fitText("Sources: " + progress.sourceDetail(), boxWidth - 20);
+      String sources = this.fitText(
+         Component.translatable("tellus.preload.progress.sources", TerrainPreloadText.sources(progress.sourceDetail())).getString(),
+         boxWidth - 20
+      );
       graphics.text(this.font, sources, x + 10, y + 30, TEXT_MUTED);
       String metrics = this.fitText(this.progressMetrics(progress), boxWidth - 20);
       graphics.text(this.font, metrics, x + 10, y + 42, TEXT_MUTED);
@@ -471,16 +490,27 @@ public class TerrainPreloadScreen extends Screen {
       int y = this.height / 2 - 92;
       graphics.fill(x, y, x + 360, y + 160, -1342177280);
       graphics.outline(x, y, 360, 160, -1);
-      graphics.centeredText(this.font, "Confirm Terrain Preload", this.width / 2, y + 10, TEXT_WHITE);
+      graphics.centeredText(this.font, Component.translatable("tellus.preload.confirm_title"), this.width / 2, y + 10, TEXT_WHITE);
       int textX = x + 16;
       int textY = y + 32;
-      graphics.text(this.font, this.area.summary(), textX, textY, TEXT_SUMMARY);
-      graphics.text(this.font, "World scale: " + formatScale(this.overrides.worldScale()), textX, textY + 14, TEXT_SUMMARY);
-      graphics.text(this.font, "Roads: " + onOff(this.overrides.enableRoads()), textX, textY + 28, TEXT_MUTED);
-      graphics.text(this.font, "Buildings: " + onOff(this.overrides.enableBuildings()), textX, textY + 42, TEXT_MUTED);
-      graphics.text(this.font, "Water: " + onOff(this.overrides.enableWater()), textX, textY + 56, TEXT_MUTED);
-      graphics.text(this.font, "Structures: " + onOff(this.overrides.addStructures()), textX, textY + 70, TEXT_MUTED);
-      graphics.text(this.font, "Caves: " + onOff(this.overrides.caveGeneration()) + "  Ores: " + onOff(this.overrides.oreDistribution()), textX, textY + 84, TEXT_MUTED);
+      graphics.text(this.font, TerrainPreloadText.areaSummary(this.area), textX, textY, TEXT_SUMMARY);
+      graphics.text(
+         this.font, Component.translatable("tellus.preload.summary.world_scale", formatScale(this.overrides.worldScale())), textX, textY + 14, TEXT_SUMMARY
+      );
+      graphics.text(this.font, toggleLabel("tellus.preload.toggle.roads", this.overrides.enableRoads()), textX, textY + 28, TEXT_MUTED);
+      graphics.text(this.font, toggleLabel("tellus.preload.toggle.buildings", this.overrides.enableBuildings()), textX, textY + 42, TEXT_MUTED);
+      graphics.text(this.font, toggleLabel("tellus.preload.toggle.water", this.overrides.enableWater()), textX, textY + 56, TEXT_MUTED);
+      graphics.text(this.font, toggleLabel("tellus.preload.toggle.structures", this.overrides.addStructures()), textX, textY + 70, TEXT_MUTED);
+      graphics.text(
+         this.font,
+         toggleLabel("tellus.preload.toggle.caves", this.overrides.caveGeneration())
+            .copy()
+            .append("  ")
+            .append(toggleLabel("tellus.preload.toggle.ores", this.overrides.oreDistribution())),
+         textX,
+         textY + 84,
+         TEXT_MUTED
+      );
    }
 
    private void drawCancelConfirmation(GuiGraphicsExtractor graphics) {
@@ -488,8 +518,8 @@ public class TerrainPreloadScreen extends Screen {
       int y = this.height / 2 - 56;
       graphics.fill(x, y, x + 340, y + 84, -1342177280);
       graphics.outline(x, y, 340, 84, -1);
-      graphics.centeredText(this.font, "Cancel terrain preload?", this.width / 2, y + 12, TEXT_WHITE);
-      graphics.centeredText(this.font, "Completed downloads will remain in the shared cache.", this.width / 2, y + 28, TEXT_MUTED);
+      graphics.centeredText(this.font, Component.translatable("tellus.preload.cancel_question"), this.width / 2, y + 12, TEXT_WHITE);
+      graphics.centeredText(this.font, Component.translatable("tellus.preload.cancel_cache_note"), this.width / 2, y + 28, TEXT_MUTED);
    }
 
    @Override
@@ -520,8 +550,12 @@ public class TerrainPreloadScreen extends Screen {
       }
    }
 
-   private static Component toggleLabel(String name, boolean enabled) {
-      return Component.literal(name + ": " + onOff(enabled));
+   private static Component toggleLabel(String nameKey, boolean enabled) {
+      return Component.translatable(
+         "tellus.preload.toggle.format",
+         Component.translatable(nameKey),
+         Component.translatable(enabled ? "options.on" : "options.off")
+      );
    }
 
    private static Component experimentalIncreaseHeightTooltip() {
@@ -532,7 +566,7 @@ public class TerrainPreloadScreen extends Screen {
    }
 
    private static String onOff(boolean value) {
-      return value ? "On" : "Off";
+      return Component.translatable(value ? "options.on" : "options.off").getString();
    }
 
    private static String formatScale(double value) {
@@ -555,19 +589,26 @@ public class TerrainPreloadScreen extends Screen {
    }
 
    private String progressMetrics(TerrainPreloadProgress progress) {
-      String unitName = "tasks";
-      String units = formatCount(progress.completedUnits()) + " / " + formatCount(progress.totalUnits()) + " " + unitName;
+      String units = Component.translatable(
+         "tellus.preload.metrics.tasks", formatCount(progress.completedUnits()), formatCount(progress.totalUnits())
+      ).getString();
       String percent = String.format(Locale.ROOT, "%.1f%%", progress.unitProgress() * 100.0);
-      String speed = progress.bytesRead() > 0L ? formatBytesPerSecond(progress.bytesPerSecond()) : formatUnitsPerSecond(progress.unitsPerSecond(), unitName);
+      String speed = progress.bytesRead() > 0L
+         ? formatBytesPerSecond(progress.bytesPerSecond())
+         : formatUnitsPerSecond(progress.unitsPerSecond());
       String byteProgress = formatByteProgress(progress);
       String eta = formatDuration(progress.estimatedRemainingMillis());
-      String workers = progress.activeWorkers() > 0 ? " | " + progress.activeWorkers() + " active workers" : "";
-      String paused = progress.paused() ? " | Paused" : "";
-      return units + " (" + percent + ") | " + speed + byteProgress + " | ETA " + eta + workers + paused;
+      String workers = progress.activeWorkers() > 0
+         ? Component.translatable("tellus.preload.metrics.active_workers", progress.activeWorkers()).getString()
+         : "";
+      String paused = progress.paused() ? Component.translatable("tellus.preload.metrics.paused").getString() : "";
+      return Component.translatable("tellus.preload.metrics.summary", units, percent, speed, byteProgress, eta, workers, paused).getString();
    }
 
-   private static String formatUnitsPerSecond(double unitsPerSecond, String unitName) {
-      return String.format(Locale.ROOT, "%.2f %s/s", Math.max(0.0, unitsPerSecond), unitName);
+   private static String formatUnitsPerSecond(double unitsPerSecond) {
+      return Component.translatable(
+         "tellus.preload.metrics.tasks_per_second", String.format(Locale.ROOT, "%.2f", Math.max(0.0, unitsPerSecond))
+      ).getString();
    }
 
    private static String formatBytesPerSecond(double bytesPerSecond) {
@@ -585,9 +626,14 @@ public class TerrainPreloadScreen extends Screen {
    private static String formatByteProgress(TerrainPreloadProgress progress) {
       if (progress.bytesExpected() > progress.bytesRead()) {
          long remaining = Math.max(0L, progress.bytesExpected() - progress.bytesRead());
-         return " | " + formatBytes(progress.bytesRead()) + "/" + formatBytes(progress.bytesExpected()) + " (" + formatBytes(remaining) + " left)";
+         return Component.translatable(
+            "tellus.preload.metrics.bytes_remaining",
+            formatBytes(progress.bytesRead()),
+            formatBytes(progress.bytesExpected()),
+            formatBytes(remaining)
+         ).getString();
       } else if (progress.bytesRead() > 0L) {
-         return " | " + formatBytes(progress.bytesRead()) + " downloaded";
+         return Component.translatable("tellus.preload.metrics.bytes_downloaded", formatBytes(progress.bytesRead())).getString();
       } else {
          return "";
       }
@@ -607,7 +653,7 @@ public class TerrainPreloadScreen extends Screen {
 
    private static String formatDuration(long millis) {
       if (millis < 0L) {
-         return "calculating";
+         return Component.translatable("tellus.preload.duration.calculating").getString();
       }
 
       long seconds = Math.max(0L, Math.round(millis / 1000.0));
@@ -618,13 +664,13 @@ public class TerrainPreloadScreen extends Screen {
       long minutes = seconds / 60L;
       seconds %= 60L;
       if (days > 0L) {
-         return days + "d " + hours + "h";
+         return Component.translatable("tellus.preload.duration.days_hours", days, hours).getString();
       } else if (hours > 0L) {
-         return hours + "h " + minutes + "m";
+         return Component.translatable("tellus.preload.duration.hours_minutes", hours, minutes).getString();
       } else if (minutes > 0L) {
-         return minutes + "m " + seconds + "s";
+         return Component.translatable("tellus.preload.duration.minutes_seconds", minutes, seconds).getString();
       } else {
-         return seconds + "s";
+         return Component.translatable("tellus.preload.duration.seconds", seconds).getString();
       }
    }
 

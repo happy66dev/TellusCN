@@ -13,6 +13,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DhLodWaterResolverTest {
    @Test
+   void preservesLandlockedOceanSurfaceBelowGlobalSeaLevel() {
+      assertEquals(36, DhLodWaterResolver.resolvedOceanWaterSurface(36, Integer.MIN_VALUE));
+      assertEquals(40, DhLodWaterResolver.resolvedOceanWaterSurface(36, 40));
+   }
+
+   @Test
    void oceanSafetyRampInheritsFullTerrainDefault() {
       assertEquals(512, DhLodWaterResolver.oceanFloorTransitionBlocks());
    }
@@ -162,7 +168,7 @@ class DhLodWaterResolverTest {
    }
 
    @Test
-   void onlyUsesDirectLineHandlingForLineGeometry() {
+   void recognizesPolygonAndLineRiverGeometryAsFlowingWater() {
       OsmWaterFeature polygonRiver = new OsmWaterFeature(
          1L,
          false,
@@ -181,8 +187,8 @@ class DhLodWaterResolverTest {
       );
 
       assertTrue(polygonRiver.flowingWater());
-      assertFalse(DhLodWaterResolver.isDirectLineWaterFeature(polygonRiver));
-      assertTrue(DhLodWaterResolver.isDirectLineWaterFeature(lineRiver));
+      assertTrue(DhLodWaterResolver.isFlowingWaterFeature(polygonRiver));
+      assertTrue(DhLodWaterResolver.isFlowingWaterFeature(lineRiver));
    }
 
    @Test

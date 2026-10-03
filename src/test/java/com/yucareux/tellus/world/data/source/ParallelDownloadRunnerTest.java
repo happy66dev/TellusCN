@@ -43,7 +43,8 @@ class ParallelDownloadRunnerTest {
       };
 
       int completed;
-      try (DownloadProgressReporter.Scope ignored = DownloadProgressReporter.push(reporter)) {
+      DownloadProgressReporter.Scope reporterScope = DownloadProgressReporter.push(reporter);
+      try (reporterScope) {
          completed = ParallelDownloadRunner.run(
             List.of(1, 2, 2, 3),
             10,

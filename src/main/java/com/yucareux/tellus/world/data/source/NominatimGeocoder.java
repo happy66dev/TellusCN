@@ -8,7 +8,6 @@ import com.yucareux.tellus.Tellus;
 import com.yucareux.tellus.config.TellusEndpointConfig;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.SocketTimeoutException;
 import java.net.URI;
@@ -48,6 +47,7 @@ public class NominatimGeocoder implements Geocoder {
    private static final int READ_TIMEOUT_MS = 12000;
    private static final int TIMEOUT_RETRIES = 1;
    private static final int RETRY_BACKOFF_MS = 300;
+   private static final int MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
    private static final Pattern DIACRITIC_PATTERN = Pattern.compile("\\p{M}+");
    private static final Pattern NON_SEARCH_CHARACTER_PATTERN = Pattern.compile("[^\\p{L}\\p{Nd}]+");
    private static final Pattern WHITESPACE_PATTERN = Pattern.compile("\\s+");
@@ -106,6 +106,10 @@ public class NominatimGeocoder implements Geocoder {
    }
 
    public NominatimGeocoder.Location reverse(double latitude, double longitude) throws IOException {
+      if (!Double.isFinite(latitude) || !Double.isFinite(longitude)
+         || latitude < -90.0 || latitude > 90.0 || longitude < -180.0 || longitude > 180.0) {
+         throw new IllegalArgumentException("Geocoder coordinates are outside the valid latitude/longitude range");
+      }
       String languagePreference = this.resolveLanguagePreference();
       String encodedLanguagePreference = URLEncoder.encode(languagePreference, StandardCharsets.UTF_8);
       URI uri = URI.create(String.format(Locale.ROOT, getReverseUrl(), encodedLanguagePreference, latitude, longitude));
@@ -118,6 +122,9 @@ public class NominatimGeocoder implements Geocoder {
    }
 
    private List<NominatimGeocoder.SearchCandidate> search(String place, int limit) throws IOException {
+      if (place == null || place.isBlank()) {
+         return List.of();
+      }
       String languagePreference = this.resolveLanguagePreference();
       JsonElement result = this.query(place, limit, languagePreference);
       if (!result.isJsonArray()) {
@@ -137,7 +144,7 @@ public class NominatimGeocoder implements Geocoder {
 	                  if (!name.isBlank()) {
 	                     Double lat = parseDouble(object, "lat");
 	                     Double lon = parseDouble(object, "lon");
-	                     if (lat != null && lon != null) {
+	                     if (lat != null && lon != null && isValidCoordinate(lat, lon)) {
 	                        double score = this.scoreCandidate(normalizedPlace, object, languageCodes, i);
 	                        candidates.add(new NominatimGeocoder.SearchCandidate(name, lat, lon, score, i));
 	                     }
@@ -169,15 +176,23 @@ public class NominatimGeocoder implements Geocoder {
             connection.setRequestProperty("Accept-Language", languagePreference);
             connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
             connection.setReadTimeout(READ_TIMEOUT_MS);
-            JsonElement var10;
-            try (
-               InputStream input = connection.getInputStream();
-               InputStreamReader reader = new InputStreamReader(input, StandardCharsets.UTF_8);
-            ) {
-               var10 = JsonParser.parseReader(reader);
+            int responseCode = connection.getResponseCode();
+            if (responseCode < 200 || responseCode >= 300) {
+               throw new IOException("Nominatim request failed with HTTP " + responseCode);
+            }
+            long contentLength = connection.getContentLengthLong();
+            if (contentLength > MAX_RESPONSE_BYTES) {
+               throw new IOException("Nominatim response exceeds the safety limit");
             }
 
-            return var10;
+            try (InputStream input = connection.getInputStream()) {
+               byte[] response = InputStreamSafety.readAllBytes(input, MAX_RESPONSE_BYTES, "Nominatim response");
+               try {
+                  return JsonParser.parseString(new String(response, StandardCharsets.UTF_8));
+               } catch (RuntimeException error) {
+                  throw new IOException("Nominatim returned malformed JSON", error);
+               }
+            }
          } catch (SocketTimeoutException var17) {
             lastError = var17;
             if (attempt >= TIMEOUT_RETRIES) {
@@ -239,6 +254,15 @@ public class NominatimGeocoder implements Geocoder {
       }
 
       return "";
+   }
+
+   private static boolean isValidCoordinate(double latitude, double longitude) {
+      return Double.isFinite(latitude)
+         && Double.isFinite(longitude)
+         && latitude >= -90.0
+         && latitude <= 90.0
+         && longitude >= -180.0
+         && longitude <= 180.0;
    }
 
    private String displayName(JsonObject object, List<String> languageCodes) {

@@ -77,8 +77,8 @@ These options are available in the "Customize World Generation" screen when crea
 ![Tellus config screen](images/Config%20screen.png)
 
 ### World Settings
-- **World Scale**: Controls how many real-world meters are represented by one block. Lower values create more detailed, larger worlds; higher values compress distances and features. Current limits are 1:1m to 1:500m per block, with larger scales planned up to 1:40km.
-- **Increase Height**: Enables the experimental true-height terrain profile. Hover over the option in-game for the current compatibility warning.
+- **World Scale**: Controls how many real-world meters are represented by one block. Lower values create more detailed, larger worlds; higher values compress distances and features. Current limits are 1:1m to 1:1km per block.
+- **Increase Height**: Enables the experimental expanded-height terrain profile. Elevation remains proportional to the selected World Scale. Hover over the option in-game for the current compatibility warning.
 - **Terrestrial Height Scale**: Multiplier that converts elevation above sea level from meters to blocks. Higher values produce taller mountains and landforms.
 - **Oceanic Height Scale**: Multiplier that converts elevation below sea level from meters to blocks. Higher values deepen oceans and trenches.
 - **Height Offset**: Shifts all terrain up or down by a fixed number of blocks. Use this to raise or lower the entire world.
@@ -96,6 +96,7 @@ The cave and underground generation system is still work in progress, so expect 
 - **Cave Generation**: Toggles underground cave generation.
 - **Ore Distribution**: Enables vanilla ore distribution in Tellus worlds.
 - **Lava Pools**: Enables underground lava pools.
+- **Underground Depth**: Controls how far solid terrain extends below the local surface. Vanilla underground content remains in the first 64 blocks; increasing this setting adds deeper solid terrain without stretching cave or structure generation.
 
 ### Structure Settings
 This section lets you toggle vanilla structures and world features on or off, such as villages, temples, monuments, ruins, and underground features like Deep Dark and amethyst geodes. Some structures (notably Deep Dark and certain ocean structures) may not generate properly yet and are still work in progress.

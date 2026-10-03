@@ -9,6 +9,7 @@ import com.yucareux.tellus.cache.TellusCacheDomain;
 import com.yucareux.tellus.cache.TellusCacheFiles;
 import com.yucareux.tellus.cache.TellusCacheHandle;
 import com.yucareux.tellus.cache.TellusCacheRegistry;
+import com.yucareux.tellus.world.data.pmtiles.PmTilesSafety;
 import com.yucareux.tellus.world.data.source.ParallelDownloadRunner;
 import com.yucareux.tellus.worldgen.EarthProjection;
 import io.github.sebasbaumh.mapbox.vectortile.VectorTile.Tile;
@@ -238,7 +239,7 @@ public final class TellusOsmBuildingSource implements TellusCacheHandle {
             Tellus.LOGGER.debug("Failed to load Overture building tile {}", key, error);
             this.tileLoadFailures.add(key);
             OsmPerf.recordTileLoad(OsmPerf.TileSource.OSM_BUILDINGS, OsmPerf.TileLoadPath.FAILURE);
-            return new TileLookup(OsmBuildingTile.empty(), false);
+            return new TileLookup(OsmBuildingTile.empty(), true);
          }
       }
    }
@@ -426,7 +427,9 @@ public final class TellusOsmBuildingSource implements TellusCacheHandle {
 
    private byte[] readCompressed(Path path) throws IOException {
       try (InputStream input = new GZIPInputStream(Files.newInputStream(path))) {
-         return input.readAllBytes();
+         return PmTilesSafety.readBounded(
+            input, PmTilesSafety.MAX_DECOMPRESSED_TILE_BYTES, "Cached Overture building tile"
+         );
       }
    }
 
@@ -537,7 +540,7 @@ public final class TellusOsmBuildingSource implements TellusCacheHandle {
                   }
 
                   long featureId = resolveFeatureId(feature, tags);
-                  String buildingId = nonBlank(asString(tags.get("building_id")));
+                  String buildingId = nonBlank(asString(tags.get(kind == OsmBuildingKind.PART ? "building_id" : "id")));
                   OsmBuildingMetadata metadata = resolveMetadata(tags, heightMeters);
                   return new OsmBuildingFeature(kind, featureId, buildingId, hasParts, metadata, heightMeters, Math.max(0.0, minHeightMeters), longitudes, latitudes);
                }
@@ -789,27 +792,24 @@ public final class TellusOsmBuildingSource implements TellusCacheHandle {
    }
 
    private static long resolveFeatureId(Feature feature, Map<String, Object> tags) {
+      Object sources = tags.get("sources");
+      if (sources instanceof String stringSources && !stringSources.isBlank()) {
+         Long resolved = tryParseSourcesId(stringSources);
+         if (resolved != null) return resolved;
+      }
       if (feature.hasId()) {
-         return feature.getId();
+         return syntheticId(feature.getId());
       } else {
          Object[] candidates = new Object[]{tags.get("id"), tags.get("@id"), tags.get("building_id")};
 
          for (Object candidate : candidates) {
             Long resolved = tryResolveId(candidate);
             if (resolved != null) {
-               return resolved;
+               return syntheticId(resolved);
             }
          }
 
-         Object sources = tags.get("sources");
-         if (sources instanceof String stringSources && !stringSources.isBlank()) {
-            Long resolved = tryParseSourcesId(stringSources);
-            if (resolved != null) {
-               return resolved;
-            }
-         }
-
-         return hash64(String.valueOf(tags));
+         return syntheticId(hash64(String.valueOf(tags)));
       }
    }
 
@@ -838,36 +838,35 @@ public final class TellusOsmBuildingSource implements TellusCacheHandle {
    }
 
    private static Long tryParseSourcesId(String sources) {
-      int idIndex = sources.indexOf("\"id\"");
-      if (idIndex < 0) {
-         return null;
-      } else {
-         int colon = sources.indexOf(58, idIndex);
-         if (colon < 0) {
-            return null;
-         } else {
-            int start = colon + 1;
-
-            while (start < sources.length() && Character.isWhitespace(sources.charAt(start))) {
-               start++;
-            }
-
+      int cursor = 0;
+      while (cursor < sources.length()) {
+         int key = sources.indexOf("\"record_id\"", cursor);
+         if (key < 0) return null;
+         int colon = sources.indexOf(':', key + 11);
+         int quote = colon < 0 ? -1 : sources.indexOf('"', colon + 1);
+         int prefix = quote + 1;
+         if (quote >= 0 && prefix < sources.length() && (sources.charAt(prefix) == 'w' || sources.charAt(prefix) == 'r')) {
+            char elementType = sources.charAt(prefix);
+            int start = prefix + 1;
             int end = start;
-            while (end < sources.length() && Character.isDigit(sources.charAt(end))) {
-               end++;
-            }
-
-            if (end <= start) {
-               return null;
-            } else {
+            while (end < sources.length() && Character.isDigit(sources.charAt(end))) end++;
+            if (end > start) {
                try {
-                  return Long.parseLong(sources.substring(start, end));
-               } catch (NumberFormatException error) {
+                  long id = Long.parseLong(sources.substring(start, end));
+                  return elementType == 'r' ? Long.MAX_VALUE - id : id;
+               } catch (NumberFormatException ignored) {
                   return null;
                }
             }
          }
+         cursor = Math.max(key + 1, prefix);
       }
+      return null;
+   }
+   private static long syntheticId(long value) {
+      if (value == Long.MIN_VALUE) return Long.MIN_VALUE + 1L;
+      long absolute = Math.abs(value);
+      return absolute == 0L ? -1L : -absolute;
    }
 
    private static long hash64(String text) {

@@ -41,6 +41,27 @@ class LodPrefetchBatcherTest {
    }
 
    @Test
+   void mergesExistingClustersWhenALaterRequestBridgesThem() {
+      List<LodPrefetchBatcher.Request> started = new ArrayList<>();
+      try (LodPrefetchBatcher batcher = new LodPrefetchBatcher(60_000L, 4, request -> {
+         started.add(request);
+         return CompletableFuture.completedFuture(null);
+      })) {
+         LodPrefetchBatcher.Submission west = batcher.submit(request(new LodBlockRange(0, 0, 63, 63), 2));
+         LodPrefetchBatcher.Submission east = batcher.submit(request(new LodBlockRange(128, 0, 191, 63), 2));
+         LodPrefetchBatcher.Submission bridge = batcher.submit(request(new LodBlockRange(64, 0, 127, 63), 2));
+
+         batcher.flushNow();
+
+         assertEquals(1, started.size());
+         assertEquals(new LodBlockRange(0, 0, 191, 63), started.get(0).range());
+         assertEquals(3, west.batchSize());
+         assertEquals(3, east.batchSize());
+         assertEquals(3, bridge.batchSize());
+      }
+   }
+
+   @Test
    void keepsNonAdjacentAndIncompatibleRequestsSeparate() {
       List<LodPrefetchBatcher.Request> started = new ArrayList<>();
       try (LodPrefetchBatcher batcher = new LodPrefetchBatcher(60_000L, 4, request -> {

@@ -42,6 +42,25 @@ public final class EarthProjection {
       }
    }
 
+   public static double groundMetersPerBlockX(double blockZ, double worldScale) {
+      return projectedGroundScale(blockZ, worldScale);
+   }
+
+   public static double groundMetersPerBlockZ(double blockZ, double worldScale) {
+      return PROJECTION_MODE == EarthProjection.ProjectionMode.LEGACY
+         ? worldScale
+         : projectedGroundScale(blockZ, worldScale);
+   }
+
+   private static double projectedGroundScale(double blockZ, double worldScale) {
+      if (!(worldScale > 0.0)) {
+         return 0.0;
+      }
+
+      double latitudeRadians = Math.toRadians(blockZToLat(blockZ, worldScale));
+      return worldScale * Math.max(0.0, Math.cos(latitudeRadians));
+   }
+
    public static double clampLatitude(double latitude) {
       return Math.max(-MAX_MERCATOR_LATITUDE, Math.min(MAX_MERCATOR_LATITUDE, latitude));
    }

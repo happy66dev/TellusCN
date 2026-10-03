@@ -12,17 +12,25 @@ import com.yucareux.tellus.network.TellusWeatherPayload;
 import com.yucareux.tellus.world.realtime.SnowGrid;
 import com.yucareux.tellus.world.realtime.TemperatureGrid;
 import com.yucareux.tellus.world.realtime.TellusRealtimeState;
+import com.mojang.blaze3d.platform.InputConstants;
+import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.Screen;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.neoforge.client.event.ClientPlayerNetworkEvent;
 import net.neoforged.neoforge.client.event.ClientTickEvent;
 import net.neoforged.neoforge.client.event.RegisterGuiLayersEvent;
+import net.neoforged.neoforge.client.event.RegisterKeyMappingsEvent;
 import net.neoforged.neoforge.client.network.event.RegisterClientPayloadHandlersEvent;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.network.handling.IPayloadContext;
+import org.lwjgl.glfw.GLFW;
 
 public final class TellusClient {
+   private static final KeyMapping.Category KEY_CATEGORY = new KeyMapping.Category(Tellus.id("controls"));
+   private static final KeyMapping OPEN_MAP_KEY = new KeyMapping(
+      "key.tellus.open_map", InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_M, KEY_CATEGORY
+   );
    private static int managedTerrainViewUpdateTicks;
    private TellusClient() {
    }
@@ -30,8 +38,14 @@ public final class TellusClient {
    public static void register(IEventBus modEventBus) {
       modEventBus.addListener(TellusClient::registerClientPayloadHandlers);
       modEventBus.addListener(TellusClient::registerGuiLayers);
+      modEventBus.addListener(TellusClient::registerKeyMappings);
       NeoForge.EVENT_BUS.addListener(TellusClient::onClientDisconnect);
       NeoForge.EVENT_BUS.addListener(TellusClient::onClientTick);
+   }
+
+   private static void registerKeyMappings(RegisterKeyMappingsEvent event) {
+      event.registerCategory(KEY_CATEGORY);
+      event.register(OPEN_MAP_KEY);
    }
 
    private static void registerGuiLayers(RegisterGuiLayersEvent event) {
@@ -84,6 +98,12 @@ public final class TellusClient {
 
    private static void onClientTick(ClientTickEvent.Post event) {
       Minecraft minecraft = Minecraft.getInstance();
+      while (OPEN_MAP_KEY.consumeClick()) {
+         if (minecraft.gui.screen() == null && minecraft.player != null && minecraft.getConnection() != null) {
+            minecraft.getConnection().sendCommand("tellus map");
+         }
+      }
+
       if (minecraft.player != null && ++managedTerrainViewUpdateTicks >= 40) {
          managedTerrainViewUpdateTicks = 0;
          TellusNeoForgeClientNetworking.sendToServer(new ManagedTerrainViewPayload(ManagedTerrainViewDistance.detect()));

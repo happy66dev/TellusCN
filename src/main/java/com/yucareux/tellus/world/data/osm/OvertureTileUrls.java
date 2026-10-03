@@ -1,6 +1,8 @@
 package com.yucareux.tellus.world.data.osm;
 
 import com.yucareux.tellus.Tellus;
+import com.yucareux.tellus.world.data.source.InputStreamSafety;
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
@@ -9,6 +11,7 @@ import java.util.Locale;
 import java.util.Objects;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import javax.xml.XMLConstants;
 import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.parsers.ParserConfigurationException;
 import org.w3c.dom.Document;
@@ -19,6 +22,7 @@ public final class OvertureTileUrls {
    private static final String EXTRAS_BUCKET_URL = "https://overturemaps-extras-us-west-2.s3.us-west-2.amazonaws.com";
    private static final String RELEASE_PROPERTY = "tellus.overture.release";
    private static final String FALLBACK_RELEASE = "2026-06-17.0";
+   private static final int MAX_RELEASE_LISTING_BYTES = 4 * 1024 * 1024;
    private static final Pattern RELEASE_PREFIX_PATTERN = Pattern.compile("tiles/(\\d{4}-\\d{2}-\\d{2}\\.\\d+)/");
    private static final Pattern RELEASE_ID_PATTERN = Pattern.compile("\\d{4}-\\d{2}-\\d{2}\\.\\d+");
    private static volatile String latestRelease;
@@ -28,12 +32,12 @@ public final class OvertureTileUrls {
 
    public static String defaultThemeUrl(String theme) {
       String safeTheme = validateTheme(theme);
-      String release = configuredRelease();
-      if (release == null) {
-         release = latestRelease();
-      }
+      return themeUrl(resolvedRelease(), safeTheme);
+   }
 
-      return themeUrl(release, safeTheme);
+   public static String resolvedRelease() {
+      String release = configuredRelease();
+      return release == null ? latestRelease() : release;
    }
 
    public static String cacheNamespace(String url) {
@@ -94,9 +98,16 @@ public final class OvertureTileUrls {
          if (responseCode != 200) {
             throw new IOException("Overture release listing HTTP error " + responseCode);
          }
+         long contentLength = connection.getContentLengthLong();
+         if (contentLength > MAX_RELEASE_LISTING_BYTES) {
+            throw new IOException("Overture release listing exceeds the safety limit");
+         }
 
          try (InputStream input = connection.getInputStream()) {
-            Document document = newDocumentBuilderFactory().newDocumentBuilder().parse(input);
+            byte[] response = InputStreamSafety.readAllBytes(
+               input, MAX_RELEASE_LISTING_BYTES, "Overture release listing"
+            );
+            Document document = newDocumentBuilderFactory().newDocumentBuilder().parse(new ByteArrayInputStream(response));
             NodeList prefixes = document.getElementsByTagName("Prefix");
             String latest = null;
             for (int i = 0; i < prefixes.getLength(); i++) {
@@ -126,7 +137,13 @@ public final class OvertureTileUrls {
    private static DocumentBuilderFactory newDocumentBuilderFactory() throws ParserConfigurationException {
       DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
       factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+      factory.setFeature("http://xml.org/sax/features/external-general-entities", false);
+      factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+      factory.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
       factory.setExpandEntityReferences(false);
+      factory.setXIncludeAware(false);
+      factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
+      factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_SCHEMA, "");
       return factory;
    }
 

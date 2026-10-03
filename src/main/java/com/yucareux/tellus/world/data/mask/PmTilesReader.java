@@ -3,10 +3,10 @@ package com.yucareux.tellus.world.data.mask;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
-import com.yucareux.tellus.Tellus;
+import com.yucareux.tellus.integration.distant_horizons.managed.ManagedTerrainNetworkPolicy;
+import com.yucareux.tellus.world.data.pmtiles.PmTilesSafety;
 import com.yucareux.tellus.world.data.source.DownloadProgressReporter;
 import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
@@ -16,12 +16,12 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
-import java.util.zip.GZIPInputStream;
 
 final class PmTilesReader {
    private static final int HEADER_SIZE = 127;
    private static final int MAX_DIRECTORY_DEPTH = 4;
    private static final int MAX_DIRECTORY_CACHE = intProperty("tellus.landmask.dirCache", 256);
+   private static final long MAX_DIRECTORY_CACHE_BYTES = 128L * 1024L * 1024L;
    private static final int READ_TIMEOUT_MS = 15000;
    private static final int CONNECT_TIMEOUT_MS = 10000;
    private final String url;
@@ -34,8 +34,10 @@ final class PmTilesReader {
 
    PmTilesReader(String url) {
       this.url = Objects.requireNonNull(url, "url");
-      this.directoryCache = CacheBuilder.newBuilder()
-         .maximumSize(MAX_DIRECTORY_CACHE)
+      requireHttpUri(URI.create(this.url));
+      this.directoryCache = CacheBuilder.<PmTilesReader.DirectoryKey, PmTilesReader.Directory>newBuilder()
+         .maximumWeight(directoryCacheBudget(MAX_DIRECTORY_CACHE))
+         .weigher((PmTilesReader.DirectoryKey key, PmTilesReader.Directory directory) -> directoryWeight(directory.entries.size()))
          .build(new CacheLoader<PmTilesReader.DirectoryKey, PmTilesReader.Directory>() {
             public PmTilesReader.Directory load(PmTilesReader.DirectoryKey key) throws Exception {
                return PmTilesReader.this.readDirectory(key.offset, key.length);
@@ -64,15 +66,14 @@ final class PmTilesReader {
          }
 
          if (entry.runLength != 0L) {
-            long dataOffset = header.tileDataOffset + entry.offset;
-            if (entry.length > 2147483647L) {
-               throw new IOException("Tile too large");
-            }
-
-            return this.readBytes(dataOffset, (int)entry.length);
+            long dataOffset = PmTilesSafety.checkedAdd(header.tileDataOffset, entry.offset, "PMTiles tile data");
+            int tileLength = PmTilesSafety.checkedLength(
+               entry.length, PmTilesSafety.MAX_COMPRESSED_TILE_BYTES, "PMTiles tile"
+            );
+            return this.readBytes(dataOffset, tileLength);
          }
 
-         long dirOffset = header.leafDirectoryOffset + entry.offset;
+         long dirOffset = PmTilesSafety.checkedAdd(header.leafDirectoryOffset, entry.offset, "PMTiles leaf directory");
          long dirLength = entry.length;
          directory = this.getDirectory(dirOffset, dirLength);
       }
@@ -123,17 +124,21 @@ final class PmTilesReader {
             int tileType = headerBytes[99] & 255;
             int minZoom = headerBytes[100] & 255;
             int maxZoom = headerBytes[101] & 255;
-            if (internalCompression != 2) {
-               Tellus.LOGGER.warn("Unexpected PMTiles directory compression {}", internalCompression);
-            }
-
-            if (tileCompression != 1) {
-               Tellus.LOGGER.warn("Unexpected PMTiles tile compression {}", tileCompression);
-            }
-
-            if (tileType != 2) {
-               Tellus.LOGGER.warn("Unexpected PMTiles tile type {}", tileType);
-            }
+            validateHeader(
+               rootOffset,
+               rootLength,
+               metadataOffset,
+               metadataLength,
+               leafOffset,
+               leafLength,
+               tileOffset,
+               tileLength,
+               internalCompression,
+               tileCompression,
+               tileType,
+               minZoom,
+               maxZoom
+            );
 
             return new PmTilesReader.PmTilesHeader(
                rootOffset, rootLength, metadataOffset, metadataLength, leafOffset, leafLength, tileOffset, tileLength, minZoom, maxZoom
@@ -145,37 +150,51 @@ final class PmTilesReader {
    private PmTilesReader.Directory readDirectory(long offset, long length) throws IOException {
       if (length <= 0L) {
          return new PmTilesReader.Directory(List.of());
-      } else if (length > Integer.MAX_VALUE) {
-         throw new IOException("PMTiles directory too large");
       } else {
-         byte[] compressed = this.readBytes(offset, (int)length);
-         byte[] decompressed = gunzip(compressed);
+         int compressedLength = PmTilesSafety.checkedLength(
+            length, PmTilesSafety.MAX_COMPRESSED_DIRECTORY_BYTES, "PMTiles directory"
+         );
+         byte[] compressed = this.readBytes(offset, compressedLength);
+         byte[] decompressed = PmTilesSafety.decompress(
+            compressed,
+            PmTilesSafety.COMPRESSION_GZIP,
+            PmTilesSafety.MAX_DECOMPRESSED_DIRECTORY_BYTES,
+            "PMTiles directory"
+         );
          ByteArrayInputStream input = new ByteArrayInputStream(decompressed);
-         int numEntries = (int)readVarint(input);
+         long entryCount = PmTilesSafety.readVarint(input);
+         long encodedEntryLimit = decompressed.length / 4L;
+         if (entryCount > PmTilesSafety.MAX_DIRECTORY_ENTRIES || entryCount > encodedEntryLimit) {
+            throw new IOException("PMTiles directory declares an unsafe entry count: " + entryCount);
+         }
+         int numEntries = (int)entryCount;
          List<PmTilesReader.Entry> entries = new ArrayList<>(numEntries);
          long lastId = 0L;
 
          for (int i = 0; i < numEntries; i++) {
-            long delta = readVarint(input);
-            long tileId = lastId + delta;
+            long delta = PmTilesSafety.readVarint(input);
+            long tileId = PmTilesSafety.checkedAdd(lastId, delta, "PMTiles tile id");
             entries.add(new PmTilesReader.Entry(tileId, 0L, 0L, 0L));
             lastId = tileId;
          }
 
          for (int i = 0; i < numEntries; i++) {
-            entries.get(i).runLength = readVarint(input);
+            entries.get(i).runLength = PmTilesSafety.readVarint(input);
          }
 
          for (int i = 0; i < numEntries; i++) {
-            entries.get(i).length = readVarint(input);
+            entries.get(i).length = PmTilesSafety.readVarint(input);
          }
 
          for (int i = 0; i < numEntries; i++) {
-            long tmp = readVarint(input);
+            long tmp = PmTilesSafety.readVarint(input);
             if (i > 0 && tmp == 0L) {
                PmTilesReader.Entry prev = entries.get(i - 1);
-               entries.get(i).offset = prev.offset + prev.length;
+               entries.get(i).offset = PmTilesSafety.checkedAdd(prev.offset, prev.length, "PMTiles entry");
             } else {
+               if (tmp == 0L) {
+                  throw new IOException("PMTiles first directory offset must be positive");
+               }
                entries.get(i).offset = tmp - 1L;
             }
          }
@@ -188,8 +207,12 @@ final class PmTilesReader {
       if (length <= 0) {
          return new byte[0];
       } else {
+         long endInclusive = PmTilesSafety.checkedAdd(offset, length - 1L, "PMTiles HTTP range");
+         if (ManagedTerrainNetworkPolicy.isCacheOnly()) {
+            throw new IOException("Network access is disabled during managed Distant Horizons generation");
+         }
          HttpURLConnection connection = (HttpURLConnection)this.uri().toURL().openConnection();
-         connection.setRequestProperty("Range", "bytes=" + offset + "-" + (offset + length - 1L));
+         connection.setRequestProperty("Range", "bytes=" + offset + "-" + endInclusive);
          connection.setInstanceFollowRedirects(true);
          connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
          connection.setReadTimeout(READ_TIMEOUT_MS);
@@ -203,7 +226,9 @@ final class PmTilesReader {
          DownloadProgressReporter.requestStarted(length);
          try (InputStream input = connection.getInputStream()) {
             if (code == HttpURLConnection.HTTP_OK) {
-               skipFully(input, offset);
+               if (offset != 0L) {
+                  throw new IOException("PMTiles server ignored a nonzero HTTP range request");
+               }
                return readFullyWithProgress(input, length);
             }
 
@@ -225,42 +250,6 @@ final class PmTilesReader {
       return this.uri;
    }
 
-   private static byte[] gunzip(byte[] input) throws IOException {
-      byte[] var5;
-      try (
-         GZIPInputStream gzip = new GZIPInputStream(new ByteArrayInputStream(input));
-         ByteArrayOutputStream output = new ByteArrayOutputStream();
-      ) {
-         byte[] buffer = new byte[8192];
-
-         int read;
-         while ((read = gzip.read(buffer)) != -1) {
-            output.write(buffer, 0, read);
-         }
-
-         var5 = output.toByteArray();
-      }
-
-      return var5;
-   }
-
-   private static void skipFully(InputStream input, long bytes) throws IOException {
-      long remaining = bytes;
-
-      while (remaining > 0L) {
-         long skipped = input.skip(remaining);
-         if (skipped <= 0L) {
-            if (input.read() == -1) {
-               throw new EOFException("Unexpected EOF while skipping");
-            }
-
-            remaining--;
-         } else {
-            remaining -= skipped;
-         }
-      }
-   }
-
    private static byte[] readFullyWithProgress(InputStream input, int length) throws IOException {
       byte[] buffer = new byte[length];
       int offset = 0;
@@ -278,25 +267,6 @@ final class PmTilesReader {
       return buffer;
    }
 
-   private static long readVarint(InputStream input) throws IOException {
-      long result = 0L;
-      int shift = 0;
-
-      while (true) {
-         int raw = input.read();
-         if (raw == -1) {
-            throw new EOFException("Unexpected EOF in varint");
-         }
-
-         result |= (long)(raw & 127) << shift;
-         if ((raw & 128) == 0) {
-            return result;
-         }
-
-         shift += 7;
-      }
-   }
-
    private static long readUint64(byte[] buffer, int pos) {
       return buffer[pos] & 255L
          | (buffer[pos + 1] & 255L) << 8
@@ -309,7 +279,7 @@ final class PmTilesReader {
    }
 
    private static long zxyToTileId(int z, int x, int y) {
-      if (z > 31) {
+      if (z < 0 || z > 31) {
          throw new IllegalArgumentException("Tile zoom exceeds 64-bit limit");
       } else {
          int max = (1 << z) - 1;
@@ -340,17 +310,47 @@ final class PmTilesReader {
       }
    }
 
+   private static void validateHeader(
+      long rootOffset,
+      long rootLength,
+      long metadataOffset,
+      long metadataLength,
+      long leafOffset,
+      long leafLength,
+      long tileOffset,
+      long tileLength,
+      int internalCompression,
+      int tileCompression,
+      int tileType,
+      int minZoom,
+      int maxZoom
+   ) throws IOException {
+      PmTilesSafety.checkedAdd(rootOffset, rootLength, "PMTiles root directory");
+      PmTilesSafety.checkedLength(rootLength, PmTilesSafety.MAX_COMPRESSED_DIRECTORY_BYTES, "PMTiles root directory");
+      PmTilesSafety.checkedAdd(metadataOffset, metadataLength, "PMTiles metadata");
+      PmTilesSafety.checkedAdd(leafOffset, leafLength, "PMTiles leaf directories");
+      PmTilesSafety.checkedAdd(tileOffset, tileLength, "PMTiles tile data");
+      if (internalCompression != PmTilesSafety.COMPRESSION_GZIP
+         || tileCompression != PmTilesSafety.COMPRESSION_NONE
+         || tileType != 2) {
+         throw new IOException("Land-mask PMTiles header uses unsupported compression or tile type");
+      }
+      if (minZoom < 0 || maxZoom > 31 || minZoom > maxZoom) {
+         throw new IOException("PMTiles header contains invalid zoom bounds");
+      }
+   }
+
    private static PmTilesReader.Entry findTile(List<PmTilesReader.Entry> entries, long tileId) {
       int low = 0;
       int high = entries.size() - 1;
 
       while (low <= high) {
          int mid = low + high >>> 1;
-         long diff = tileId - entries.get(mid).tileId;
-         if (diff > 0L) {
+         int comparison = Long.compare(tileId, entries.get(mid).tileId);
+         if (comparison > 0) {
             low = mid + 1;
          } else {
-            if (diff >= 0L) {
+            if (comparison == 0) {
                return entries.get(mid);
             }
 
@@ -370,6 +370,23 @@ final class PmTilesReader {
       }
 
       return null;
+   }
+
+   private static URI requireHttpUri(URI uri) {
+      String scheme = uri.getScheme();
+      if (!("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme)) || uri.getHost() == null) {
+         throw new IllegalArgumentException("PMTiles URL must use HTTP or HTTPS");
+      }
+      return uri;
+   }
+
+   private static long directoryCacheBudget(int configuredEntries) {
+      long requested = Math.max(1L, configuredEntries) * 512L * 1024L;
+      return Math.max(8L * 1024L * 1024L, Math.min(MAX_DIRECTORY_CACHE_BYTES, requested));
+   }
+
+   private static int directoryWeight(int entries) {
+      return (int)Math.min(Integer.MAX_VALUE, 128L + Math.max(0L, entries) * 48L);
    }
 
    private static int intProperty(String key, int defaultValue) {

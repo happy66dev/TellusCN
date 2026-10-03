@@ -8,6 +8,7 @@
 		"BlockPosHighYMixin",
 		"DistantHorizonsChunkUpdateMixin",
 		"DimensionTypeHighYMixin",
+		"HeightRangePlacementMixin",
 		"LevelHighYPackedCoordinateMixin",
 		"MinecraftServerInitialSpawnMixin",
 		"OceanMonumentBuildingMixin",

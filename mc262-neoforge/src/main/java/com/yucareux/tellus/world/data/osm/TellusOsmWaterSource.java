@@ -9,6 +9,7 @@ import com.yucareux.tellus.cache.TellusCacheDomain;
 import com.yucareux.tellus.cache.TellusCacheFiles;
 import com.yucareux.tellus.cache.TellusCacheHandle;
 import com.yucareux.tellus.cache.TellusCacheRegistry;
+import com.yucareux.tellus.world.data.pmtiles.PmTilesSafety;
 import com.yucareux.tellus.world.data.source.ParallelDownloadRunner;
 import com.yucareux.tellus.worldgen.EarthProjection;
 import io.github.sebasbaumh.mapbox.vectortile.VectorTile.Tile;
@@ -268,20 +269,24 @@ public final class TellusOsmWaterSource implements TellusCacheHandle {
 
    private int queryZoomForScale(double worldScale) {
       this.ensureInitialized();
-      if (worldScale <= 0.0) {
-         return this.minZoom;
-      } else {
-         double blocksPerDegree = EarthProjection.blocksPerDegree(worldScale);
+      return selectQueryZoomForScale(worldScale, this.minZoom, this.maxZoom, MIN_TILE_WIDTH_BLOCKS);
+   }
 
-         for (int zoom = this.maxZoom; zoom >= this.minZoom; zoom--) {
-            double tileWidthBlocks = 360.0 * blocksPerDegree / (1 << zoom);
-            if (tileWidthBlocks >= MIN_TILE_WIDTH_BLOCKS) {
-               return zoom;
-            }
-         }
-
-         return this.minZoom;
+   static int selectQueryZoomForScale(double worldScale, int minZoom, int maxZoom, int minTileWidthBlocks) {
+      int low = Math.max(0, Math.min(minZoom, maxZoom));
+      int high = Math.max(low, maxZoom);
+      if (!(Double.isFinite(worldScale) && worldScale > 0.0)) {
+         return low;
       }
+      double blocksPerDegree = EarthProjection.blocksPerDegree(worldScale);
+      int minimumWidth = Math.max(1, minTileWidthBlocks);
+      for (int zoom = high; zoom >= low; zoom--) {
+         double tileWidthBlocks = 360.0 * blocksPerDegree / (1 << zoom);
+         if (tileWidthBlocks >= minimumWidth) {
+            return zoom;
+         }
+      }
+      return low;
    }
 
    private OsmWaterTile getTile(TellusOsmWaterSource.TileKey key, OsmQueryMode mode) {
@@ -529,7 +534,9 @@ public final class TellusOsmWaterSource implements TellusCacheHandle {
 
    private byte[] readCompressed(Path path) throws IOException {
       try (InputStream input = new GZIPInputStream(Files.newInputStream(path))) {
-         return input.readAllBytes();
+         return PmTilesSafety.readBounded(
+            input, PmTilesSafety.MAX_DECOMPRESSED_TILE_BYTES, "Cached Overture water tile"
+         );
       }
    }
 
@@ -941,17 +948,15 @@ public final class TellusOsmWaterSource implements TellusCacheHandle {
    }
 
    private static long resolveFeatureId(Feature feature, Map<String, Object> tags) {
-      if (feature.hasId() && feature.getId() != 0L) {
-         return feature.getId();
-      } else {
-         long idFromTag = parseLongId(tags.get("id"));
-         if (idFromTag != 0L) {
-            return idFromTag;
-         } else {
-            long idFromSources = parseSourceWayId(tags.get("sources"));
-            return idFromSources != 0L ? idFromSources : 0L;
-         }
+      long idFromSources = parseSourceElementId(tags.get("sources"));
+      if (idFromSources != 0L) {
+         return idFromSources;
       }
+      if (feature.hasId() && feature.getId() != 0L) {
+         return syntheticId(feature.getId());
+      }
+      long idFromTag = parseLongId(tags.get("id"));
+      return idFromTag != 0L ? syntheticId(idFromTag) : -1L;
    }
 
    private static long parseLongId(Object value) {
@@ -979,38 +984,38 @@ public final class TellusOsmWaterSource implements TellusCacheHandle {
       }
    }
 
-   private static long parseSourceWayId(Object value) {
-      if (value instanceof String sources && !sources.isBlank()) {
-         int cursor = 0;
-
-         while (true) {
-            int recordIndex = sources.indexOf("\"record_id\":\"w", cursor);
-            if (recordIndex < 0) {
-               return 0L;
-            }
-
-            int start = recordIndex + "\"record_id\":\"w".length();
-
-            int end;
-            for (end = start; end < sources.length(); end++) {
-               char ch = sources.charAt(end);
-               if (ch < '0' || ch > '9') {
-                  break;
-               }
-            }
-
+   private static long parseSourceElementId(Object value) {
+      if (!(value instanceof String sources) || sources.isBlank()) return 0L;
+      int cursor = 0;
+      while (cursor < sources.length()) {
+         int key = sources.indexOf("\"record_id\"", cursor);
+         if (key < 0) return 0L;
+         int colon = sources.indexOf(':', key + 11);
+         int quote = colon < 0 ? -1 : sources.indexOf('"', colon + 1);
+         int prefix = quote + 1;
+         if (quote >= 0 && prefix < sources.length() && (sources.charAt(prefix) == 'w' || sources.charAt(prefix) == 'r')) {
+            char type = sources.charAt(prefix);
+            int start = prefix + 1;
+            int end = start;
+            while (end < sources.length() && Character.isDigit(sources.charAt(end))) end++;
             if (end > start) {
                try {
-                  return Long.parseLong(sources.substring(start, end));
+                  long id = Long.parseLong(sources.substring(start, end));
+                  return type == 'r' ? Long.MAX_VALUE - id : id;
                } catch (NumberFormatException ignored) {
+                  return 0L;
                }
             }
-
-            cursor = end > start ? end : recordIndex + 1;
          }
-      } else {
-         return 0L;
+         cursor = Math.max(key + 1, prefix);
       }
+      return 0L;
+   }
+
+   private static long syntheticId(long value) {
+      if (value == Long.MIN_VALUE) return Long.MIN_VALUE + 1L;
+      long absolute = Math.abs(value);
+      return absolute == 0L ? -1L : -absolute;
    }
 
    private static long hash64(String text) {

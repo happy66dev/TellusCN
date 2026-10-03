@@ -89,7 +89,7 @@ public abstract class BlockPosHighYMixin {
    @Overwrite
    public static long asLong(int x, int y, int z) {
       if (HighYPackedCoordinateProfile.isEnabled()) {
-         return HighYPackedCoordinateProfile.pack(x, y, z);
+         return HighYPackedCoordinateProfile.packClamped(x, y, z);
       }
 
       long horizontalMask = (1L << PACKED_HORIZONTAL_LENGTH) - 1L;

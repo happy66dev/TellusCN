@@ -27,6 +27,10 @@ import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
+import net.neoforged.neoforge.common.NeoForge;
+import net.neoforged.neoforge.event.entity.player.PlayerEvent.PlayerLoggedInEvent;
+import net.neoforged.neoforge.event.server.ServerStartedEvent;
+import net.neoforged.neoforge.event.server.ServerStoppingEvent;
 import org.slf4j.Logger;
 
 public final class DistantHorizonsIntegration {
@@ -48,6 +52,7 @@ public final class DistantHorizonsIntegration {
    private static final int FLOWERING_AZALEA_LEAVES_TEXTURE_COLOR = 0x646F3D;
    private static final Block PALE_OAK_LEAVES_BLOCK = blockByField("PALE_OAK_LEAVES");
    private static final Map<String, EarthChunkGenerator> TELLUS_GENERATORS_BY_DIMENSION = new ConcurrentHashMap<>();
+   private static final DistantHorizonsStartupGate STARTUP_GATE = new DistantHorizonsStartupGate();
    private static final DistantHorizonsRuntimeConfigGuard DIRECT_LOD_CONFIG_GUARD = DistantHorizonsRuntimeConfigGuard.reflective(
       Boolean.parseBoolean(System.getProperty("tellus.dhForceNSizedGeneration", "true"))
    );
@@ -75,10 +80,14 @@ public final class DistantHorizonsIntegration {
    }
 
    public static void bootstrap() {
+      registerStartupGateEvents();
       boolean gateAvailable = generationGateAvailable();
       ManagedTerrainCompatibility.setDistantHorizonsCompatibility(true, gateAvailable);
       if (!gateAvailable) {
-         LOGGER.warn("Tellus-managed terrain downloads are unavailable with this Distant Horizons build; worlds will use the legacy download path");
+         LOGGER.warn(
+            "Tellus-managed terrain downloads are unavailable with this Distant Horizons build; "
+               + "worlds will use the legacy download path after startup generation is released"
+         );
       }
       if (checkApiVersion()) {
          DhApiEventRegister.on(DhApiLevelLoadEvent.class, new DhApiLevelLoadEvent() {
@@ -92,6 +101,32 @@ public final class DistantHorizonsIntegration {
             }
          });
          registerLeafColorOverrideEvents();
+      }
+   }
+
+   private static void registerStartupGateEvents() {
+      STARTUP_GATE.reset();
+      NeoForge.EVENT_BUS.addListener((ServerStartedEvent event) -> STARTUP_GATE.reset());
+      NeoForge.EVENT_BUS.addListener((ServerStoppingEvent event) -> STARTUP_GATE.reset());
+      NeoForge.EVENT_BUS.addListener((PlayerLoggedInEvent event) -> {
+         if (STARTUP_GATE.release()) {
+            LOGGER.info("Released Tellus DH generation after initial player position became available");
+         }
+      });
+   }
+
+   static boolean isDistantGenerationReady() {
+      return STARTUP_GATE.isReady();
+   }
+
+   static void awaitDistantGenerationReady() {
+      try {
+         if (!STARTUP_GATE.awaitReady()) {
+            throw new java.util.concurrent.CancellationException("Tellus DH startup gate reset before release");
+         }
+      } catch (InterruptedException error) {
+         Thread.currentThread().interrupt();
+         throw new java.util.concurrent.CancellationException("Tellus DH startup gate interrupted");
       }
    }
 

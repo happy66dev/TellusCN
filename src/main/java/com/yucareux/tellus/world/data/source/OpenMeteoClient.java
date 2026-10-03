@@ -5,10 +5,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.yucareux.tellus.config.TellusEndpointConfig;
-import java.io.BufferedInputStream;
 import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.Reader;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -20,6 +17,7 @@ public final class OpenMeteoClient {
    private static final int CONNECT_TIMEOUT_MS = 5000;
    private static final int READ_TIMEOUT_MS = 12000;
    private static final int HISTORY_HOURS = 72;
+   private static final int MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
    private static final float MELT_RATE_PER_HOUR = 0.2F;
    private static final float SNOW_ACCUM_SCALE = 10.0F;
    private static final float TEMP_MELT_THRESHOLD = 2.0F;
@@ -31,6 +29,10 @@ public final class OpenMeteoClient {
    }
 
    public OpenMeteoClient.WeatherPointData fetch(double latitude, double longitude) throws IOException {
+      if (!Double.isFinite(latitude) || !Double.isFinite(longitude)
+         || latitude < -90.0 || latitude > 90.0 || longitude < -180.0 || longitude > 180.0) {
+         throw new IllegalArgumentException("Weather coordinates are outside the valid latitude/longitude range");
+      }
       String url = buildUrl(latitude, longitude);
       HttpURLConnection connection = (HttpURLConnection)URI.create(url).toURL().openConnection();
       try {
@@ -42,9 +44,17 @@ public final class OpenMeteoClient {
          if (responseCode != 200) {
             throw new IOException("Open-Meteo request failed with HTTP " + responseCode);
          } else {
-            OpenMeteoClient.WeatherPointData var21;
-            try (Reader reader = new InputStreamReader(new BufferedInputStream(connection.getInputStream()), StandardCharsets.UTF_8)) {
-               JsonElement rootElement = JsonParser.parseReader(reader);
+            long contentLength = connection.getContentLengthLong();
+            if (contentLength > MAX_RESPONSE_BYTES) {
+               throw new IOException("Open-Meteo response exceeds the safety limit");
+            }
+            byte[] response;
+            try (var input = connection.getInputStream()) {
+               response = InputStreamSafety.readAllBytes(input, MAX_RESPONSE_BYTES, "Open-Meteo response");
+            }
+
+            try {
+               JsonElement rootElement = JsonParser.parseString(new String(response, StandardCharsets.UTF_8));
                if (rootElement.isJsonNull() || !rootElement.isJsonObject()) {
                   throw new IOException("Open-Meteo response missing JSON");
                }
@@ -55,21 +65,31 @@ public final class OpenMeteoClient {
                if (timezoneId == null || timezoneId.isBlank()) {
                   timezoneId = "UTC";
                }
+               if (Math.abs((long)utcOffset) > 86400L || timezoneId.length() > 128) {
+                  throw new IOException("Open-Meteo response contains invalid time-zone metadata");
+               }
 
                JsonObject current = root.getAsJsonObject("current");
                int weatherCode = current.get("weather_code").getAsInt();
                float temperature = current.get("temperature_2m").getAsFloat();
                float precipitation = current.get("precipitation").getAsFloat();
                float snowfall = current.get("snowfall").getAsFloat();
+               if (weatherCode < 0 || weatherCode > 999
+                  || !Float.isFinite(temperature) || !Float.isFinite(precipitation) || !Float.isFinite(snowfall)
+                  || precipitation < 0.0F || snowfall < 0.0F) {
+                  throw new IOException("Open-Meteo response contains invalid weather values");
+               }
                JsonObject hourly = root.getAsJsonObject("hourly");
                OpenMeteoClient.SnowHistory history = parseSnowHistory(hourly);
                float snowIndex = computeSnowIndex(history);
-               var21 = new OpenMeteoClient.WeatherPointData(
+               return new OpenMeteoClient.WeatherPointData(
                   latitude, longitude, utcOffset, timezoneId, weatherCode, temperature, precipitation, snowfall, snowIndex
                );
+            } catch (IOException error) {
+               throw error;
+            } catch (RuntimeException error) {
+               throw new IOException("Open-Meteo returned malformed JSON", error);
             }
-
-            return var21;
          }
       } finally {
          connection.disconnect();
@@ -93,6 +113,10 @@ public final class OpenMeteoClient {
             for (int i = start; i < size; i++) {
                float temp = temps.get(i).getAsFloat();
                float snow = snowfall.get(i).getAsFloat();
+               if (!Float.isFinite(temp) || !Float.isFinite(snow)) {
+                  continue;
+               }
+               snow = Math.max(0.0F, snow);
                snowSum += snow;
                if (temp > TEMP_MELT_THRESHOLD) {
                   meltHours++;

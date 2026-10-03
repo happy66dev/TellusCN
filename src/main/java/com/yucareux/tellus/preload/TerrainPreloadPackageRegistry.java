@@ -140,12 +140,10 @@ public final class TerrainPreloadPackageRegistry {
       Map<Path, TerrainPreloadPackageRegistry.Entry> previousByPath
    ) {
       if (manifest == null
-         || manifest.id() == null
-         || manifest.id().isEmpty()
+         || !TerrainPreloadStorage.isValidIdentifier(manifest.id())
          || manifest.area() == null
          || manifest.settingsFingerprint() == null
-         || manifest.packageFile() == null
-         || manifest.packageFile().isEmpty()
+         || !TerrainPreloadPackage.FILE_NAME.equals(manifest.packageFile())
          || manifest.packageFormatVersion() != TerrainPreloadPackage.FORMAT_VERSION) {
          return null;
       }
@@ -168,7 +166,11 @@ public final class TerrainPreloadPackageRegistry {
       Path storageRoot = storage.root().toAbsolutePath().normalize();
       Path publishedDirectory = storage.publishedDirectory(manifest.id()).toAbsolutePath().normalize();
       Path path = publishedDirectory.resolve(manifest.packageFile()).normalize();
-      if (!publishedDirectory.startsWith(storageRoot) || !path.startsWith(publishedDirectory) || !Files.isRegularFile(path)) {
+      if (!publishedDirectory.startsWith(storageRoot)
+         || !path.startsWith(publishedDirectory)
+         || Files.isSymbolicLink(publishedDirectory)
+         || Files.isSymbolicLink(path)
+         || !Files.isRegularFile(path)) {
          return null;
       }
 

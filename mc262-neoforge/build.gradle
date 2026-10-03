@@ -2,6 +2,7 @@ plugins {
 	id 'java-library'
 	id 'maven-publish'
 	id 'net.neoforged.moddev' version '2.0.141'
+	id 'com.gradleup.shadow' version '9.0.0'
 }
 
 def minecraftVersion = '26.2'
@@ -76,16 +77,13 @@ neoForge {
 }
 
 configurations {
+	relocatedXz
 	runtimeClasspath.extendsFrom localRuntime
 }
 
 dependencies {
-	jarJar(implementation('org.tukaani:xz:1.10')) {
-		version {
-			strictly '[1.10,2.0)'
-			prefer '1.10'
-		}
-	}
+	compileOnly 'org.tukaani:xz:1.10'
+	relocatedXz 'org.tukaani:xz:1.10'
 	jarJar(implementation('io.github.sebasbaumh:mapbox-vector-tile-java:24.1.1')) {
 		version {
 			strictly '[24.1.1,25.0)'
@@ -136,12 +134,15 @@ dependencies {
 	}
 
 	testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+	testImplementation 'org.tukaani:xz:1.10'
 	testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.10.2'
 	testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.10.2'
 
 	compileOnly "maven.modrinth:DistantHorizonsApi:${distantHorizonsApiVersion}"
 	if (distantHorizonsRuntimePath) {
 		localRuntime files(distantHorizonsRuntimePath)
+	} else {
+		localRuntime 'org.tukaani:xz:1.10'
 	}
 }
 
@@ -179,9 +180,22 @@ java {
 
 jar {
 	inputs.property 'archivesName', project.base.archivesName
+	archiveClassifier = 'unshaded'
 
 	from(rootProject.file('LICENSE')) {
 		rename { "${it}_${inputs.properties.archivesName}" }
+	}
+}
+
+shadowJar {
+	dependsOn jarJar
+	archiveClassifier = ''
+	configurations = [project.configurations.relocatedXz]
+	from(layout.buildDirectory.dir('generated/jarJar'))
+	relocate 'org.tukaani.xz', 'com.yucareux.tellus.shaded.org.tukaani.xz'
+
+	from(rootProject.file('LICENSE')) {
+		rename { "${it}_${project.base.archivesName.get()}" }
 	}
 }
 

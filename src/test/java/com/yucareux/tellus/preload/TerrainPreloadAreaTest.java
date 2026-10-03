@@ -1,6 +1,7 @@
 package com.yucareux.tellus.preload;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.yucareux.tellus.worldgen.EarthGeneratorSettings;
@@ -15,6 +16,16 @@ class TerrainPreloadAreaTest {
       assertEquals(144, area.totalChunks());
       assertEquals(11, area.maxChunkX() - area.minChunkX());
       assertEquals(11, area.maxChunkZ() - area.minChunkZ());
+   }
+
+   @Test
+   void rectangularAreaReportsItsActualChunkCount() {
+      TerrainPreloadArea area = TerrainPreloadArea.fromChunkBounds(0.0, 0.0, 4, 1.0, 10, 20, 13, 21);
+
+      assertEquals(4, area.chunkWidth());
+      assertEquals(2, area.chunkDepth());
+      assertEquals(8, area.totalChunks());
+      assertTrue(area.summary().startsWith("4 x 2 chunks"));
    }
 
    @Test
@@ -57,6 +68,7 @@ class TerrainPreloadAreaTest {
          .withEnableRoads(false)
          .withEnableBuildings(false)
          .withEnableWater(false)
+         .withUndergroundDepth(256)
          .withAddStructures(false);
 
       EarthGeneratorSettings settings = overrides.apply(EarthGeneratorSettings.DEFAULT);
@@ -65,6 +77,7 @@ class TerrainPreloadAreaTest {
       assertEquals(false, settings.enableRoads());
       assertEquals(false, settings.enableBuildings());
       assertTrue(settings.enableWater());
+      assertEquals(256, settings.undergroundDepth());
       assertEquals(false, settings.addVillages());
       assertEquals(false, settings.addStrongholds());
    }
@@ -76,5 +89,35 @@ class TerrainPreloadAreaTest {
 
       assertEquals(35.3606, settings.spawnLatitude(), 0.0001);
       assertEquals(138.7274, settings.spawnLongitude(), 0.0001);
+   }
+
+   @Test
+   void rejectsOverflowingOrInconsistentChunkBounds() {
+      assertThrows(
+         IllegalArgumentException.class,
+         () -> TerrainPreloadArea.fromChunkBounds(0.0, 0.0, 2, 1.0, 0, 0, 2, 0)
+      );
+      assertThrows(
+         IllegalArgumentException.class,
+         () -> TerrainPreloadArea.fromChunkBounds(0.0, 0.0, 1, 1.0, Integer.MAX_VALUE, 0, Integer.MAX_VALUE, 0)
+      );
+   }
+
+   @Test
+   void capsConfiguredAreaSizeBeforeChunkCountCanOverflow() {
+      String key = "tellus.preload.maxChunksPerSide";
+      String previous = System.getProperty(key);
+      try {
+         System.setProperty(key, Integer.toString(Integer.MAX_VALUE));
+         assertEquals(TerrainPreloadArea.HARD_MAX_CHUNKS_PER_SIDE, TerrainPreloadArea.maxChunksPerSide());
+         TerrainPreloadArea area = TerrainPreloadArea.centered(0.0, 0.0, Integer.MAX_VALUE, 1.0);
+         assertTrue(area.totalChunks() > 0);
+      } finally {
+         if (previous == null) {
+            System.clearProperty(key);
+         } else {
+            System.setProperty(key, previous);
+         }
+      }
    }
 }

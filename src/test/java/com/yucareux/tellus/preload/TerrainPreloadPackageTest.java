@@ -124,6 +124,39 @@ class TerrainPreloadPackageTest {
    }
 
    @Test
+   void rejectsMalformedAreaMetadataAsAnIoFailure() throws Exception {
+      Path path = this.tempDirectory.resolve("invalid-area.telluspack");
+      try (
+         DataOutputStream output = new DataOutputStream(
+            new BufferedOutputStream(new GZIPOutputStream(Files.newOutputStream(path)))
+         )
+      ) {
+         output.writeInt(TerrainPreloadPackage.MAGIC);
+         output.writeInt(TerrainPreloadPackage.FORMAT_VERSION);
+         output.writeUTF("test-package");
+         output.writeUTF("settings");
+         output.writeDouble(0.0);
+         output.writeDouble(0.0);
+         output.writeInt(1);
+         output.writeDouble(1.0);
+         output.writeInt(Integer.MAX_VALUE);
+         output.writeInt(0);
+         output.writeInt(Integer.MAX_VALUE);
+         output.writeInt(0);
+         output.writeDouble(1.0);
+         output.writeDouble(-1.0);
+         output.writeDouble(-1.0);
+         output.writeDouble(1.0);
+         output.writeInt(1);
+         output.writeInt(1);
+         output.writeInt(1);
+      }
+
+      IOException error = assertThrows(IOException.class, () -> TerrainPreloadPackage.read(path));
+      assertTrue(error.getMessage().contains("Invalid terrain preload area"));
+   }
+
+   @Test
    void interruptedWriterPreservesInterruptStatus() {
       Path path = this.tempDirectory.resolve("cancelled.telluspack");
       TerrainPreloadArea area = TerrainPreloadArea.fromChunkBounds(0.0, 0.0, 1, 1.0, 0, 0, 0, 0);

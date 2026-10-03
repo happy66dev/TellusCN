@@ -86,7 +86,7 @@ public final class TellusLodGenerator implements IDhApiWorldGenerator {
    private static final int FAST_RENDER_ULTRA_FAST_MIN_DETAIL = intProperty("tellus.dhFastRenderUltraFastMinDetail", 4, 0, 24);
    private static final int FAST_RENDER_SKIP_SHORELINE_MIN_DETAIL = intProperty("tellus.dhFastRenderSkipShorelineMinDetail", 3, 0, 24);
    private static final int ULTRA_FAST_COARSE_SAMPLE_MIN_DETAIL = intProperty(
-      "tellus.dhUltraFastCoarseSampleMinDetail", FAST_RENDER_ULTRA_FAST_MIN_DETAIL + 1, 0, 24
+      "tellus.dhUltraFastCoarseSampleMinDetail", LodSamplingGrid.FULL_QUALITY_MAX_DETAIL + 1, 0, 24
    );
    private static final int ULTRA_FAST_COARSE_SAMPLE_MAX_STRIDE = intProperty("tellus.dhUltraFastCoarseSampleMaxStride", 8, 1, 64);
    private static final int LOD_SURFACE_SHAPE_REFINE_MAX_DETAIL = intProperty("tellus.dhSurfaceShapeRefineMaxDetail", 6, 0, 24);
@@ -174,6 +174,9 @@ public final class TellusLodGenerator implements IDhApiWorldGenerator {
    }
 
    public byte getGenerationAvailability(int chunkPosMinX, int chunkPosMinZ, int widthChunks, byte targetDataDetail) {
+      if (!DistantHorizonsIntegration.isDistantGenerationReady()) {
+         return ManagedTerrainAvailability.WAIT;
+      }
       return this.managedDownloadsActive()
          ? ManagedTerrainAvailability.availability(this.managedTerrainKey, chunkPosMinX, chunkPosMinZ, widthChunks)
          : ManagedTerrainAvailability.READY;
@@ -210,6 +213,7 @@ public final class TellusLodGenerator implements IDhApiWorldGenerator {
 
          boolean managedDownloads = this.managedDownloadsActive();
          try (ManagedTerrainNetworkPolicy.Scope ignored = managedDownloads ? ManagedTerrainNetworkPolicy.cacheOnly() : null) {
+            DistantHorizonsIntegration.awaitDistantGenerationReady();
             timingTrace.addPhase("prefetch", 0L);
             if (!managedDownloads) {
                long prefetchStart = beginTimingPhase(timingTrace);
@@ -315,7 +319,6 @@ public final class TellusLodGenerator implements IDhApiWorldGenerator {
          int cellSize = 1 << detailLevel;
          int cellOffset = cellSize >> 1;
          EarthGeneratorSettings settings = this.generator.settings();
-         boolean thinShellTerrain = settings.usesTerrainShell();
          double previewResolutionMeters = lodPreviewResolutionMeters(settings, cellSize);
          boolean baseDetailedWater = settings.distantHorizonsWaterResolver() && detailLevel <= 5;
          TellusRealtimeState.PrecipitationMode precipitationMode = TellusRealtimeState.precipitationMode();
@@ -831,12 +834,15 @@ public final class TellusLodGenerator implements IDhApiWorldGenerator {
                   }
 
                   boolean snowColoredLodColumn = false;
-                  if (!hasRoad && !hasBuilding && !underwater && snowActive && TellusRealtimeState.shouldApplySnow(worldX, worldZ)) {
+                  if (!hasRoad
+                     && !hasBuilding
+                     && !underwater
+                     && snowActive
+                     && TellusRealtimeState.shouldApplySnow(worldX, worldZ)
+                     && this.generator.shouldPlaceSnowAt(worldX, worldZ)) {
                      topBlock = wrappers.getBlockState(Blocks.SNOW_BLOCK.defaultBlockState());
-                     fillerBlock = topBlock;
                      snowColoredLodColumn = true;
                   } else if (!hasRoad && !hasBuilding && !underwater && topState.is(Blocks.SNOW_BLOCK)) {
-                     fillerBlock = topBlock;
                      snowColoredLodColumn = true;
                   }
 
@@ -884,18 +890,8 @@ public final class TellusLodGenerator implements IDhApiWorldGenerator {
                   int surfaceTop = toLayerTop(surfaceY, minY, absoluteTop);
                   int topLayerBase = Math.max(0, surfaceTop - 1);
                   columnPhaseStart = emitTimingEnabled ? System.nanoTime() : 0L;
-                  if (settings.experimentalIncreaseHeight()) {
-                     lastLayerTop = appendExperimentalShellBaseColumn(
-                        columnDataPoints, lastLayerTop, minY, absoluteTop, underwater ? waterSurface : surfaceY,
-                        topLayerBase, fillerBlock, wrappers.airBlock(), biome
-                     );
-                  } else if (thinShellTerrain) {
-                     if (topLayerBase > lastLayerTop) {
-                        columnDataPoints.add(DhApiTerrainDataPoint.create((byte)0, 0, 15, lastLayerTop, topLayerBase, wrappers.airBlock(), biome));
-                        lastLayerTop = topLayerBase;
-                     }
-                  } else if (useBadlandsBands) {
-                     int bandDepth = Math.min(16, surfaceY - minY + 1);
+                  if (useBadlandsBands) {
+                     int bandDepth = Math.min(this.generator.resolveBadlandsBandDepth(slopeDiff), surfaceY - minY + 1);
                      int bandBottomY = Math.max(minY, surfaceY - bandDepth + 1);
                      int bandBottomLayer = toLayerTop(bandBottomY, minY, absoluteTop);
                      if (bandBottomLayer > lastLayerTop) {
@@ -904,15 +900,19 @@ public final class TellusLodGenerator implements IDhApiWorldGenerator {
                      }
 
                      while (lastLayerTop < topLayerBase) {
-                        int segmentTop = Math.min(topLayerBase, lastLayerTop + 3);
-                        int bandY = segmentTop - 1;
-                        IDhApiBlockStateWrapper bandBlock = wrappers.getBlockState(this.generator.resolveBadlandsBandBlock(worldX, worldZ, bandY));
+                        int bandY = minY + lastLayerTop;
+                        BlockState bandState = this.generator.resolveBadlandsBandBlock(worldX, worldZ, bandY);
+                        int segmentTop = lastLayerTop + 1;
+                        while (segmentTop < topLayerBase
+                           && bandState.equals(this.generator.resolveBadlandsBandBlock(worldX, worldZ, minY + segmentTop))) {
+                           segmentTop++;
+                        }
+                        IDhApiBlockStateWrapper bandBlock = wrappers.getBlockState(bandState);
                         columnDataPoints.add(DhApiTerrainDataPoint.create((byte)0, 0, 15, lastLayerTop, segmentTop, bandBlock, biome));
                         lastLayerTop = segmentTop;
                      }
-                  } else if (topLayerBase > lastLayerTop) {
-                     columnDataPoints.add(DhApiTerrainDataPoint.create((byte)0, 0, 15, lastLayerTop, topLayerBase, fillerBlock, biome));
-                     lastLayerTop = topLayerBase;
+                  } else {
+                     lastLayerTop = appendSealedLodBaseColumn(columnDataPoints, lastLayerTop, topLayerBase, fillerBlock, biome);
                   }
 
                   if (surfaceTop > lastLayerTop) {
@@ -1128,7 +1128,6 @@ public final class TellusLodGenerator implements IDhApiWorldGenerator {
       IDhApiBlockStateWrapper roadMarkingBlock = wrappers.getBlockState(Blocks.WHITE_CONCRETE.defaultBlockState());
       IDhApiBlockStateWrapper airBlock = wrappers.airBlock();
       List<DhApiTerrainDataPoint> columnDataPoints = new ArrayList<>(8);
-      boolean thinShellTerrain = settings.usesTerrainShell();
       double previewResolutionMeters = lodPreviewResolutionMeters(settings, cellSize);
       boolean roadsActive = this.shouldRenderDhRoads(detail);
       boolean buildingsActive = this.shouldRenderDhBuildings(detail);
@@ -1474,11 +1473,12 @@ public final class TellusLodGenerator implements IDhApiWorldGenerator {
                   surfaceY = Math.max(surfaceY, waterSurface);
                   underwater = false;
                }
-            } else if (!hasBuilding && !underwater && snowActive && TellusRealtimeState.shouldApplySnow(worldX, worldZ)) {
+            } else if (!hasBuilding
+               && !underwater
+               && snowActive
+               && TellusRealtimeState.shouldApplySnow(worldX, worldZ)
+               && this.generator.shouldPlaceSnowAt(worldX, worldZ)) {
                topBlock = snowTopBlock;
-               fillerBlock = topBlock;
-            } else if (!hasBuilding && !underwater && topState.is(Blocks.SNOW_BLOCK)) {
-               fillerBlock = topBlock;
             }
 
             if (emitTimingEnabled) {
@@ -1502,17 +1502,7 @@ public final class TellusLodGenerator implements IDhApiWorldGenerator {
             int surfaceTop = toLayerTop(surfaceY, minY, absoluteTop);
             int topLayerBase = Math.max(0, surfaceTop - 1);
             columnPhaseStart = emitTimingEnabled ? System.nanoTime() : 0L;
-            if (settings.experimentalIncreaseHeight()) {
-               lastLayerTop = appendExperimentalShellBaseColumn(
-                  columnDataPoints, lastLayerTop, minY, absoluteTop, underwater ? waterSurface : surfaceY,
-                  topLayerBase, fillerBlock, airBlock, biome
-               );
-            } else if (topLayerBase > lastLayerTop) {
-               columnDataPoints.add(
-                  DhApiTerrainDataPoint.create((byte)0, 0, 15, lastLayerTop, topLayerBase, thinShellTerrain ? airBlock : fillerBlock, biome)
-               );
-               lastLayerTop = topLayerBase;
-            }
+            lastLayerTop = appendSealedLodBaseColumn(columnDataPoints, lastLayerTop, topLayerBase, fillerBlock, biome);
 
             if (surfaceTop > lastLayerTop) {
                columnDataPoints.add(DhApiTerrainDataPoint.create((byte)0, 0, 15, lastLayerTop, surfaceTop, topBlock, biome));
@@ -1644,43 +1634,25 @@ public final class TellusLodGenerator implements IDhApiWorldGenerator {
       return Mth.clamp(inclusiveTopY - minY + 1, 0, absoluteTop);
    }
 
-   private static int appendExperimentalShellBaseColumn(
+   /**
+    * Seals the visual terrain mass below a direct LOD surface. Real chunks may use a hollow terrain shell,
+    * but encoding that void in a coarse DH column exposes horizontal gaps whenever adjacent samples differ
+    * by more than the shell depth. The resolved filler is retained so slope materials such as deepslate remain
+    * visible on the resulting cliff face.
+    */
+   static int appendSealedLodBaseColumn(
       List<DhApiTerrainDataPoint> columnDataPoints,
       int lastLayerTop,
-      int minY,
-      int absoluteTop,
-      int supportAnchorY,
       int topLayerBase,
       IDhApiBlockStateWrapper fillerBlock,
-      IDhApiBlockStateWrapper airBlock,
       IDhApiBiomeWrapper biome
    ) {
-      if (topLayerBase <= lastLayerTop) {
-         return lastLayerTop;
-      }
-
-      int shellBaseTop = experimentalShellBaseLayerTop(supportAnchorY, minY, absoluteTop);
-      int airTop = Math.min(topLayerBase, Math.max(lastLayerTop, shellBaseTop));
-      if (airTop > lastLayerTop) {
-         columnDataPoints.add(DhApiTerrainDataPoint.create((byte)0, 0, 15, lastLayerTop, airTop, airBlock, biome));
-         lastLayerTop = airTop;
-      }
-
       if (topLayerBase > lastLayerTop) {
          columnDataPoints.add(DhApiTerrainDataPoint.create((byte)0, 0, 15, lastLayerTop, topLayerBase, fillerBlock, biome));
          lastLayerTop = topLayerBase;
       }
 
       return lastLayerTop;
-   }
-
-   private static int experimentalShellBaseLayerTop(int supportAnchorY, int minY, int absoluteTop) {
-      int shellBottomY = Math.max(minY, supportAnchorY - EarthGeneratorSettings.EXPERIMENTAL_TERRAIN_SHELL_DEPTH);
-      if (shellBottomY <= minY) {
-         return 0;
-      }
-
-      return toLayerTop(shellBottomY - 1, minY, absoluteTop);
    }
 
    private static int dhCompatibleMaxY(int minY, EarthChunkGenerator generator) {
@@ -1862,7 +1834,11 @@ public final class TellusLodGenerator implements IDhApiWorldGenerator {
          Thread.currentThread().interrupt();
          throw new CancellationException("Tellus LOD prefetch interrupted");
       } catch (ExecutionException error) {
-         LOGGER.debug("Tellus exact LOD tile prefetch completed with an error; generation will use normal source fallbacks.", error.getCause());
+         Throwable cause = error.getCause();
+         if (isInterruptedLodGeneration(cause) || cause instanceof Error) {
+            throw propagateLodGenerationFailure(cause);
+         }
+         LOGGER.debug("Tellus exact LOD tile prefetch completed with an error; generation will use normal source fallbacks.", cause);
       }
    }
 

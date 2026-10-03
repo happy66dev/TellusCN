@@ -8,6 +8,39 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class OceanFloorProfileTest {
    @Test
+   void keepsTransitionInRealWorldMetersAcrossSupportedScales() {
+      assertEquals(512, OceanFloorProfile.transitionBlocksForScale(512, 1.0));
+      assertEquals(256, OceanFloorProfile.transitionBlocksForScale(512, 2.0));
+      assertEquals(51, OceanFloorProfile.transitionBlocksForScale(512, 10.0));
+      assertEquals(17, OceanFloorProfile.transitionBlocksForScale(512, 30.0));
+      assertEquals(5, OceanFloorProfile.transitionBlocksForScale(512, 100.0));
+      assertEquals(1, OceanFloorProfile.transitionBlocksForScale(512, 1000.0));
+      assertEquals(0, OceanFloorProfile.transitionBlocksForScale(0, 100.0));
+   }
+
+   @Test
+   void scalesOffshoreMinimumDepthWithWorldScale() {
+      assertEquals(20, OceanFloorProfile.minimumOffshoreDepthForScale(1.0));
+      assertEquals(2, OceanFloorProfile.minimumOffshoreDepthForScale(10.0));
+      assertEquals(1, OceanFloorProfile.minimumOffshoreDepthForScale(30.0));
+      assertEquals(1, OceanFloorProfile.minimumOffshoreDepthForScale(100.0));
+
+      int transitionBlocks = OceanFloorProfile.transitionBlocksForScale(512, 100.0);
+      assertEquals(
+         58,
+         OceanFloorProfile.floorHeight(
+            63,
+            58,
+            transitionBlocks,
+            false,
+            transitionBlocks,
+            1.0,
+            OceanFloorProfile.minimumOffshoreDepthForScale(100.0)
+         )
+      );
+   }
+
+   @Test
    void naturallyShallowProfileRampsToMinimumOffshoreDepth() {
       assertFalse(OceanFloorProfile.shouldCorrect(true, 5, 1.0, 1, 1.0));
       assertEquals(62, OceanFloorProfile.floorHeight(63, 58, 0.0, false, 512, 1.0));

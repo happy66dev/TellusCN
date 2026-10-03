@@ -1,5 +1,5 @@
 plugins {
-	id 'net.fabricmc.fabric-loom-remap' version '1.14-SNAPSHOT'
+	id 'net.fabricmc.fabric-loom-remap' version '1.14.10'
 	id 'eclipse'
 	id 'maven-publish'
 }
@@ -99,8 +99,8 @@ dependencies {
 	implementation 'org.tukaani:xz:1.10'
 	implementation 'io.github.sebasbaumh:mapbox-vector-tile-java:23.2.0'
 	include 'io.github.sebasbaumh:mapbox-vector-tile-java:23.2.0'
-	implementation 'com.google.protobuf:protobuf-java:3.23.4'
-	include 'com.google.protobuf:protobuf-java:3.23.4'
+	implementation 'com.google.protobuf:protobuf-java:3.25.5'
+	include 'com.google.protobuf:protobuf-java:3.25.5'
 	implementation "com.twelvemonkeys.imageio:imageio-webp:${twelveMonkeysImageioVersion}"
 	implementation "com.twelvemonkeys.imageio:imageio-core:${twelveMonkeysImageioVersion}"
 	implementation "com.twelvemonkeys.imageio:imageio-metadata:${twelveMonkeysImageioVersion}"

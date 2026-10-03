@@ -17,6 +17,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardCopyOption;
@@ -30,6 +31,7 @@ import java.util.Objects;
 
 public final class TerrainPreloadStorage {
    public static final String RELATIVE_CACHE_PATH = "tellus/cache/preloaded-terrain/v1";
+   private static final long MAX_MANIFEST_BYTES = 1024L * 1024L;
    private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
    private static final TerrainPreloadStorage INSTANCE = new TerrainPreloadStorage();
 
@@ -45,6 +47,7 @@ public final class TerrainPreloadStorage {
    }
 
    public Path createStagingDirectory(String jobId) throws IOException {
+      requireValidIdentifier(jobId);
       Path stagingRoot = this.root().resolve(".staging");
       Files.createDirectories(stagingRoot);
       Path staging = stagingRoot.resolve(Objects.requireNonNull(jobId, "jobId"));
@@ -54,11 +57,17 @@ public final class TerrainPreloadStorage {
    }
 
    public Path publishedDirectory(String id) {
-      return this.root().resolve(Objects.requireNonNull(id, "id"));
+      requireValidIdentifier(id);
+      return this.root().resolve(id);
    }
 
    public void publish(Path staging, String id) throws IOException {
       Objects.requireNonNull(staging, "staging");
+      Path stagingRoot = this.root().resolve(".staging").toAbsolutePath().normalize();
+      Path normalizedStaging = staging.toAbsolutePath().normalize();
+      if (!normalizedStaging.startsWith(stagingRoot) || normalizedStaging.equals(stagingRoot)) {
+         throw new IOException("Terrain preload staging directory is outside the cache root");
+      }
       Path target = this.publishedDirectory(id);
       deleteTree(target);
       Files.createDirectories(target.getParent());
@@ -101,9 +110,18 @@ public final class TerrainPreloadStorage {
       List<TerrainPreloadManifest> manifests = new ArrayList<>();
       try {
          try (var stream = Files.list(root)) {
-            stream.filter(Files::isDirectory).forEach(dir -> {
+            stream.filter(dir -> Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS)).forEach(dir -> {
                Path manifestPath = dir.resolve("manifest.json");
-               if (Files.isRegularFile(manifestPath)) {
+               if (Files.isRegularFile(manifestPath, LinkOption.NOFOLLOW_LINKS)) {
+                  try {
+                     if (Files.size(manifestPath) > MAX_MANIFEST_BYTES) {
+                        Tellus.LOGGER.warn("Ignoring oversized preloaded terrain manifest {}", manifestPath);
+                        return;
+                     }
+                  } catch (IOException error) {
+                     Tellus.LOGGER.warn("Failed to inspect preloaded terrain manifest {}", manifestPath, error);
+                     return;
+                  }
                   try (BufferedReader reader = Files.newBufferedReader(manifestPath, StandardCharsets.UTF_8)) {
                      TerrainPreloadManifest manifest = GSON.fromJson(reader, TerrainPreloadManifest.class);
                      if (manifest != null) {
@@ -198,5 +216,29 @@ public final class TerrainPreloadStorage {
             return FileVisitResult.CONTINUE;
          }
       });
+   }
+
+   static boolean isValidIdentifier(String id) {
+      if (id == null || id.isEmpty() || id.length() > 128) {
+         return false;
+      }
+      for (int index = 0; index < id.length(); index++) {
+         char character = id.charAt(index);
+         if (!(character >= 'a' && character <= 'z')
+            && !(character >= 'A' && character <= 'Z')
+            && !(character >= '0' && character <= '9')
+            && character != '-'
+            && character != '_'
+            && character != '.') {
+            return false;
+         }
+      }
+      return !id.equals(".") && !id.equals("..");
+   }
+
+   private static void requireValidIdentifier(String id) {
+      if (!isValidIdentifier(id)) {
+         throw new IllegalArgumentException("Invalid terrain preload identifier");
+      }
    }
 }

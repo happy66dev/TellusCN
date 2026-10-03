@@ -11,19 +11,19 @@ subprojects {
 }
 
 tasks.named('clean') {
-	dependsOn(':mc1201:clean', ':mc1211:clean', ':mc262:clean', ':mc262-neoforge:clean')
+	dependsOn(':mc1201:clean', ':mc1211:clean', ':mc1211-neoforge:clean', ':mc262:clean', ':mc262-neoforge:clean')
 }
 
 tasks.named('assemble') {
-	dependsOn(':mc1201:assemble', ':mc1211:assemble', ':mc262:assemble', ':mc262-neoforge:assemble')
+	dependsOn(':mc1201:assemble', ':mc1211:assemble', ':mc1211-neoforge:assemble', ':mc262:assemble', ':mc262-neoforge:assemble')
 }
 
 tasks.named('check') {
-	dependsOn(':mc1201:check', ':mc1211:check', ':mc262:check', ':mc262-neoforge:check')
+	dependsOn(':mc1201:check', ':mc1211:check', ':mc1211-neoforge:check', ':mc262:check', ':mc262-neoforge:check')
 }
 
 tasks.named('build') {
-	dependsOn(':mc1201:build', ':mc1211:build', ':mc262:build', ':mc262-neoforge:build')
+	dependsOn(':mc1201:build', ':mc1211:build', ':mc1211-neoforge:build', ':mc262:build', ':mc262-neoforge:build')
 }
 
 tasks.register('build1201') {
@@ -36,6 +36,12 @@ tasks.register('build1211') {
 	group = 'build'
 	description = 'Builds the Minecraft 1.21.1 Fabric target.'
 	dependsOn(':mc1211:build')
+}
+
+tasks.register('build1211NeoForge') {
+	group = 'build'
+	description = 'Builds the Minecraft 1.21.1 NeoForge target.'
+	dependsOn(':mc1211-neoforge:build')
 }
 
 tasks.register('build262') {
@@ -54,6 +60,12 @@ tasks.register('runClient1211') {
 	group = 'fabric'
 	description = 'Runs the Minecraft 1.21.1 client target.'
 	dependsOn(':mc1211:runClient')
+}
+
+tasks.register('runClient1211NeoForge') {
+	group = 'neoforge'
+	description = 'Runs the Minecraft 1.21.1 NeoForge client target.'
+	dependsOn(':mc1211-neoforge:runClient')
 }
 
 tasks.register('runClient1201') {
@@ -84,6 +96,12 @@ tasks.register('runServer1211') {
 	group = 'fabric'
 	description = 'Runs the Minecraft 1.21.1 server target.'
 	dependsOn(':mc1211:runServer')
+}
+
+tasks.register('runServer1211NeoForge') {
+	group = 'neoforge'
+	description = 'Runs the Minecraft 1.21.1 NeoForge server target.'
+	dependsOn(':mc1211-neoforge:runServer')
 }
 
 tasks.register('runServer262') {

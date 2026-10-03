@@ -56,17 +56,25 @@ public final class HighYPackedCoordinateProfile {
    private static final boolean ENABLED = PROFILE_ID.equals(REQUESTED_PROFILE);
 
    static {
-      if (X_SIZE != Z_SIZE) {
-         throw new ExceptionInInitializerError("Dense Tellus coordinate profile requires equal Mercator axis sizes");
-      }
-      if ((Y_SIZE & 15) != 0 || (Y_MIN & 15) != 0) {
-         throw new ExceptionInInitializerError("Dense Tellus Y range must preserve the low four section-local Y bits");
-      }
+      validateAxisSizes(X_SIZE, Z_SIZE);
+      validateYAlignment(Y_SIZE, Y_MIN);
       long maximumColumn = Long.divideUnsigned(-1L, Y_SIZE);
       int maximumColumnRemainder = (int)Long.remainderUnsigned(-1L, Y_SIZE);
       long lastColumn = HORIZONTAL_POSITION_COUNT - 1L;
       if (lastColumn > maximumColumn || lastColumn == maximumColumn && Y_SIZE - 1 > maximumColumnRemainder) {
          throw new ExceptionInInitializerError("Dense Tellus coordinate profile exceeds 64 bits");
+      }
+   }
+
+   private static void validateAxisSizes(long xSize, long zSize) {
+      if (xSize != zSize) {
+         throw new ExceptionInInitializerError("Dense Tellus coordinate profile requires equal Mercator axis sizes");
+      }
+   }
+
+   private static void validateYAlignment(int ySize, int yMin) {
+      if ((ySize & 15) != 0 || (yMin & 15) != 0) {
+         throw new ExceptionInInitializerError("Dense Tellus Y range must preserve the low four section-local Y bits");
       }
    }
 
@@ -98,6 +106,21 @@ public final class HighYPackedCoordinateProfile {
          : LOWER_SAFETY_SLOT_START + (long)y - Y_MIN;
       // Overflow past Long.MAX_VALUE is intentional: the value is an unsigned 64-bit index.
       return column * Y_SIZE + yIndex;
+   }
+
+   /**
+    * Packs an arbitrary transient {@code BlockPos} lookup without allowing an
+    * out-of-world camera or entity position to terminate the game. Vanilla
+    * accepts those positions in {@code BlockPos.asLong}; clamp them to the
+    * nearest representable edge while keeping {@link #pack} strict for world
+    * data and validation.
+    */
+   public static long packClamped(int x, int y, int z) {
+      return pack(
+         Math.max(X_MIN, Math.min(X_MAX, x)),
+         Math.max(Y_MIN, Math.min(Y_MAX, y)),
+         Math.max(Z_MIN, Math.min(Z_MAX, z))
+      );
    }
 
    public static int unpackX(long packed) {

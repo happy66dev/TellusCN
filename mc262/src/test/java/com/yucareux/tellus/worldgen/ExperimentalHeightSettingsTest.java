@@ -37,6 +37,7 @@ class ExperimentalHeightSettingsTest {
       assertTrue(decoded.experimentalIncreaseHeight());
       assertEquals(1.0, decoded.terrestrialHeightScale());
       assertEquals(1.0, decoded.oceanicHeightScale());
+      assertEquals(30.0, decoded.effectiveVerticalWorldScale());
       assertEquals(EarthGeneratorSettings.EXPERIMENTAL_HEIGHT_OFFSET, decoded.heightOffset());
       assertEquals(EarthGeneratorSettings.EXPERIMENTAL_HEIGHT_OFFSET, decoded.effectiveHeightOffset());
       assertEquals(EarthGeneratorSettings.AUTO_ALTITUDE, decoded.minAltitude());
@@ -46,10 +47,11 @@ class ExperimentalHeightSettingsTest {
       assertTrue(encoded.get("experimental_increase_height").getAsBoolean());
       assertFalse(encoded.has("sea_level"));
       assertEquals(HighYPackedCoordinateProfile.PROFILE_ID, encoded.get("experimental_height_coordinate_profile").getAsString());
-      assertTrue(limits.minY() <= EarthGeneratorSettings.EXPERIMENTAL_HEIGHT_OFFSET - EarthGeneratorSettings.EXPERIMENTAL_TERRAIN_SHELL_DEPTH);
-      assertTrue(limits.minY() + limits.height() - 1 >= 8848);
+      assertEquals(EarthGeneratorSettings.DEFAULT_UNDERGROUND_DEPTH, decoded.undergroundDepth());
+      assertTrue(limits.minY() <= EarthGeneratorSettings.EXPERIMENTAL_HEIGHT_OFFSET - decoded.undergroundDepth());
+      assertTrue(limits.minY() + limits.height() - 1 >= Math.ceil(8848.0 / decoded.worldScale()));
+      assertTrue(limits.minY() + limits.height() - 1 < 8848);
       assertEquals(HighYPackedCoordinateProfile.TELLUS_DIMENSION_MIN_Y, limits.minY());
-      assertEquals(HighYPackedCoordinateProfile.TELLUS_DIMENSION_Y_SIZE, limits.height());
       assertEquals(-2_040, limits.minY() + WaterSurfaceResolver.oceanFloorSupportBlocks());
    }
 

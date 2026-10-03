@@ -1,6 +1,8 @@
 package com.yucareux.tellus.worldgen.caves;
 
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import net.minecraft.core.HolderSet;
 import net.minecraft.core.Registry;
 import net.minecraft.tags.BlockTags;
@@ -18,34 +20,45 @@ import net.minecraft.world.level.levelgen.carver.CanyonCarverConfiguration.Canyo
 import net.minecraft.world.level.levelgen.heightproviders.UniformHeight;
 
 final class TellusConfiguredCarvers {
-   private static final float CAVE_PROBABILITY = 0.33F;
-   private static final float CAVE_EXTRA_PROBABILITY = 0.18F;
-   private static final float CANYON_PROBABILITY = 0.0225F;
-   private final List<ConfiguredWorldCarver<?>> orderedCarvers;
+   private static final float CAVE_PROBABILITY = 0.15F;
+   private static final float CAVE_EXTRA_PROBABILITY = 0.07F;
+   private static final float CANYON_PROBABILITY = 0.01F;
+   private static final int VANILLA_SURFACE_Y = 63;
+   private static final int VANILLA_CAVE_FLOOR_Y = -56;
+   private static final int VANILLA_CAVE_CEILING_Y = 180;
+   private static final int VANILLA_EXTRA_CAVE_CEILING_Y = 47;
+   private static final int VANILLA_CANYON_FLOOR_Y = 10;
+   private static final int VANILLA_CANYON_CEILING_Y = 67;
+   private final HolderSet<Block> replaceables;
+   private final int tellusMinY;
+   private final int tellusMaxY;
+   private final ConcurrentMap<Integer, List<ConfiguredWorldCarver<?>>> carversBySurface = new ConcurrentHashMap<>();
 
-   private TellusConfiguredCarvers(List<ConfiguredWorldCarver<?>> orderedCarvers) {
-      this.orderedCarvers = orderedCarvers;
+   private TellusConfiguredCarvers(HolderSet<Block> replaceables, int tellusMinY, int tellusHeight) {
+      this.replaceables = replaceables;
+      this.tellusMinY = tellusMinY;
+      this.tellusMaxY = tellusMinY + Math.max(1, tellusHeight) - 1;
    }
 
-   static TellusConfiguredCarvers create(Registry<Block> blockRegistry, int tellusMinY, int tellusHeight, boolean fullHeightCarvers) {
+   static TellusConfiguredCarvers create(Registry<Block> blockRegistry, int tellusMinY, int tellusHeight) {
       HolderSet<Block> replaceables = blockRegistry.getOrThrow(BlockTags.OVERWORLD_CARVER_REPLACEABLES);
-      int tellusMaxY = tellusMinY + tellusHeight - 1;
-      int caveCeilingY = fullHeightCarvers ? Math.max(tellusMinY + 8, tellusMaxY - 8) : TellusHeightRemapper.remapVanillaAbsolute(220, tellusMinY, tellusHeight);
-      int caveExtraCeilingY = fullHeightCarvers ? Math.max(tellusMinY + 8, tellusMaxY - 32) : TellusHeightRemapper.remapVanillaAbsolute(96, tellusMinY, tellusHeight);
-      int canyonFloorY = fullHeightCarvers ? Math.min(tellusMaxY - 32, tellusMinY + 16) : TellusHeightRemapper.remapVanillaAbsolute(24, tellusMinY, tellusHeight);
-      int canyonCeilingY = fullHeightCarvers ? Math.max(canyonFloorY, tellusMaxY - 64) : TellusHeightRemapper.remapVanillaAbsolute(110, tellusMinY, tellusHeight);
-      if (canyonFloorY > canyonCeilingY) {
-         int tmp = canyonFloorY;
-         canyonFloorY = canyonCeilingY;
-         canyonCeilingY = tmp;
-      }
+      return new TellusConfiguredCarvers(replaceables, tellusMinY, tellusHeight);
+   }
+
+   private List<ConfiguredWorldCarver<?>> createForSurface(int surfaceY) {
+      int caveFloorY = this.translateVanillaY(surfaceY, VANILLA_CAVE_FLOOR_Y);
+      int caveCeilingY = this.translateVanillaY(surfaceY, VANILLA_CAVE_CEILING_Y);
+      int caveExtraCeilingY = this.translateVanillaY(surfaceY, VANILLA_EXTRA_CAVE_CEILING_Y);
+      int canyonFloorY = this.translateVanillaY(surfaceY, VANILLA_CANYON_FLOOR_Y);
+      int canyonCeilingY = this.translateVanillaY(surfaceY, VANILLA_CANYON_CEILING_Y);
+      int lavaLevelY = this.translateVanillaY(surfaceY, VANILLA_CAVE_FLOOR_Y);
 
       TellusCaveCarver cave = new TellusCaveCarver(
          new CaveCarverConfiguration(
             CAVE_PROBABILITY,
-            UniformHeight.of(VerticalAnchor.aboveBottom(8), VerticalAnchor.absolute(caveCeilingY)),
+            UniformHeight.of(VerticalAnchor.absolute(caveFloorY), VerticalAnchor.absolute(caveCeilingY)),
             UniformFloat.of(0.1F, 0.9F),
-            VerticalAnchor.aboveBottom(8),
+            VerticalAnchor.absolute(lavaLevelY),
             CarverDebugSettings.of(false, Blocks.CRIMSON_BUTTON.defaultBlockState()),
             replaceables,
             UniformFloat.of(0.7F, 1.4F),
@@ -56,9 +69,9 @@ final class TellusConfiguredCarvers {
       TellusCaveCarver caveExtraUnderground = new TellusCaveCarver(
          new CaveCarverConfiguration(
             CAVE_EXTRA_PROBABILITY,
-            UniformHeight.of(VerticalAnchor.aboveBottom(8), VerticalAnchor.absolute(caveExtraCeilingY)),
+            UniformHeight.of(VerticalAnchor.absolute(caveFloorY), VerticalAnchor.absolute(caveExtraCeilingY)),
             UniformFloat.of(0.1F, 0.9F),
-            VerticalAnchor.aboveBottom(8),
+            VerticalAnchor.absolute(lavaLevelY),
             CarverDebugSettings.of(false, Blocks.OAK_BUTTON.defaultBlockState()),
             replaceables,
             UniformFloat.of(0.7F, 1.4F),
@@ -74,17 +87,23 @@ final class TellusConfiguredCarvers {
             CANYON_PROBABILITY,
             UniformHeight.of(VerticalAnchor.absolute(canyonFloorY), VerticalAnchor.absolute(canyonCeilingY)),
             ConstantFloat.of(3.0F),
-            VerticalAnchor.aboveBottom(8),
+            VerticalAnchor.absolute(lavaLevelY),
             CarverDebugSettings.of(false, Blocks.WARPED_BUTTON.defaultBlockState()),
             replaceables,
             UniformFloat.of(-0.125F, 0.125F),
             canyonShape
          )
       );
-      return new TellusConfiguredCarvers(List.of(cave.configured(), caveExtraUnderground.configured(), canyon.configured()));
+      return List.of(cave.configured(), caveExtraUnderground.configured(), canyon.configured());
    }
 
-   List<ConfiguredWorldCarver<?>> orderedCarvers() {
-      return this.orderedCarvers;
+   List<ConfiguredWorldCarver<?>> orderedCarvers(int surfaceY) {
+      int boundedSurfaceY = Math.max(this.tellusMinY, Math.min(this.tellusMaxY, surfaceY));
+      return this.carversBySurface.computeIfAbsent(boundedSurfaceY, this::createForSurface);
+   }
+
+   private int translateVanillaY(int surfaceY, int vanillaY) {
+      int translatedY = surfaceY + vanillaY - VANILLA_SURFACE_Y;
+      return Math.max(this.tellusMinY, Math.min(this.tellusMaxY, translatedY));
    }
 }

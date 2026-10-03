@@ -14,6 +14,7 @@ import com.yucareux.tellus.integration.distant_horizons.managed.ManagedTerrainNe
 import com.yucareux.tellus.platform.TellusPlatform;
 import com.yucareux.tellus.world.data.osm.OvertureTileUrls;
 import com.yucareux.tellus.world.data.osm.PmTilesRangeReader;
+import com.yucareux.tellus.world.data.pmtiles.PmTilesSafety;
 import com.yucareux.tellus.world.data.source.ParallelDownloadRunner;
 import com.yucareux.tellus.worldgen.EarthProjection;
 import io.github.sebasbaumh.mapbox.vectortile.VectorTile.Tile;
@@ -21,6 +22,7 @@ import io.github.sebasbaumh.mapbox.vectortile.VectorTile.Tile.Feature;
 import io.github.sebasbaumh.mapbox.vectortile.VectorTile.Tile.GeomType;
 import io.github.sebasbaumh.mapbox.vectortile.VectorTile.Tile.Layer;
 import io.github.sebasbaumh.mapbox.vectortile.VectorTile.Tile.Value;
+import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.EOFException;
@@ -28,16 +30,21 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InterruptedIOException;
 import java.io.OutputStream;
+import java.net.SocketTimeoutException;
 import java.nio.channels.ClosedByInterruptException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.function.BiConsumer;
 import java.util.function.IntBinaryOperator;
 import java.util.regex.Matcher;
@@ -79,7 +86,7 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
    private static final double WEB_MERCATOR_CIRCUMFERENCE_METERS = 40075016.68557849;
    private static final double SOURCE_RESOLUTION_METERS = 10.0;
    private static final int RASTER_CACHE_MAGIC = 0x544C4332;
-   private static final int RASTER_CACHE_VERSION = 2;
+   private static final int RASTER_CACHE_VERSION = 3;
    private static final Pattern SORT_KEY_PATTERN = Pattern.compile("\\\"sort_key\\\"\\s*:\\s*(-?\\d+)");
 
    private static final int RASTER_SIZE = intProperty("tellus.overture.landCover.rasterSize", 512, 64, 1024);
@@ -100,6 +107,8 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
    private volatile boolean available;
    private volatile int minZoom = DEFAULT_MIN_LAND_COVER_ZOOM;
    private volatile int maxZoom = DEFAULT_MAX_LAND_COVER_ZOOM;
+   private volatile int initializationFailures;
+   private volatile long nextInitializationAttemptNanos;
 
    public TellusLandCoverSource() {
       // 官方覆盖层瓦片地址：主题名 base，发布版本交给上游 OvertureTileUrls 自动发现
@@ -145,7 +154,7 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
    private int sampleCoverClass(
       double blockX, double blockZ, double worldScale, double previewResolutionMeters, LookupMode lookupMode
    ) {
-      if (!(worldScale > 0.0)) {
+      if (!isWithinTileCoverage(blockX, blockZ, worldScale)) {
          return NO_DATA_CLASS;
       }
 
@@ -162,7 +171,7 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
    }
 
    public int sampleSmoothedCoverClass(double blockX, double blockZ, double worldScale, double previewResolutionMeters) {
-      if (!(worldScale > 0.0)) {
+      if (!isWithinTileCoverage(blockX, blockZ, worldScale)) {
          return NO_DATA_CLASS;
       }
 
@@ -230,7 +239,7 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
    private int sampleNearestLandCoverClass(
       double blockX, double blockZ, double worldScale, int fallbackCoverClass, LookupMode lookupMode
    ) {
-      if (!(worldScale > 0.0)) {
+      if (!isWithinTileCoverage(blockX, blockZ, worldScale)) {
          return fallbackCoverClass;
       }
 
@@ -254,18 +263,26 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
          return cached == NEAREST_LAND_NOT_FOUND ? fallbackCoverClass : cached;
       }
 
-      int nearest = findNearestLandCoverClass(
+      Map<TileKey, RasterTile> searchTiles = new HashMap<>();
+      searchTiles.put(center.key(), centerTile);
+      Set<TileKey> unavailableTiles = new HashSet<>();
+      NearestLandSearch nearest = findNearestLandCoverClassWithCoverage(
          center.globalPixelX(),
          center.globalPixelY(),
          NEAREST_LAND_RADIUS_PIXELS,
-         (pixelX, pixelY) -> this.sampleGrid(zoom, pixelX, pixelY, lookupMode)
+         (pixelX, pixelY) -> this.sampleGrid(
+            zoom, pixelX, pixelY, lookupMode, searchTiles, unavailableTiles
+         ),
+         (pixelX, pixelY) -> isGlobalPixelInBounds(zoom, pixelX, pixelY)
       );
-      if (nearest != Integer.MIN_VALUE) {
-         this.nearestLandCache.put(cacheKey, nearest);
-         return nearest;
+      if (nearest.coverClass() != Integer.MIN_VALUE) {
+         if (nearest.complete()) {
+            this.nearestLandCache.put(cacheKey, nearest.coverClass());
+         }
+         return nearest.coverClass();
       }
 
-      if (lookupMode == LookupMode.BLOCKING) {
+      if (nearest.complete()) {
          this.nearestLandCache.put(cacheKey, NEAREST_LAND_NOT_FOUND);
       }
       return lookupMode == LookupMode.MEMORY_ONLY ? Integer.MIN_VALUE : fallbackCoverClass;
@@ -323,6 +340,24 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
       return bestClass;
    }
 
+   static NearestLandSearch findNearestLandCoverClassWithCoverage(
+      int centerX,
+      int centerY,
+      int maxRadius,
+      IntBinaryOperator sampler,
+      PixelCoverage expectedCoverage
+   ) {
+      boolean[] complete = new boolean[]{true};
+      int nearest = findNearestLandCoverClass(centerX, centerY, maxRadius, (pixelX, pixelY) -> {
+         int coverClass = sampler.applyAsInt(pixelX, pixelY);
+         if (coverClass == Integer.MIN_VALUE && expectedCoverage.contains(pixelX, pixelY)) {
+            complete[0] = false;
+         }
+         return coverClass;
+      });
+      return new NearestLandSearch(nearest, complete[0]);
+   }
+
    private static boolean isLandCoverClass(int coverClass) {
       return coverClass != Integer.MIN_VALUE
          && coverClass != NO_DATA_CLASS
@@ -341,7 +376,7 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
    }
 
    public void prefetchTiles(double blockX, double blockZ, double worldScale, int radius, double previewResolutionMeters) {
-      if (!(worldScale > 0.0)) {
+      if (!isWithinTileCoverage(blockX, blockZ, worldScale)) {
          return;
       }
 
@@ -354,10 +389,10 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
 
       int clampedRadius = Math.max(0, radius);
       int tilesPerAxis = 1 << zoom;
-      int minX = Math.max(0, center.key().x() - clampedRadius);
-      int maxX = Math.min(tilesPerAxis - 1, center.key().x() + clampedRadius);
-      int minY = Math.max(0, center.key().y() - clampedRadius);
-      int maxY = Math.min(tilesPerAxis - 1, center.key().y() + clampedRadius);
+      int minX = (int)Math.max(0L, (long)center.key().x() - clampedRadius);
+      int maxX = (int)Math.min(tilesPerAxis - 1L, (long)center.key().x() + clampedRadius);
+      int minY = (int)Math.max(0L, (long)center.key().y() - clampedRadius);
+      int maxY = (int)Math.min(tilesPerAxis - 1L, (long)center.key().y() + clampedRadius);
       for (int tileY = minY; tileY <= maxY; tileY++) {
          for (int tileX = minX; tileX <= maxX; tileX++) {
             this.prefetchTile(new TileKey(zoom, tileX, tileY));
@@ -406,16 +441,37 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
    private List<TileKey> areaTileKeys(
       double minBlockX, double minBlockZ, double maxBlockX, double maxBlockZ, double worldScale, double previewResolutionMeters
    ) {
-      if (!(worldScale > 0.0)) {
+      if (!(Double.isFinite(worldScale) && worldScale > 0.0)
+         || !Double.isFinite(minBlockX)
+         || !Double.isFinite(minBlockZ)
+         || !Double.isFinite(maxBlockX)
+         || !Double.isFinite(maxBlockZ)) {
+         return List.of();
+      }
+
+      double blocksPerDegree = EarthProjection.blocksPerDegree(worldScale);
+      double coverageMinX = MIN_LON * blocksPerDegree;
+      double coverageMaxX = MAX_LON * blocksPerDegree;
+      double coverageZA = EarthProjection.latToBlockZ(MIN_LAT, worldScale);
+      double coverageZB = EarthProjection.latToBlockZ(MAX_LAT, worldScale);
+      double coverageMinZ = Math.min(coverageZA, coverageZB);
+      double coverageMaxZ = Math.max(coverageZA, coverageZB);
+      double requestedMinX = Math.min(minBlockX, maxBlockX);
+      double requestedMaxX = Math.max(minBlockX, maxBlockX);
+      double requestedMinZ = Math.min(minBlockZ, maxBlockZ);
+      double requestedMaxZ = Math.max(minBlockZ, maxBlockZ);
+      if (requestedMaxX < coverageMinX
+         || requestedMinX > coverageMaxX
+         || requestedMaxZ < coverageMinZ
+         || requestedMinZ > coverageMaxZ) {
          return List.of();
       }
 
       int zoom = this.queryZoom(effectiveSampleResolutionMeters(worldScale, previewResolutionMeters), LookupMode.BLOCKING);
-      double blocksPerDegree = EarthProjection.blocksPerDegree(worldScale);
-      double lonA = minBlockX / blocksPerDegree;
-      double lonB = maxBlockX / blocksPerDegree;
-      double latA = EarthProjection.blockZToLat(minBlockZ, worldScale);
-      double latB = EarthProjection.blockZToLat(maxBlockZ, worldScale);
+      double lonA = Math.max(coverageMinX, requestedMinX) / blocksPerDegree;
+      double lonB = Math.min(coverageMaxX, requestedMaxX) / blocksPerDegree;
+      double latA = EarthProjection.blockZToLat(Math.max(coverageMinZ, requestedMinZ), worldScale);
+      double latB = EarthProjection.blockZToLat(Math.min(coverageMaxZ, requestedMaxZ), worldScale);
       double minLon = Math.max(MIN_LON, Math.min(lonA, lonB));
       double maxLon = Math.min(MAX_LON, Math.max(lonA, lonB));
       double minLat = Math.max(MIN_LAT, Math.min(latA, latB));
@@ -475,6 +531,17 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
    }
 
    private int sampleGrid(int zoom, int globalPixelX, int globalPixelY, LookupMode lookupMode) {
+      return this.sampleGrid(zoom, globalPixelX, globalPixelY, lookupMode, null, null);
+   }
+
+   private int sampleGrid(
+      int zoom,
+      int globalPixelX,
+      int globalPixelY,
+      LookupMode lookupMode,
+      Map<TileKey, RasterTile> searchTiles,
+      Set<TileKey> unavailableTiles
+   ) {
       int tilesPerAxis = 1 << zoom;
       int tileX = Math.floorDiv(globalPixelX, RASTER_SIZE);
       int tileY = Math.floorDiv(globalPixelY, RASTER_SIZE);
@@ -482,7 +549,19 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
          return Integer.MIN_VALUE;
       }
 
-      RasterTile tile = this.getTile(new TileKey(zoom, tileX, tileY), lookupMode);
+      TileKey key = new TileKey(zoom, tileX, tileY);
+      RasterTile tile = searchTiles == null ? null : searchTiles.get(key);
+      if (tile == null && unavailableTiles != null && unavailableTiles.contains(key)) {
+         return Integer.MIN_VALUE;
+      }
+      if (tile == null) {
+         tile = this.getTile(key, lookupMode);
+         if (tile != null && searchTiles != null) {
+            searchTiles.put(key, tile);
+         } else if (tile == null && unavailableTiles != null) {
+            unavailableTiles.add(key);
+         }
+      }
       if (tile == null) {
          return Integer.MIN_VALUE;
       }
@@ -500,6 +579,15 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
       }
       if (lookupMode == LookupMode.LOCAL_ONLY) {
          return this.loadTileLocalOnly(key);
+      }
+
+      RasterTile local = this.loadTileLocalOnly(key);
+      if (local != null) {
+         return local;
+      }
+      this.ensureInitialized();
+      if (!this.available) {
+         return null;
       }
 
       try {
@@ -587,6 +675,10 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
             byte[] payload = this.pmTilesReader.getTileBytes(key.zoom(), key.x(), key.y());
             return payload == null ? new byte[0] : payload;
          } catch (IOException error) {
+            if (isInterruptedLoad(error)) {
+               Thread.currentThread().interrupt();
+               throw error;
+            }
             lastFailure = error;
          }
       }
@@ -623,18 +715,28 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
    }
 
    private static RasterTile readRasterTile(Path path) throws IOException {
-      try (DataInputStream input = new DataInputStream(new GZIPInputStream(Files.newInputStream(path)))) {
+      int expectedLength = RASTER_SIZE * RASTER_SIZE;
+      byte[] decoded;
+      try (InputStream input = new GZIPInputStream(Files.newInputStream(path))) {
+         decoded = PmTilesSafety.readBounded(
+            input, 16 + expectedLength, "Cached Overture land-cover raster"
+         );
+      }
+      try (DataInputStream input = new DataInputStream(new ByteArrayInputStream(decoded))) {
          if (input.readInt() != RASTER_CACHE_MAGIC || input.readInt() != RASTER_CACHE_VERSION) {
             throw new IOException("Unsupported land-cover raster cache format");
          }
          int rasterSize = input.readInt();
          int length = input.readInt();
-         if (rasterSize != RASTER_SIZE || length != RASTER_SIZE * RASTER_SIZE) {
+         if (rasterSize != RASTER_SIZE || length != expectedLength) {
             throw new IOException("Land-cover raster cache dimensions do not match configuration");
          }
          byte[] values = input.readNBytes(length);
          if (values.length != length) {
             throw new EOFException("Truncated land-cover raster cache");
+         }
+         if (input.read() != -1) {
+            throw new IOException("Land-cover raster cache contains trailing data");
          }
          return new RasterTile(values);
       }
@@ -678,7 +780,10 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
          }
       }
 
-      landCoverFeatures.sort(Comparator.comparingInt(RasterFeature::sortKey));
+      // Overture assigns lower sort keys to features that should be drawn in
+      // front. Rasterize the background first so lower-key features win where
+      // polygons overlap.
+      landCoverFeatures.sort(Comparator.comparingInt(RasterFeature::sortKey).reversed());
       for (RasterFeature feature : landCoverFeatures) {
          rasterizeFeature(values, rasterSize, feature);
       }
@@ -895,11 +1000,16 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
       if (this.initialized) {
          return;
       }
+      long now = System.nanoTime();
+      if (!retryDeadlineReached(now, this.nextInitializationAttemptNanos)) {
+         return;
+      }
       synchronized (this.initLock) {
-         if (this.initialized) {
+         if (this.initialized || !retryDeadlineReached(System.nanoTime(), this.nextInitializationAttemptNanos)) {
             return;
          }
 
+         boolean sourceAvailable = false;
          try {
             PmTilesRangeReader.PmTilesHeader header = this.pmTilesReader.header();
             if (header.tileType() != PMTILES_TILETYPE_MVT) {
@@ -912,13 +1022,35 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
             }
             this.minZoom = resolvedMin;
             this.maxZoom = resolvedMax;
-            this.available = true;
+            sourceAvailable = true;
+            this.initializationFailures = 0;
+            this.nextInitializationAttemptNanos = 0L;
          } catch (IOException error) {
-            this.available = false;
-            Tellus.LOGGER.warn("Overture base PMTiles unavailable; land cover disabled", error);
+            if (isInterruptedLoad(error)) {
+               Thread.currentThread().interrupt();
+               this.nextInitializationAttemptNanos = 0L;
+               Tellus.LOGGER.debug("Overture land-cover PMTiles initialization interrupted", error);
+            } else {
+               int failures = ++this.initializationFailures;
+               long delaySeconds = retryDelaySeconds(failures);
+               this.nextInitializationAttemptNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(delaySeconds);
+               Tellus.LOGGER.warn("Overture base PMTiles unavailable; retrying land cover in {}s", delaySeconds, error);
+            }
          }
-         this.initialized = true;
+         this.available = sourceAvailable;
+         this.initialized = sourceAvailable;
       }
+   }
+
+   static long retryDelaySeconds(int failureCount) {
+      if (failureCount <= 0) {
+         return 0L;
+      }
+      return failureCount <= 5 ? 1L << failureCount - 1 : 60L;
+   }
+
+   private static boolean retryDeadlineReached(long now, long deadline) {
+      return deadline == 0L || now - deadline >= 0L;
    }
 
    private void prefetchTile(TileKey key) {
@@ -972,7 +1104,9 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
 
    private static byte[] readGzipBytes(Path path) throws IOException {
       try (InputStream input = new GZIPInputStream(Files.newInputStream(path))) {
-         return input.readAllBytes();
+         return PmTilesSafety.readBounded(
+            input, PmTilesSafety.MAX_DECOMPRESSED_TILE_BYTES, "Cached Overture land-cover tile"
+         );
       }
    }
 
@@ -984,16 +1118,37 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
       }
    }
 
-   private static boolean isInterruptedLoad(Throwable throwable) {
+   static boolean isInterruptedLoad(Throwable throwable) {
       if (Thread.currentThread().isInterrupted()) {
          return true;
       }
       for (Throwable current = throwable; current != null; current = current.getCause()) {
-         if (current instanceof ClosedByInterruptException || current instanceof InterruptedException || current instanceof InterruptedIOException) {
+         if (current instanceof ClosedByInterruptException
+            || current instanceof InterruptedException
+            || current instanceof InterruptedIOException && !(current instanceof SocketTimeoutException)) {
             return true;
          }
       }
       return false;
+   }
+
+   static boolean isWithinTileCoverage(double blockX, double blockZ, double worldScale) {
+      if (!(Double.isFinite(worldScale) && worldScale > 0.0)
+         || !Double.isFinite(blockX)
+         || !Double.isFinite(blockZ)) {
+         return false;
+      }
+
+      double blocksPerDegree = EarthProjection.blocksPerDegree(worldScale);
+      double lon = blockX / blocksPerDegree;
+      double zA = EarthProjection.latToBlockZ(MIN_LAT, worldScale);
+      double zB = EarthProjection.latToBlockZ(MAX_LAT, worldScale);
+      return lon >= MIN_LON && lon <= MAX_LON && blockZ >= Math.min(zA, zB) && blockZ <= Math.max(zA, zB);
+   }
+
+   private static boolean isGlobalPixelInBounds(int zoom, int globalPixelX, int globalPixelY) {
+      long pixelsPerAxis = (1L << zoom) * RASTER_SIZE;
+      return globalPixelX >= 0 && globalPixelY >= 0 && globalPixelX < pixelsPerAxis && globalPixelY < pixelsPerAxis;
    }
 
    private static int intProperty(String key, int defaultValue, int minInclusive, int maxInclusive) {
@@ -1063,6 +1218,14 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
    }
 
    private record NearestLandKey(int zoom, int globalPixelX, int globalPixelY) {
+   }
+
+   record NearestLandSearch(int coverClass, boolean complete) {
+   }
+
+   @FunctionalInterface
+   interface PixelCoverage {
+      boolean contains(int pixelX, int pixelY);
    }
 
    private record RasterFeature(int coverClass, int sortKey, List<Ring> rings) {

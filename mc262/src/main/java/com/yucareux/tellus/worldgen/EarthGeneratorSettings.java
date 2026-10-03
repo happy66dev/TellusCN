@@ -70,9 +70,12 @@ public record EarthGeneratorSettings(
    boolean randomBiomes,
    double randomBiomeDensity,
    long randomBiomeSeed,
+   List<String> randomBiomeIds,
    boolean experimentalIncreaseHeight,
    boolean tellusManagedTerrainDownloads,
-   boolean showTerrainDownloadOverlay
+   boolean showTerrainDownloadOverlay,
+   boolean cavesReachSurface,
+   int undergroundDepth
 ) {
    public static final double DEFAULT_SPAWN_LATITUDE = 27.9881;
    public static final double DEFAULT_SPAWN_LONGITUDE = 86.925;
@@ -81,13 +84,15 @@ public record EarthGeneratorSettings(
    public static final int MAX_WORLD_HEIGHT = 4064;
    public static final int MAX_WORLD_Y = 2031;
    public static final int EXPERIMENTAL_HEIGHT_OFFSET = 0;
-   public static final int EXPERIMENTAL_TERRAIN_SHELL_DEPTH = 128;
+   public static final int MIN_UNDERGROUND_DEPTH = 64;
+   public static final int MAX_UNDERGROUND_DEPTH = 512;
+   public static final int DEFAULT_UNDERGROUND_DEPTH = 256;
    private static final int ALTITUDE_TOLERANCE = 50;
    private static final int EXPERIMENTAL_TOP_MARGIN = 128;
    private static final int HEIGHT_ALIGNMENT = 16;
    private static final double EVEREST_ELEVATION_METERS = 8848.0;
    private static final double MARIANA_TRENCH_METERS = -11034.0;
-   private static final double MAX_WORLD_SCALE = 1000.0;
+   public static final double MAX_WORLD_SCALE = 1000.0;
    private static final int MAX_VOXY_PREGEN_RADIUS = 1024;
    private static final int MAX_VOXY_PREGEN_CHUNKS_PER_TICK = 200;
    private static final int MAX_DH_OSM_DETAIL = 24;
@@ -146,17 +151,20 @@ public record EarthGeneratorSettings(
       4,
       EarthGeneratorSettings.DistantHorizonsRenderMode.FAST,
       EarthGeneratorSettings.DemSelection.mapterhornSelection(),
-      false,
-      false,
+      true,
+      true,
       true,
       false,
       false,
       false,
       DEFAULT_RANDOM_BIOME_DENSITY,
       DEFAULT_RANDOM_BIOME_SEED,
+      RandomBiomeCatalog.minecraft26_2OverworldBiomeIds(),
       false,
       false,
-      false
+      false,
+      false,
+      DEFAULT_UNDERGROUND_DEPTH
    );
    private static final MapCodec<EarthGeneratorSettings.BaseToggles> BASE_TOGGLES_CODEC = RecordCodecBuilder.mapCodec(
       instance -> instance.group(
@@ -297,6 +305,12 @@ public record EarthGeneratorSettings(
    private static final MapCodec<Boolean> SHOW_TERRAIN_DOWNLOAD_OVERLAY_CODEC = Codec.BOOL
       .fieldOf("show_terrain_download_overlay")
       .orElse(false);
+   private static final MapCodec<Boolean> CAVES_REACH_SURFACE_CODEC = Codec.BOOL
+      .fieldOf("caves_reach_surface")
+      .orElse(DEFAULT.cavesReachSurface());
+   private static final MapCodec<Integer> UNDERGROUND_DEPTH_CODEC = Codec.intRange(MIN_UNDERGROUND_DEPTH, MAX_UNDERGROUND_DEPTH)
+      .fieldOf("underground_depth")
+      .orElse(DEFAULT.undergroundDepth());
    private static final MapCodec<Boolean> REALTIME_TIME_CODEC = Codec.BOOL.fieldOf("realtime_time").orElse(DEFAULT.realtimeTime());
    private static final MapCodec<Boolean> REALTIME_WEATHER_CODEC = Codec.BOOL.fieldOf("realtime_weather").orElse(DEFAULT.realtimeWeather());
    private static final MapCodec<Boolean> HISTORICAL_SNOW_CODEC = Codec.BOOL.fieldOf("historical_snow").orElse(DEFAULT.historicalSnow());
@@ -312,6 +326,10 @@ public record EarthGeneratorSettings(
       .fieldOf("random_biome_density")
       .orElse(DEFAULT.randomBiomeDensity());
    private static final MapCodec<Long> RANDOM_BIOME_SEED_CODEC = Codec.LONG.fieldOf("random_biome_seed").orElse(DEFAULT.randomBiomeSeed());
+   private static final MapCodec<List<String>> RANDOM_BIOME_IDS_CODEC = Codec.STRING
+      .listOf()
+      .fieldOf("random_biome_ids")
+      .orElse(DEFAULT.randomBiomeIds());
    private static final MapCodec<Boolean> EXPERIMENTAL_INCREASE_HEIGHT_CODEC = Codec.BOOL
       .fieldOf("experimental_increase_height")
       .orElse(DEFAULT.experimentalIncreaseHeight());
@@ -384,6 +402,7 @@ public record EarthGeneratorSettings(
             builder = EarthGeneratorSettings.RANDOM_BIOMES_CODEC.encode(input.randomBiomes(), ops, builder);
             builder = EarthGeneratorSettings.RANDOM_BIOME_DENSITY_CODEC.encode(input.randomBiomeDensity(), ops, builder);
             builder = EarthGeneratorSettings.RANDOM_BIOME_SEED_CODEC.encode(input.randomBiomeSeed(), ops, builder);
+            builder = EarthGeneratorSettings.RANDOM_BIOME_IDS_CODEC.encode(input.randomBiomeIds(), ops, builder);
             builder = EarthGeneratorSettings.EXPERIMENTAL_INCREASE_HEIGHT_CODEC.encode(input.experimentalIncreaseHeight(), ops, builder);
             builder = EarthGeneratorSettings.EXPERIMENTAL_HEIGHT_COORDINATE_PROFILE_CODEC.encode(
                input.experimentalIncreaseHeight() ? Optional.of(HighYPackedCoordinateProfile.PROFILE_ID) : Optional.empty(), ops, builder
@@ -396,7 +415,9 @@ public record EarthGeneratorSettings(
             builder = EarthGeneratorSettings.STRUCTURE_CODEC.encode(EarthGeneratorSettings.StructureSettings.fromSettings(input), ops, builder);
             builder = EarthGeneratorSettings.TRAIL_RUINS_CODEC.encode(input.addTrailRuins(), ops, builder);
             builder = EarthGeneratorSettings.TELLUS_MANAGED_TERRAIN_DOWNLOADS_CODEC.encode(input.tellusManagedTerrainDownloads(), ops, builder);
-            return EarthGeneratorSettings.SHOW_TERRAIN_DOWNLOAD_OVERLAY_CODEC.encode(input.showTerrainDownloadOverlay(), ops, builder);
+            builder = EarthGeneratorSettings.SHOW_TERRAIN_DOWNLOAD_OVERLAY_CODEC.encode(input.showTerrainDownloadOverlay(), ops, builder);
+            builder = EarthGeneratorSettings.CAVES_REACH_SURFACE_CODEC.encode(input.cavesReachSurface(), ops, builder);
+            return EarthGeneratorSettings.UNDERGROUND_DEPTH_CODEC.encode(input.undergroundDepth(), ops, builder);
          }
 
          public <T> Stream<T> keys(DynamicOps<T> ops) {
@@ -419,6 +440,7 @@ public record EarthGeneratorSettings(
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.RANDOM_BIOMES_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.RANDOM_BIOME_DENSITY_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.RANDOM_BIOME_SEED_CODEC.keys(ops));
+            baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.RANDOM_BIOME_IDS_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.EXPERIMENTAL_INCREASE_HEIGHT_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.EXPERIMENTAL_HEIGHT_COORDINATE_PROFILE_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.VOXY_CHUNK_PREGEN_ENABLED_CODEC.keys(ops));
@@ -428,6 +450,8 @@ public record EarthGeneratorSettings(
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.GEODES_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.TELLUS_MANAGED_TERRAIN_DOWNLOADS_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.SHOW_TERRAIN_DOWNLOAD_OVERLAY_CODEC.keys(ops));
+            baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.CAVES_REACH_SURFACE_CODEC.keys(ops));
+            baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.UNDERGROUND_DEPTH_CODEC.keys(ops));
             Stream<T> structureKeys = Stream.concat(baseKeys, EarthGeneratorSettings.STRUCTURE_CODEC.keys(ops));
             return Stream.concat(structureKeys, EarthGeneratorSettings.TRAIL_RUINS_CODEC.keys(ops));
          }
@@ -454,8 +478,11 @@ public record EarthGeneratorSettings(
             DataResult<Boolean> randomBiomes = EarthGeneratorSettings.RANDOM_BIOMES_CODEC.decode(ops, input);
             DataResult<Double> randomBiomeDensity = EarthGeneratorSettings.RANDOM_BIOME_DENSITY_CODEC.decode(ops, input);
             DataResult<Long> randomBiomeSeed = EarthGeneratorSettings.RANDOM_BIOME_SEED_CODEC.decode(ops, input);
+            DataResult<List<String>> randomBiomeIds = EarthGeneratorSettings.RANDOM_BIOME_IDS_CODEC.decode(ops, input);
             DataResult<Boolean> managedTerrainDownloads = EarthGeneratorSettings.TELLUS_MANAGED_TERRAIN_DOWNLOADS_CODEC.decode(ops, input);
             DataResult<Boolean> showTerrainDownloadOverlay = EarthGeneratorSettings.SHOW_TERRAIN_DOWNLOAD_OVERLAY_CODEC.decode(ops, input);
+            DataResult<Boolean> cavesReachSurface = EarthGeneratorSettings.CAVES_REACH_SURFACE_CODEC.decode(ops, input);
+            DataResult<Integer> undergroundDepth = EarthGeneratorSettings.UNDERGROUND_DEPTH_CODEC.decode(ops, input);
             DataResult<Boolean> experimentalIncreaseHeight = EarthGeneratorSettings.EXPERIMENTAL_INCREASE_HEIGHT_CODEC.decode(ops, input);
             DataResult<Optional<String>> experimentalHeightCoordinateProfile = EarthGeneratorSettings.EXPERIMENTAL_HEIGHT_COORDINATE_PROFILE_CODEC
                .decode(ops, input);
@@ -508,6 +535,7 @@ public record EarthGeneratorSettings(
             settings = settings.apply2(EarthGeneratorSettings::applyRandomBiomes, randomBiomes);
             settings = settings.apply2(EarthGeneratorSettings::applyRandomBiomeDensity, randomBiomeDensity);
             settings = settings.apply2(EarthGeneratorSettings::applyRandomBiomeSeed, randomBiomeSeed);
+            settings = settings.apply2(EarthGeneratorSettings::applyRandomBiomeIds, randomBiomeIds);
             DataResult<EarthGeneratorSettings> withExperimentalHeight = settings.apply2(
                EarthGeneratorSettings::applyExperimentalIncreaseHeight, experimentalIncreaseHeight
             );
@@ -517,9 +545,15 @@ public record EarthGeneratorSettings(
                )
             );
             DataResult<EarthGeneratorSettings.NetworkSettings> networkSettings = managedTerrainDownloads.apply2(
-               EarthGeneratorSettings.NetworkSettings::new, showTerrainDownloadOverlay
+               (managed, showOverlay) -> new EarthGeneratorSettings.NetworkSettings(managed, showOverlay, DEFAULT.cavesReachSurface()),
+               showTerrainDownloadOverlay
             );
-            return validated.apply2(EarthGeneratorSettings::applyNetworkSettings, networkSettings);
+            networkSettings = networkSettings.apply2(
+               (network, enabled) -> new EarthGeneratorSettings.NetworkSettings(network.managedTerrainDownloads(), network.showOverlay(), enabled),
+               cavesReachSurface
+            );
+            DataResult<EarthGeneratorSettings> withNetworkSettings = validated.apply2(EarthGeneratorSettings::applyNetworkSettings, networkSettings);
+            return withNetworkSettings.apply2(EarthGeneratorSettings::applyUndergroundDepth, undergroundDepth);
          }
 
          public <T> Stream<T> keys(DynamicOps<T> ops) {
@@ -542,6 +576,7 @@ public record EarthGeneratorSettings(
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.RANDOM_BIOMES_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.RANDOM_BIOME_DENSITY_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.RANDOM_BIOME_SEED_CODEC.keys(ops));
+            baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.RANDOM_BIOME_IDS_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.EXPERIMENTAL_INCREASE_HEIGHT_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.EXPERIMENTAL_HEIGHT_COORDINATE_PROFILE_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.VOXY_CHUNK_PREGEN_ENABLED_CODEC.keys(ops));
@@ -551,6 +586,8 @@ public record EarthGeneratorSettings(
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.GEODES_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.TELLUS_MANAGED_TERRAIN_DOWNLOADS_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.SHOW_TERRAIN_DOWNLOAD_OVERLAY_CODEC.keys(ops));
+            baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.CAVES_REACH_SURFACE_CODEC.keys(ops));
+            baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.UNDERGROUND_DEPTH_CODEC.keys(ops));
             Stream<T> structureKeys = Stream.concat(baseKeys, EarthGeneratorSettings.STRUCTURE_CODEC.keys(ops));
             return Stream.concat(structureKeys, EarthGeneratorSettings.TRAIL_RUINS_CODEC.keys(ops));
          }
@@ -613,14 +650,19 @@ public record EarthGeneratorSettings(
       boolean randomBiomes,
       double randomBiomeDensity,
       long randomBiomeSeed,
+      List<String> randomBiomeIds,
       boolean experimentalIncreaseHeight,
       boolean tellusManagedTerrainDownloads,
-      boolean showTerrainDownloadOverlay
+      boolean showTerrainDownloadOverlay,
+      boolean cavesReachSurface,
+      int undergroundDepth
    ) {
       worldScale = clampWorldScale(worldScale);
       randomBiomeDensity = Mth.clamp(randomBiomeDensity, MIN_RANDOM_BIOME_DENSITY, MAX_RANDOM_BIOME_DENSITY);
+      randomBiomeIds = RandomBiomeCatalog.normalizeMinecraft26_2Selection(randomBiomeIds);
       voxyChunkPregenMaxRadius = Mth.clamp(voxyChunkPregenMaxRadius, 0, MAX_VOXY_PREGEN_RADIUS);
       voxyChunkPregenChunksPerTick = Mth.clamp(voxyChunkPregenChunksPerTick, 1, MAX_VOXY_PREGEN_CHUNKS_PER_TICK);
+      undergroundDepth = Mth.clamp(undergroundDepth, MIN_UNDERGROUND_DEPTH, MAX_UNDERGROUND_DEPTH);
       if (experimentalIncreaseHeight) {
          terrestrialHeightScale = 1.0;
          oceanicHeightScale = 1.0;
@@ -688,9 +730,12 @@ public record EarthGeneratorSettings(
       this.randomBiomes = randomBiomes;
       this.randomBiomeDensity = randomBiomeDensity;
       this.randomBiomeSeed = randomBiomeSeed;
+      this.randomBiomeIds = randomBiomeIds;
       this.experimentalIncreaseHeight = experimentalIncreaseHeight;
       this.tellusManagedTerrainDownloads = tellusManagedTerrainDownloads;
       this.showTerrainDownloadOverlay = showTerrainDownloadOverlay;
+      this.cavesReachSurface = cavesReachSurface;
+      this.undergroundDepth = undergroundDepth;
    }
 
    public double effectiveTerrestrialHeightScale() {
@@ -714,15 +759,15 @@ public record EarthGeneratorSettings(
    }
 
    public double effectiveVerticalWorldScale() {
-      return this.experimentalIncreaseHeight ? 1.0 : this.worldScale;
+      return this.worldScale;
    }
 
    public boolean usesTerrainShell() {
-      return this.thinShellTerrain || this.experimentalIncreaseHeight;
+      return true;
    }
 
    public boolean suppressesUndergroundGenerationForTerrainShell() {
-      return this.thinShellTerrain && !this.experimentalIncreaseHeight;
+      return false;
    }
 
    private static EarthGeneratorSettings.StructureSettings createStructureSettings(
@@ -908,12 +953,24 @@ public record EarthGeneratorSettings(
       return settings.withRandomBiomeSeed(Objects.requireNonNull(seed, "randomBiomeSeed"));
    }
 
+   private static EarthGeneratorSettings applyRandomBiomeIds(EarthGeneratorSettings settings, List<String> biomeIds) {
+      return settings.withRandomBiomeIds(Objects.requireNonNull(biomeIds, "randomBiomeIds"));
+   }
+
    private static EarthGeneratorSettings applyNetworkSettings(EarthGeneratorSettings settings, EarthGeneratorSettings.NetworkSettings network) {
       Objects.requireNonNull(network, "network");
-      return settings.withNetworkSettings(network.managedTerrainDownloads(), network.showOverlay());
+      return settings.withNetworkSettings(network.managedTerrainDownloads(), network.showOverlay(), network.cavesReachSurface());
+   }
+
+   private static EarthGeneratorSettings applyUndergroundDepth(EarthGeneratorSettings settings, Integer undergroundDepth) {
+      return settings.withUndergroundDepth(Objects.requireNonNull(undergroundDepth, "undergroundDepth"));
    }
 
    public EarthGeneratorSettings withNetworkSettings(boolean managedTerrainDownloads, boolean showOverlay) {
+      return this.withNetworkSettings(managedTerrainDownloads, showOverlay, this.cavesReachSurface);
+   }
+
+   private EarthGeneratorSettings withNetworkSettings(boolean managedTerrainDownloads, boolean showOverlay, boolean cavesReachSurface) {
       return new EarthGeneratorSettings(
          this.worldScale, this.terrestrialHeightScale, this.oceanicHeightScale, this.heightOffset,
          this.spawnLatitude, this.spawnLongitude, this.minAltitude, this.maxAltitude, this.riverLakeShorelineBlend,
@@ -927,7 +984,27 @@ public record EarthGeneratorSettings(
          this.voxyChunkPregenEnabled, this.voxyChunkPregenMaxRadius, this.voxyChunkPregenChunksPerTick,
          this.distantHorizonsRenderMode, this.demSelection, this.enableRoads, this.enableBuildings, this.enableWater,
          this.thinShellTerrain, this.climateBasedBuiltUpTerrain, this.randomBiomes, this.randomBiomeDensity,
-         this.randomBiomeSeed, this.experimentalIncreaseHeight, managedTerrainDownloads, showOverlay
+         this.randomBiomeSeed, this.randomBiomeIds, this.experimentalIncreaseHeight, managedTerrainDownloads, showOverlay, cavesReachSurface,
+         this.undergroundDepth
+      );
+   }
+
+   public EarthGeneratorSettings withUndergroundDepth(int undergroundDepth) {
+      return new EarthGeneratorSettings(
+         this.worldScale, this.terrestrialHeightScale, this.oceanicHeightScale, this.heightOffset,
+         this.spawnLatitude, this.spawnLongitude, this.minAltitude, this.maxAltitude, this.riverLakeShorelineBlend,
+         this.oceanShorelineBlend, this.shorelineBlendCliffLimit, this.caveGeneration, this.oreDistribution, this.lavaPools,
+         this.addStrongholds, this.addVillages, this.addMineshafts, this.addOceanMonuments, this.addWoodlandMansions,
+         this.addDesertTemples, this.addJungleTemples, this.addPillagerOutposts, this.addRuinedPortals, this.addShipwrecks,
+         this.addOceanRuins, this.addBuriedTreasure, this.addIgloos, this.addWitchHuts, this.addAncientCities,
+         this.addTrialChambers, this.addTrailRuins, this.deepDark, this.geodes, this.distantHorizonsWaterResolver,
+         this.distantHorizonsOsmFeatures, this.distantHorizonsOsmRoadMaxDetail, this.distantHorizonsOsmBuildingMaxDetail,
+         this.distantHorizonsOsmNonBlockingFetch, this.realtimeTime, this.realtimeWeather, this.historicalSnow,
+         this.voxyChunkPregenEnabled, this.voxyChunkPregenMaxRadius, this.voxyChunkPregenChunksPerTick,
+         this.distantHorizonsRenderMode, this.demSelection, this.enableRoads, this.enableBuildings, this.enableWater,
+         this.thinShellTerrain, this.climateBasedBuiltUpTerrain, this.randomBiomes, this.randomBiomeDensity,
+         this.randomBiomeSeed, this.randomBiomeIds, this.experimentalIncreaseHeight, this.tellusManagedTerrainDownloads,
+         this.showTerrainDownloadOverlay, this.cavesReachSurface, undergroundDepth
       );
    }
 
@@ -999,9 +1076,12 @@ public record EarthGeneratorSettings(
          this.randomBiomes,
          this.randomBiomeDensity,
          this.randomBiomeSeed,
+         this.randomBiomeIds,
          this.experimentalIncreaseHeight,
          this.tellusManagedTerrainDownloads,
-         this.showTerrainDownloadOverlay
+         this.showTerrainDownloadOverlay,
+         this.cavesReachSurface,
+         this.undergroundDepth
       );
    }
 
@@ -1073,9 +1153,12 @@ public record EarthGeneratorSettings(
          this.randomBiomes,
          this.randomBiomeDensity,
          this.randomBiomeSeed,
+         this.randomBiomeIds,
          this.experimentalIncreaseHeight,
          this.tellusManagedTerrainDownloads,
-         this.showTerrainDownloadOverlay
+         this.showTerrainDownloadOverlay,
+         this.cavesReachSurface,
+         this.undergroundDepth
       );
    }
 
@@ -1135,9 +1218,12 @@ public record EarthGeneratorSettings(
          this.randomBiomes,
          this.randomBiomeDensity,
          this.randomBiomeSeed,
+         this.randomBiomeIds,
          this.experimentalIncreaseHeight,
          this.tellusManagedTerrainDownloads,
-         this.showTerrainDownloadOverlay
+         this.showTerrainDownloadOverlay,
+         this.cavesReachSurface,
+         this.undergroundDepth
       );
    }
 
@@ -1197,9 +1283,12 @@ public record EarthGeneratorSettings(
          this.randomBiomes,
          this.randomBiomeDensity,
          this.randomBiomeSeed,
+         this.randomBiomeIds,
          this.experimentalIncreaseHeight,
          this.tellusManagedTerrainDownloads,
-         this.showTerrainDownloadOverlay
+         this.showTerrainDownloadOverlay,
+         this.cavesReachSurface,
+         this.undergroundDepth
       );
    }
 
@@ -1259,9 +1348,12 @@ public record EarthGeneratorSettings(
          this.randomBiomes,
          this.randomBiomeDensity,
          this.randomBiomeSeed,
+         this.randomBiomeIds,
          this.experimentalIncreaseHeight,
          this.tellusManagedTerrainDownloads,
-         this.showTerrainDownloadOverlay
+         this.showTerrainDownloadOverlay,
+         this.cavesReachSurface,
+         this.undergroundDepth
       );
    }
 
@@ -1321,9 +1413,12 @@ public record EarthGeneratorSettings(
          this.randomBiomes,
          this.randomBiomeDensity,
          this.randomBiomeSeed,
+         this.randomBiomeIds,
          this.experimentalIncreaseHeight,
          this.tellusManagedTerrainDownloads,
-         this.showTerrainDownloadOverlay
+         this.showTerrainDownloadOverlay,
+         this.cavesReachSurface,
+         this.undergroundDepth
       );
    }
 
@@ -1383,9 +1478,12 @@ public record EarthGeneratorSettings(
          this.randomBiomes,
          this.randomBiomeDensity,
          this.randomBiomeSeed,
+         this.randomBiomeIds,
          this.experimentalIncreaseHeight,
          this.tellusManagedTerrainDownloads,
-         this.showTerrainDownloadOverlay
+         this.showTerrainDownloadOverlay,
+         this.cavesReachSurface,
+         this.undergroundDepth
       );
    }
 
@@ -1445,9 +1543,12 @@ public record EarthGeneratorSettings(
          this.randomBiomes,
          this.randomBiomeDensity,
          this.randomBiomeSeed,
+         this.randomBiomeIds,
          this.experimentalIncreaseHeight,
          this.tellusManagedTerrainDownloads,
-         this.showTerrainDownloadOverlay
+         this.showTerrainDownloadOverlay,
+         this.cavesReachSurface,
+         this.undergroundDepth
       );
    }
 
@@ -1507,9 +1608,12 @@ public record EarthGeneratorSettings(
          this.randomBiomes,
          this.randomBiomeDensity,
          this.randomBiomeSeed,
+         this.randomBiomeIds,
          this.experimentalIncreaseHeight,
          this.tellusManagedTerrainDownloads,
-         this.showTerrainDownloadOverlay
+         this.showTerrainDownloadOverlay,
+         this.cavesReachSurface,
+         this.undergroundDepth
       );
    }
 
@@ -1569,9 +1673,12 @@ public record EarthGeneratorSettings(
          this.randomBiomes,
          this.randomBiomeDensity,
          this.randomBiomeSeed,
+         this.randomBiomeIds,
          this.experimentalIncreaseHeight,
          this.tellusManagedTerrainDownloads,
-         this.showTerrainDownloadOverlay
+         this.showTerrainDownloadOverlay,
+         this.cavesReachSurface,
+         this.undergroundDepth
       );
    }
 
@@ -1631,9 +1738,12 @@ public record EarthGeneratorSettings(
          this.randomBiomes,
          this.randomBiomeDensity,
          this.randomBiomeSeed,
+         this.randomBiomeIds,
          this.experimentalIncreaseHeight,
          this.tellusManagedTerrainDownloads,
-         this.showTerrainDownloadOverlay
+         this.showTerrainDownloadOverlay,
+         this.cavesReachSurface,
+         this.undergroundDepth
       );
    }
 
@@ -1693,25 +1803,34 @@ public record EarthGeneratorSettings(
          this.randomBiomes,
          this.randomBiomeDensity,
          this.randomBiomeSeed,
+         this.randomBiomeIds,
          this.experimentalIncreaseHeight,
          this.tellusManagedTerrainDownloads,
-         this.showTerrainDownloadOverlay
+         this.showTerrainDownloadOverlay,
+         this.cavesReachSurface,
+         this.undergroundDepth
       );
    }
 
    private EarthGeneratorSettings withRandomBiomes(boolean randomBiomes) {
-      return this.withRandomBiomeSettings(randomBiomes, this.randomBiomeDensity, this.randomBiomeSeed);
+      return this.withRandomBiomeSettings(randomBiomes, this.randomBiomeDensity, this.randomBiomeSeed, this.randomBiomeIds);
    }
 
    private EarthGeneratorSettings withRandomBiomeDensity(double randomBiomeDensity) {
-      return this.withRandomBiomeSettings(this.randomBiomes, randomBiomeDensity, this.randomBiomeSeed);
+      return this.withRandomBiomeSettings(this.randomBiomes, randomBiomeDensity, this.randomBiomeSeed, this.randomBiomeIds);
    }
 
    private EarthGeneratorSettings withRandomBiomeSeed(long randomBiomeSeed) {
-      return this.withRandomBiomeSettings(this.randomBiomes, this.randomBiomeDensity, randomBiomeSeed);
+      return this.withRandomBiomeSettings(this.randomBiomes, this.randomBiomeDensity, randomBiomeSeed, this.randomBiomeIds);
    }
 
-   private EarthGeneratorSettings withRandomBiomeSettings(boolean randomBiomes, double randomBiomeDensity, long randomBiomeSeed) {
+   private EarthGeneratorSettings withRandomBiomeIds(List<String> randomBiomeIds) {
+      return this.withRandomBiomeSettings(this.randomBiomes, this.randomBiomeDensity, this.randomBiomeSeed, randomBiomeIds);
+   }
+
+   private EarthGeneratorSettings withRandomBiomeSettings(
+      boolean randomBiomes, double randomBiomeDensity, long randomBiomeSeed, List<String> randomBiomeIds
+   ) {
       return new EarthGeneratorSettings(
          this.worldScale,
          this.terrestrialHeightScale,
@@ -1767,9 +1886,12 @@ public record EarthGeneratorSettings(
          randomBiomes,
          randomBiomeDensity,
          randomBiomeSeed,
+         randomBiomeIds,
          this.experimentalIncreaseHeight,
          this.tellusManagedTerrainDownloads,
-         this.showTerrainDownloadOverlay
+         this.showTerrainDownloadOverlay,
+         this.cavesReachSurface,
+         this.undergroundDepth
       );
    }
 
@@ -1860,9 +1982,12 @@ public record EarthGeneratorSettings(
          this.randomBiomes,
          this.randomBiomeDensity,
          this.randomBiomeSeed,
+         this.randomBiomeIds,
          experimentalIncreaseHeight,
          this.tellusManagedTerrainDownloads,
-         this.showTerrainDownloadOverlay
+         this.showTerrainDownloadOverlay,
+         this.cavesReachSurface,
+         this.undergroundDepth
       );
    }
 
@@ -1930,11 +2055,11 @@ public record EarthGeneratorSettings(
    private static int computeAutoMinAltitude(EarthGeneratorSettings settings) {
       double verticalScale = settings.effectiveVerticalWorldScale();
       if (verticalScale <= 0.0) {
-         return settings.effectiveHeightOffset();
+         return settings.effectiveHeightOffset() - settings.undergroundDepth();
       } else {
          double scaled = MARIANA_TRENCH_METERS * settings.effectiveOceanicHeightScale() / verticalScale;
          int minSurface = Mth.floor(scaled) + settings.effectiveHeightOffset();
-         return minSurface - ALTITUDE_TOLERANCE;
+         return minSurface - settings.undergroundDepth();
       }
    }
 
@@ -2541,14 +2666,17 @@ public record EarthGeneratorSettings(
             EarthGeneratorSettings.DEFAULT.randomBiomes(),
             EarthGeneratorSettings.DEFAULT.randomBiomeDensity(),
             EarthGeneratorSettings.DEFAULT.randomBiomeSeed(),
+            EarthGeneratorSettings.DEFAULT.randomBiomeIds(),
             EarthGeneratorSettings.DEFAULT.experimentalIncreaseHeight(),
             true,
-            true
+            true,
+            EarthGeneratorSettings.DEFAULT.cavesReachSurface(),
+            EarthGeneratorSettings.DEFAULT.undergroundDepth()
          );
       }
    }
 
-   private record NetworkSettings(boolean managedTerrainDownloads, boolean showOverlay) {
+   private record NetworkSettings(boolean managedTerrainDownloads, boolean showOverlay, boolean cavesReachSurface) {
    }
 
    private record StructureSettings(

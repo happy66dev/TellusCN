@@ -12,6 +12,7 @@ import com.yucareux.tellus.config.TellusEndpointConfig;
 import com.yucareux.tellus.integration.distant_horizons.managed.ManagedTerrainNetworkPolicy;
 import com.yucareux.tellus.platform.TellusPlatform;
 import com.yucareux.tellus.world.data.source.ParallelDownloadRunner;
+import com.yucareux.tellus.world.data.source.MapTileImageValidator;
 import com.yucareux.tellus.worldgen.EarthProjection;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
@@ -31,6 +32,8 @@ import net.minecraft.util.Mth;
 public final class TellusLandMaskSource implements TellusCacheHandle {
    private static final double EQUATOR_CIRCUMFERENCE = 4.0075017E7;
    private static final int TILE_SIZE = 256;
+   private static final int MAX_TILE_BYTES = 4 * 1024 * 1024;
+   private static final int MAX_TILE_DIMENSION = 512;
    private static final double MIN_LAT = -85.05112878;
    private static final double MAX_LAT = 85.05112878;
    private static final double MIN_LON = -180.0;
@@ -312,11 +315,16 @@ public final class TellusLandMaskSource implements TellusCacheHandle {
          return null;
       }
       try {
-         TellusLandMaskSource.LandMaskTile local = decodeTile(Files.readAllBytes(cachePath));
+         TellusLandMaskSource.LandMaskTile local = decodeTile(readCachedTile(cachePath));
          TellusLandMaskSource.LandMaskTile raced = this.cache.asMap().putIfAbsent(key, local);
          return raced == null ? local : raced;
       } catch (IOException error) {
          Tellus.LOGGER.debug("Failed to read cached land mask tile {}", key, error);
+         try {
+            Files.deleteIfExists(cachePath);
+         } catch (IOException deleteError) {
+            error.addSuppressed(deleteError);
+         }
          return null;
       }
    }
@@ -326,13 +334,18 @@ public final class TellusLandMaskSource implements TellusCacheHandle {
       Path cachePath = this.cachePath(resolvedKey);
       byte[] bytes;
       if (Files.isRegularFile(cachePath)) {
-         bytes = Files.readAllBytes(cachePath);
-      } else {
-         long generation = TellusCacheRegistry.generation(TellusCacheDomain.OSM);
-         bytes = this.reader.getTileBytes(resolvedKey.zoom(), resolvedKey.x(), resolvedKey.y());
-         this.cacheRawTile(cachePath, bytes == null ? new byte[0] : bytes, generation);
+         try {
+            return decodeTile(readCachedTile(cachePath));
+         } catch (IOException invalidCache) {
+            Files.deleteIfExists(cachePath);
+            Tellus.LOGGER.debug("Discarded invalid cached land mask tile {}", resolvedKey, invalidCache);
+         }
       }
 
+      long generation = TellusCacheRegistry.generation(TellusCacheDomain.OSM);
+      bytes = this.reader.getTileBytes(resolvedKey.zoom(), resolvedKey.x(), resolvedKey.y());
+      validateTileBytes(bytes);
+      this.cacheRawTile(cachePath, bytes == null ? new byte[0] : bytes, generation);
       return decodeTile(bytes);
    }
 
@@ -340,6 +353,7 @@ public final class TellusLandMaskSource implements TellusCacheHandle {
       if (bytes == null || bytes.length == 0) {
          return TellusLandMaskSource.LandMaskTile.empty();
       } else {
+         validateTileBytes(bytes);
          BufferedImage image = ImageIO.read(new ByteArrayInputStream(bytes));
          if (image == null) {
             throw new IOException("Invalid land mask tile image");
@@ -362,15 +376,46 @@ public final class TellusLandMaskSource implements TellusCacheHandle {
       }
    }
 
+   private static byte[] readCachedTile(Path cachePath) throws IOException {
+      long size = Files.size(cachePath);
+      if (size > MAX_TILE_BYTES) {
+         throw new IOException("Cached land mask tile exceeds the " + MAX_TILE_BYTES + " byte safety limit");
+      }
+      try (var input = Files.newInputStream(cachePath)) {
+         return MapTileImageValidator.readBounded(input, MAX_TILE_BYTES);
+      }
+   }
+
+   private static void validateTileBytes(byte[] bytes) throws IOException {
+      if (bytes == null || bytes.length == 0) {
+         return;
+      }
+      if (bytes.length > MAX_TILE_BYTES) {
+         throw new IOException("Land mask tile exceeds the " + MAX_TILE_BYTES + " byte safety limit");
+      }
+      MapTileImageValidator.validatePng(bytes, MAX_TILE_DIMENSION, MAX_TILE_DIMENSION);
+   }
+
    private void downloadRawTile(TellusLandMaskSource.TileKey key) {
       Path cachePath = this.cachePath(key);
       if (Files.isRegularFile(cachePath)) {
-         return;
+         try {
+            validateTileBytes(readCachedTile(cachePath));
+            return;
+         } catch (IOException invalidCache) {
+            try {
+               Files.deleteIfExists(cachePath);
+            } catch (IOException deleteError) {
+               invalidCache.addSuppressed(deleteError);
+            }
+            Tellus.LOGGER.debug("Discarded invalid cached land mask tile {}", key, invalidCache);
+         }
       }
 
       try {
          long generation = TellusCacheRegistry.generation(TellusCacheDomain.OSM);
          byte[] bytes = this.reader.getTileBytes(key.zoom(), key.x(), key.y());
+         validateTileBytes(bytes);
          this.cacheRawTile(cachePath, bytes == null ? new byte[0] : bytes, generation);
       } catch (IOException error) {
          throw new RuntimeException("Failed to download land mask tile " + key.label(), error);
@@ -389,12 +434,20 @@ public final class TellusLandMaskSource implements TellusCacheHandle {
 
    private int selectZoom(double worldScale) {
       if (this.available && !(worldScale <= 0.0)) {
-         double raw = Math.log(EQUATOR_CIRCUMFERENCE / (TILE_SIZE * worldScale)) / Math.log(2.0);
-         int zoom = (int)Math.round(raw);
-         return Mth.clamp(zoom, this.minZoom, this.maxZoom);
+         return selectZoom(worldScale, this.minZoom, this.maxZoom);
       } else {
          return this.minZoom;
       }
+   }
+
+   static int selectZoom(double worldScale, int minZoom, int maxZoom) {
+      int low = Math.max(0, Math.min(minZoom, maxZoom));
+      int high = Math.max(low, maxZoom);
+      if (!(Double.isFinite(worldScale) && worldScale > 0.0)) {
+         return low;
+      }
+      double raw = Math.log(EQUATOR_CIRCUMFERENCE / (TILE_SIZE * worldScale)) / Math.log(2.0);
+      return Mth.clamp((int)Math.round(raw), low, high);
    }
 
    private static TellusLandMaskSource.TileKey tileKeyForBlock(double blockX, double blockZ, double worldScale, int zoom) {

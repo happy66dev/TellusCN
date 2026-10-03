@@ -95,15 +95,15 @@ public final class ManagedTerrainDownloadManager {
 
          EarthGeneratorSettings settings = generator.settings();
          if (!settings.tellusManagedTerrainDownloads()) {
-            this.playerStates.put(playerId, PlayerState.disabled(playerId, settings.showTerrainDownloadOverlay()));
+            this.playerStates.put(playerId, PlayerState.disabled(settings.showTerrainDownloadOverlay()));
             continue;
          }
          if (!ManagedTerrainCompatibility.isDistantHorizonsPresent()) {
-            this.playerStates.put(playerId, PlayerState.disabled(playerId, settings.showTerrainDownloadOverlay()));
+            this.playerStates.put(playerId, PlayerState.disabled(settings.showTerrainDownloadOverlay()));
             continue;
          }
          if (!ManagedTerrainCompatibility.isGenerationGateAvailable()) {
-            this.playerStates.put(playerId, PlayerState.compatibilityFallback(playerId, settings.showTerrainDownloadOverlay()));
+            this.playerStates.put(playerId, PlayerState.compatibilityFallback(settings.showTerrainDownloadOverlay()));
             continue;
          }
 
@@ -119,7 +119,6 @@ public final class ManagedTerrainDownloadManager {
          PlayerState state = this.playerStates.compute(
             playerId,
             (ignored, existing) -> PlayerState.active(
-               playerId,
                generatorKey,
                settings.showTerrainDownloadOverlay(),
                chunkX,
@@ -303,7 +302,7 @@ public final class ManagedTerrainDownloadManager {
                if (request.buildPackage) {
                   this.runPackagedPreload(generatorState, request, progress, area, epoch);
                } else {
-                  this.runIncrementalPreload(generatorState, progress, area);
+                  runIncrementalPreload(generatorState, progress, area);
                }
                failure = null;
                break;
@@ -406,7 +405,8 @@ public final class ManagedTerrainDownloadManager {
    private static void runIncrementalPreload(
       GeneratorState generatorState, CellProgress progress, TerrainPreloadArea area
    ) {
-      try (DownloadProgressReporter.Scope ignored = DownloadProgressReporter.push(progress)) {
+      DownloadProgressReporter.Scope reporterScope = DownloadProgressReporter.push(progress);
+      try (reporterScope) {
          TellusWorldgenSources.preloadAreaInputs(
             area.minBlockX(),
             area.minBlockZ(),
@@ -583,7 +583,6 @@ public final class ManagedTerrainDownloadManager {
    }
 
    private static final class PlayerState {
-      private final UUID playerId;
       private final String generatorKey;
       private final boolean showOverlay;
       private final int playerChunkX;
@@ -592,7 +591,6 @@ public final class ManagedTerrainDownloadManager {
       private volatile ManagedTerrainDownloadStatus status;
 
       private PlayerState(
-         UUID playerId,
          String generatorKey,
          boolean showOverlay,
          int playerChunkX,
@@ -600,7 +598,6 @@ public final class ManagedTerrainDownloadManager {
          ManagedTerrainTarget target,
          ManagedTerrainDownloadStatus status
       ) {
-         this.playerId = playerId;
          this.generatorKey = generatorKey;
          this.showOverlay = showOverlay;
          this.playerChunkX = playerChunkX;
@@ -610,7 +607,6 @@ public final class ManagedTerrainDownloadManager {
       }
 
       private static PlayerState active(
-         UUID playerId,
          String generatorKey,
          boolean showOverlay,
          int playerChunkX,
@@ -634,25 +630,23 @@ public final class ManagedTerrainDownloadManager {
             target.safetyRingChunks(),
             "Planning player-centered terrain cache"
          );
-         return new PlayerState(playerId, generatorKey, showOverlay, playerChunkX, playerChunkZ, target, planning);
+         return new PlayerState(generatorKey, showOverlay, playerChunkX, playerChunkZ, target, planning);
       }
 
-      private static PlayerState disabled(UUID playerId, boolean showOverlay) {
-         return terminal(playerId, showOverlay, ManagedTerrainDownloadStatus.Stage.DISABLED, "Legacy Distant Horizons downloading is enabled");
+      private static PlayerState disabled(boolean showOverlay) {
+         return terminal(showOverlay, ManagedTerrainDownloadStatus.Stage.DISABLED, "Legacy Distant Horizons downloading is enabled");
       }
 
-      private static PlayerState compatibilityFallback(UUID playerId, boolean showOverlay) {
+      private static PlayerState compatibilityFallback(boolean showOverlay) {
          return terminal(
-            playerId,
             showOverlay,
             ManagedTerrainDownloadStatus.Stage.COMPATIBILITY_FALLBACK,
             "Tellus-managed downloads require the Tellus Distant Horizons generation gate; using legacy mode"
          );
       }
 
-      private static PlayerState terminal(UUID playerId, boolean showOverlay, ManagedTerrainDownloadStatus.Stage stage, String detail) {
+      private static PlayerState terminal(boolean showOverlay, ManagedTerrainDownloadStatus.Stage stage, String detail) {
          return new PlayerState(
-            playerId,
             "",
             showOverlay,
             0,

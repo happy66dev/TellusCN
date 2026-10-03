@@ -36,7 +36,6 @@ public class TerrainPreviewScreen extends Screen {
       this.previewWidget = new TerrainPreviewWidget(0, 0, this.width, this.height, this.preview);
       this.previewWidget.setViewState(this.currentView);
       this.previewWidget.setFullscreenAction(this::onClose);
-      this.previewWidget.setAutoAdjustAction(this.parent::applyPreviewAutoAdjust);
       this.addRenderableOnly(this.previewWidget);
       int buttonY = this.height - 28;
       this.addRenderableWidget(

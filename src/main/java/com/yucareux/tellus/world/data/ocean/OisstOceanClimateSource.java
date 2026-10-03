@@ -9,8 +9,10 @@ import com.yucareux.tellus.cache.TellusCacheFiles;
 import com.yucareux.tellus.cache.TellusCacheHandle;
 import com.yucareux.tellus.cache.TellusCacheRegistry;
 import com.yucareux.tellus.integration.distant_horizons.managed.ManagedTerrainNetworkPolicy;
+import com.yucareux.tellus.world.data.source.InputStreamSafety;
 import com.yucareux.tellus.worldgen.EarthProjection;
 import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
@@ -39,6 +41,7 @@ public final class OisstOceanClimateSource implements TellusCacheHandle {
    private static final int TIME_STRIDE_DAYS = intProperty("tellus.oisst.timeStrideDays", 30);
    private static final int HTTP_CONNECT_TIMEOUT = intProperty("tellus.oisst.connectTimeoutMs", 8000);
    private static final int HTTP_READ_TIMEOUT = intProperty("tellus.oisst.readTimeoutMs", 12000);
+   private static final int MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
    private static final int MAX_CACHE_CELLS = intProperty("tellus.oisst.cacheCells", 4096);
    private static final String HTTP_USER_AGENT = "Tellus/1.0 (Minecraft Mod)";
    private final Path cacheRoot;
@@ -200,8 +203,18 @@ public final class OisstOceanClimateSource implements TellusCacheHandle {
          if (status < 200 || status >= 300) {
             throw new IOException("NOAA OISST v2.1 returned HTTP " + status);
          }
+         long contentLength = connection.getContentLengthLong();
+         if (contentLength > MAX_RESPONSE_BYTES) {
+            throw new IOException("NOAA OISST v2.1 response exceeds the safety limit");
+         }
 
-         try (BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream(), StandardCharsets.UTF_8))) {
+         byte[] response;
+         try (var input = connection.getInputStream()) {
+            response = InputStreamSafety.readAllBytes(input, MAX_RESPONSE_BYTES, "NOAA OISST response");
+         }
+         try (BufferedReader reader = new BufferedReader(
+            new InputStreamReader(new ByteArrayInputStream(response), StandardCharsets.UTF_8)
+         )) {
             return parseCsvSample(reader);
          }
       } finally {

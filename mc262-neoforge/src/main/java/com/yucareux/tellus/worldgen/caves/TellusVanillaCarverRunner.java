@@ -2,6 +2,7 @@ package com.yucareux.tellus.worldgen.caves;
 
 import java.util.List;
 import java.util.Objects;
+import java.util.function.IntBinaryOperator;
 import net.minecraft.core.Holder;
 import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
@@ -38,12 +39,13 @@ public final class TellusVanillaCarverRunner {
    private final NoiseBasedChunkGenerator carvingContextGenerator;
 
    private final NoiseGeneratorSettings contextNoiseSettings;
-   private final List<ConfiguredWorldCarver<?>> configuredCarvers;
+   private final TellusConfiguredCarvers configuredCarvers;
    private final int chunkMinY;
+   private final TellusVanillaNoiseCaveSampler noiseCaveSampler;
 
    public TellusVanillaCarverRunner(
-       BiomeSource biomeSource, Registry<Block> blockRegistry,  Holder<NoiseGeneratorSettings> noiseSettings, int tellusMinY, int tellusHeight,
-      boolean fullHeightCarvers
+       BiomeSource biomeSource, Registry<Block> blockRegistry, Holder<NoiseGeneratorSettings> vanillaNoiseSettings,
+      Holder<NoiseGeneratorSettings> noiseSettings, int tellusMinY, int tellusHeight
    ) {
       this.biomeSource = Objects.requireNonNull(biomeSource, "biomeSource");
       Objects.requireNonNull(blockRegistry, "blockRegistry");
@@ -51,30 +53,62 @@ public final class TellusVanillaCarverRunner {
       this.chunkMinY = tellusMinY;
       this.contextNoiseSettings = Objects.requireNonNull((NoiseGeneratorSettings)contextSettings.value(), "contextNoiseSettings");
       this.carvingContextGenerator = Objects.requireNonNull(new NoiseBasedChunkGenerator(this.biomeSource, contextSettings), "carvingContextGenerator");
-      this.configuredCarvers = TellusConfiguredCarvers.create(blockRegistry, tellusMinY, tellusHeight, fullHeightCarvers).orderedCarvers();
+      this.configuredCarvers = TellusConfiguredCarvers.create(blockRegistry, tellusMinY, tellusHeight);
+      this.noiseCaveSampler = new TellusVanillaNoiseCaveSampler(
+         Objects.requireNonNull(vanillaNoiseSettings, "vanillaNoiseSettings").value()
+      );
    }
 
    public void applyCarvers(
       WorldGenRegion level,
       long worldSeed,
-      RandomState randomState,
       BiomeManager biomeManager,
       StructureManager structures,
       ChunkAccess chunk,
+      int tellusSeaLevel,
+      boolean applyCaves,
+      boolean cavesReachSurface,
+      boolean applyOreVeins,
+      int[] surfaceYByColumn,
+      IntBinaryOperator surfaceHeightSampler,
       int[] floodGuardYByColumn,
-      int[] shellBottomYByColumn
+      int[] generationFloorYByColumn
    ) {
-      RandomState safeRandomState = Objects.requireNonNull(randomState, "randomState");
       StructureManager safeStructures = Objects.requireNonNull(structures, "structures");
+      IntBinaryOperator safeSurfaceHeightSampler = Objects.requireNonNull(surfaceHeightSampler, "surfaceHeightSampler");
       NoiseGeneratorSettings safeNoiseSettings = Objects.requireNonNull(this.contextNoiseSettings, "contextNoiseSettings");
       NoiseBasedChunkGenerator safeCarvingContextGenerator = Objects.requireNonNull(this.carvingContextGenerator, "carvingContextGenerator");
+      RegistryAccess registryAccess = level.registryAccess();
+      RandomState safeRandomState = this.noiseCaveSampler.randomStateFor(registryAccess, worldSeed);
+      this.noiseCaveSampler.apply(
+         registryAccess,
+         worldSeed,
+         safeStructures,
+         chunk,
+         this.chunkMinY,
+         tellusSeaLevel,
+         applyCaves,
+         cavesReachSurface,
+         applyOreVeins,
+         surfaceYByColumn,
+         floodGuardYByColumn,
+         generationFloorYByColumn,
+         (target, pos, state, fluid) -> {
+            target.setBlockState(pos, state);
+            if (fluid && target instanceof ProtoChunk protoChunk) {
+               protoChunk.markPosForPostProcessing(pos);
+            }
+         }
+      );
+      if (!applyCaves) {
+         return;
+      }
       BiomeManager carvedBiomeManager = biomeManager.withDifferentSource(
          (quartX, quartY, quartZ) -> this.biomeSource.getNoiseBiome(quartX, quartY, quartZ, safeRandomState.sampler())
       );
       WorldgenRandom random = new WorldgenRandom(new LegacyRandomSource(RandomSupport.generateUniqueSeed()));
       ChunkPos targetPos = chunk.getPos();
-      RegistryAccess registryAccess = level.registryAccess();
-      FluidPicker fluidPicker = Objects.requireNonNull(createFluidPicker(this.chunkMinY + 8), "fluidPicker");
+      FluidPicker fluidPicker = Objects.requireNonNull(createFluidPicker(this.chunkMinY + 8, tellusSeaLevel), "fluidPicker");
       NoiseChunk noiseChunk = chunk.getOrCreateNoiseChunk(
          candidateChunk -> NoiseChunk.forChunk(
             candidateChunk,
@@ -89,14 +123,16 @@ public final class TellusVanillaCarverRunner {
       CarvingContext carvingContext = new CarvingContext(
          safeCarvingContextGenerator, registryAccess, chunk.getHeightAccessorForGeneration(), noiseChunk, safeRandomState, safeNoiseSettings.surfaceRule()
       );
-      CarvingMask carvingMask = Objects.requireNonNull(getCarvingMask(chunk, floodGuardYByColumn, shellBottomYByColumn), "carvingMask");
+      CarvingMask carvingMask = Objects.requireNonNull(getCarvingMask(chunk, floodGuardYByColumn, generationFloorYByColumn), "carvingMask");
 
       for (int offsetX = -CARVER_RADIUS_CHUNKS; offsetX <= CARVER_RADIUS_CHUNKS; offsetX++) {
          for (int offsetZ = -CARVER_RADIUS_CHUNKS; offsetZ <= CARVER_RADIUS_CHUNKS; offsetZ++) {
             ChunkPos sourcePos = new ChunkPos(targetPos.x() + offsetX, targetPos.z() + offsetZ);
+            int sourceSurfaceY = safeSurfaceHeightSampler.applyAsInt(sourcePos.getMinBlockX() + 8, sourcePos.getMinBlockZ() + 8);
+            List<ConfiguredWorldCarver<?>> sourceCarvers = this.configuredCarvers.orderedCarvers(sourceSurfaceY);
 
-            for (int carverIndex = 0; carverIndex < this.configuredCarvers.size(); carverIndex++) {
-               ConfiguredWorldCarver<?> configured = this.configuredCarvers.get(carverIndex);
+            for (int carverIndex = 0; carverIndex < sourceCarvers.size(); carverIndex++) {
+               ConfiguredWorldCarver<?> configured = sourceCarvers.get(carverIndex);
                random.setLargeFeatureSeed(worldSeed + carverIndex, sourcePos.x(), sourcePos.z());
                if (configured.isStartChunk(random)) {
                   configured.carve(
@@ -119,7 +155,7 @@ public final class TellusVanillaCarverRunner {
    }
 
 
-   private static CarvingMask getCarvingMask(ChunkAccess chunk, int[] floodGuardYByColumn, int[] shellBottomYByColumn) {
+   private static CarvingMask getCarvingMask(ChunkAccess chunk, int[] floodGuardYByColumn, int[] generationFloorYByColumn) {
       CarvingMask baseMask;
       if (chunk instanceof ProtoChunk protoChunk) {
          baseMask = protoChunk.getOrCreateCarvingMask();
@@ -127,24 +163,24 @@ public final class TellusVanillaCarverRunner {
          baseMask = new CarvingMask(chunk.getHeight(), chunk.getMinY());
       }
 
-      if (floodGuardYByColumn == null && shellBottomYByColumn == null) {
+      if (floodGuardYByColumn == null && generationFloorYByColumn == null) {
          return Objects.requireNonNull(baseMask, "baseMask");
       } else {
          CarvingMask guardedMask = new CarvingMask(baseMask.toArray(), chunk.getMinY());
          guardedMask.setAdditionalMask((x, y, z) -> {
             int index = chunkIndex(x & 15, z & 15);
             return floodGuardYByColumn != null && y >= floodGuardYByColumn[index]
-               || shellBottomYByColumn != null && y <= shellBottomYByColumn[index];
+               || generationFloorYByColumn != null && y <= generationFloorYByColumn[index];
          });
          return Objects.requireNonNull(guardedMask, "guardedMask");
       }
    }
 
 
-   private static FluidPicker createFluidPicker(int lavaLevel) {
+   private static FluidPicker createFluidPicker(int lavaLevel, int seaLevel) {
       FluidStatus lava = new FluidStatus(lavaLevel, Blocks.LAVA.defaultBlockState());
-      FluidStatus air = new FluidStatus(Integer.MIN_VALUE, Blocks.AIR.defaultBlockState());
-      return Objects.requireNonNull((x, y, z) -> y < lavaLevel ? lava : air, "fluidPicker");
+      FluidStatus water = new FluidStatus(seaLevel, Blocks.WATER.defaultBlockState());
+      return Objects.requireNonNull((x, y, z) -> y < lavaLevel ? lava : water, "fluidPicker");
    }
 
    private static int chunkIndex(int localX, int localZ) {

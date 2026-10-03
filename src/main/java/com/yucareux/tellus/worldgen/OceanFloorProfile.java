@@ -19,6 +19,31 @@ public final class OceanFloorProfile {
       return Mth.clamp(blocks, 0, MAX_TRANSITION_BLOCKS);
    }
 
+   /**
+    * Converts a distance authored in blocks at 1:1 scale into the block
+    * distance for the selected world scale. At least one block is kept for
+    * every positive distance because sub-block distances cannot be represented
+    * by the terrain grid.
+    */
+   public static int scaleBlockDistance(int blocksAtOneToOne, double worldScale) {
+      if (blocksAtOneToOne <= 0) {
+         return 0;
+      }
+
+      double metersPerBlock = Double.isFinite(worldScale) && worldScale > 0.0
+         ? Math.max(1.0, worldScale)
+         : 1.0;
+      return Math.max(1, (int)Math.round(blocksAtOneToOne / metersPerBlock));
+   }
+
+   public static int transitionBlocksForScale(int blocksAtOneToOne, double worldScale) {
+      return scaleBlockDistance(clampTransitionDistance(blocksAtOneToOne), worldScale);
+   }
+
+   public static int minimumOffshoreDepthForScale(double worldScale) {
+      return scaleBlockDistance(MIN_OFFSHORE_DEPTH, worldScale);
+   }
+
    public static boolean shouldCorrect(
       boolean validBathymetry,
       int rawDepth,
@@ -48,9 +73,30 @@ public final class OceanFloorProfile {
       int transitionBlocks,
       double cellSize
    ) {
+      return floorHeight(
+         seaLevel,
+         rawFloor,
+         distanceFromCoast,
+         correctionRequired,
+         transitionBlocks,
+         cellSize,
+         MIN_OFFSHORE_DEPTH
+      );
+   }
+
+   public static int floorHeight(
+      int seaLevel,
+      int rawFloor,
+      double distanceFromCoast,
+      boolean correctionRequired,
+      int transitionBlocks,
+      double cellSize,
+      int minimumOffshoreDepth
+   ) {
       int rawDepth = Math.max(MIN_DEPTH, seaLevel - Math.min(rawFloor, seaLevel - MIN_DEPTH));
-      boolean minimumDepthRequired = rawDepth < MIN_OFFSHORE_DEPTH;
-      int offshoreDepth = Math.max(MIN_OFFSHORE_DEPTH, rawDepth);
+      int offshoreMinimum = Math.max(MIN_DEPTH, minimumOffshoreDepth);
+      boolean minimumDepthRequired = rawDepth < offshoreMinimum;
+      int offshoreDepth = Math.max(offshoreMinimum, rawDepth);
       int safeRawFloor = seaLevel - offshoreDepth;
       int clampedTransition = clampTransitionDistance(transitionBlocks);
       if ((!correctionRequired && !minimumDepthRequired) || clampedTransition <= 0 || distanceFromCoast >= clampedTransition) {

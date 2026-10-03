@@ -11,6 +11,7 @@ import com.yucareux.tellus.client.widget.CustomizationList;
 import com.yucareux.tellus.worldgen.EarthChunkGenerator;
 import com.yucareux.tellus.worldgen.EarthGeneratorSettings;
 import com.yucareux.tellus.worldgen.ExperimentalHeightSupport;
+import com.yucareux.tellus.worldgen.RandomBiomeCatalog;
 import java.io.IOException;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.FileVisitResult;
@@ -98,6 +99,7 @@ public class EarthCustomizeScreen extends Screen {
       ResourceKey.create(Registries.DIMENSION_TYPE, DYNAMIC_DIMENSION_TYPE_ID), "dynamicDimensionTypeKey"
    );
    private static final double OSM_ROADS_AND_BUILDINGS_MAX_WORLD_SCALE = 15.0;
+   private static final String BIOME_TOGGLE_PREFIX = "random_biome.";
    private final CreateWorldScreen parent;
    private final List<EarthCustomizeScreen.CategoryDefinition> categories;
    private CustomizationList list;
@@ -136,7 +138,6 @@ public class EarthCustomizeScreen extends Screen {
       int previewX = this.width - previewWidth - 10;
       this.previewWidget = new TerrainPreviewWidget(previewX, listTop, previewWidth, previewHeight, this.preview);
       this.previewWidget.setFullscreenAction(this::openPreviewFullScreen);
-      this.previewWidget.setAutoAdjustAction(this::applyPreviewAutoAdjust);
       if (this.pendingPreviewViewState != null) {
          this.previewWidget.setViewState(this.pendingPreviewViewState);
          this.pendingPreviewViewState = null;
@@ -200,16 +201,16 @@ public class EarthCustomizeScreen extends Screen {
 
       double targetWorldScale = findBestWorldScale(current, info);
       int targetHeightOffset = findBestHeightOffset(current, info, targetWorldScale);
-      int delta = targetHeightOffset - current.heightOffset();
+      int targetMinSurface = scaledSurfaceY(
+         info.minElevationMeters(), targetWorldScale, current.terrestrialHeightScale(), current.oceanicHeightScale(), targetHeightOffset
+      );
+      int targetMaxSurface = scaledSurfaceY(
+         info.maxElevationMeters(), targetWorldScale, current.terrestrialHeightScale(), current.oceanicHeightScale(), targetHeightOffset
+      );
       this.setSliderValue("world_scale", targetWorldScale);
       this.setSliderValue("height_offset", targetHeightOffset);
-      if (current.minAltitude() != Integer.MIN_VALUE) {
-         this.setSliderValue("min_altitude", current.minAltitude() + delta);
-      }
-
-      if (current.maxAltitude() != Integer.MIN_VALUE) {
-         this.setSliderValue("max_altitude", current.maxAltitude() + delta);
-      }
+      this.setSliderValue("min_altitude", targetMinSurface - current.undergroundDepth());
+      this.setSliderValue("max_altitude", targetMaxSurface + 50);
 
       if (this.minecraft != null && this.minecraft.gui.screen() == this) {
          this.refreshCurrentCategory();
@@ -406,7 +407,9 @@ public class EarthCustomizeScreen extends Screen {
       this.spawnLatitude = settings.spawnLatitude();
       this.spawnLongitude = settings.spawnLongitude();
       this.setSliderValue("world_scale", settings.worldScale());
+      this.setSliderValue("underground_depth", settings.undergroundDepth());
       this.setToggleValue("cave_generation", settings.caveGeneration());
+      this.setToggleValue("caves_reach_surface", settings.cavesReachSurface());
       this.setToggleValue("ore_distribution", settings.oreDistribution());
       this.setToggleValue("enable_roads", settings.enableRoads());
       this.setToggleValue("enable_buildings", settings.enableBuildings());
@@ -470,6 +473,10 @@ public class EarthCustomizeScreen extends Screen {
       int oceanShorelineBlend = EarthGeneratorSettings.DEFAULT.oceanShorelineBlend();
       boolean shorelineBlendCliffLimit = EarthGeneratorSettings.DEFAULT.shorelineBlendCliffLimit();
       boolean caveGeneration = this.findToggleValue("cave_generation", EarthGeneratorSettings.DEFAULT.caveGeneration());
+      boolean cavesReachSurface = this.findToggleValue("caves_reach_surface", EarthGeneratorSettings.DEFAULT.cavesReachSurface());
+      int undergroundDepth = (int)Math.round(
+         this.findSliderValue("underground_depth", EarthGeneratorSettings.DEFAULT.undergroundDepth())
+      );
       boolean oreDistribution = this.findToggleValue("ore_distribution", EarthGeneratorSettings.DEFAULT.oreDistribution());
       boolean lavaPools = this.findToggleValue("lava_pools", EarthGeneratorSettings.DEFAULT.lavaPools());
       boolean enableRoads = this.findToggleValue("enable_roads", EarthGeneratorSettings.DEFAULT.enableRoads());
@@ -477,6 +484,7 @@ public class EarthCustomizeScreen extends Screen {
       boolean climateBasedBuiltUpTerrain = this.findToggleValue("climate_based_built_up_terrain", EarthGeneratorSettings.DEFAULT.climateBasedBuiltUpTerrain());
       boolean randomBiomes = this.findToggleValue("random_biomes", EarthGeneratorSettings.DEFAULT.randomBiomes());
       double randomBiomeDensity = this.findSliderValue("random_biome_density", EarthGeneratorSettings.DEFAULT.randomBiomeDensity() * 100.0) / 100.0;
+      List<String> randomBiomeIds = this.selectedRandomBiomeIds();
       boolean thinShellTerrain = this.findToggleValue("thin_shell_terrain", EarthGeneratorSettings.DEFAULT.thinShellTerrain());
       boolean deepDark = this.findToggleValue("deep_dark", EarthGeneratorSettings.DEFAULT.deepDark());
       boolean geodes = this.findToggleValue("geodes", EarthGeneratorSettings.DEFAULT.geodes());
@@ -587,9 +595,12 @@ public class EarthCustomizeScreen extends Screen {
          randomBiomes,
          randomBiomeDensity,
          this.randomBiomeSeed,
+         randomBiomeIds,
          experimentalIncreaseHeight,
          tellusManagedTerrainDownloads,
-         showTerrainDownloadOverlay
+         showTerrainDownloadOverlay,
+         cavesReachSurface,
+         undergroundDepth
       );
    }
 
@@ -621,6 +632,7 @@ public class EarthCustomizeScreen extends Screen {
       }
 
       this.setSliderValue("world_scale", initialSettings.worldScale());
+      this.setSliderValue("underground_depth", initialSettings.undergroundDepth());
       this.setDemSelectionValue(initialSettings.demSelection());
       this.setSliderValue("terrestrial_height_scale", initialSettings.terrestrialHeightScale());
       this.setSliderValue("oceanic_height_scale", initialSettings.oceanicHeightScale());
@@ -628,6 +640,7 @@ public class EarthCustomizeScreen extends Screen {
       this.setSliderValue("max_altitude", initialSettings.maxAltitude() == Integer.MIN_VALUE ? -1.0 : initialSettings.maxAltitude());
       this.setSliderValue("min_altitude", initialSettings.minAltitude() == Integer.MIN_VALUE ? -2048.0 : initialSettings.minAltitude());
       this.setToggleValue("cave_generation", initialSettings.caveGeneration());
+      this.setToggleValue("caves_reach_surface", initialSettings.cavesReachSurface());
       this.setToggleValue("ore_distribution", initialSettings.oreDistribution());
       this.setToggleValue("lava_pools", initialSettings.lavaPools());
       this.setToggleValue("enable_roads", initialSettings.enableRoads());
@@ -637,6 +650,7 @@ public class EarthCustomizeScreen extends Screen {
       this.setToggleValue("random_biomes", initialSettings.randomBiomes());
       this.setSliderValue("random_biome_density", initialSettings.randomBiomeDensity() * 100.0);
       this.randomBiomeSeed = initialSettings.randomBiomeSeed();
+      this.setRandomBiomeSelection(initialSettings.randomBiomeIds());
       this.setToggleValue("experimental_increase_height", initialSettings.experimentalIncreaseHeight() && ExperimentalHeightSupport.isRuntimeProfileActive());
       this.setToggleValue("deep_dark", initialSettings.deepDark());
       this.setToggleValue("geodes", initialSettings.geodes());
@@ -756,13 +770,20 @@ public class EarthCustomizeScreen extends Screen {
       boolean voxyInstalled = TellusPlatform.isModLoaded("voxy");
       List<EarthCustomizeScreen.SettingDefinition> worldSettings = new ArrayList<>(
          List.of(
-            slider("world_scale", 30.0, 1.0, 500.0, 5.0)
+            slider("world_scale", 30.0, 1.0, EarthGeneratorSettings.MAX_WORLD_SCALE, 5.0)
                .withDisplay(EarthCustomizeScreen::formatWorldScale)
                .withScale(EarthCustomizeScreen.SliderScale.power(3.0)),
+            new AutoAdjustDefinition(),
             toggle("experimental_increase_height", EarthGeneratorSettings.DEFAULT.experimentalIncreaseHeight())
                .withTooltip(experimentalIncreaseHeightTooltip())
                .forceDisabled(!ExperimentalHeightSupport.isRuntimeProfileActive(), experimentalHeightRuntimeDisabledTooltip()),
-            toggle("thin_shell_terrain", EarthGeneratorSettings.DEFAULT.thinShellTerrain())
+            slider(
+               "underground_depth",
+               EarthGeneratorSettings.DEFAULT.undergroundDepth(),
+               EarthGeneratorSettings.MIN_UNDERGROUND_DEPTH,
+               EarthGeneratorSettings.MAX_UNDERGROUND_DEPTH,
+               16.0
+            ).withDisplay(EarthCustomizeScreen::formatUndergroundDepth)
          )
       );
       worldSettings.addAll(
@@ -792,22 +813,28 @@ public class EarthCustomizeScreen extends Screen {
             )
          )
       );
+      EarthCustomizeScreen.CategoryDefinition biomesCategory = new EarthCustomizeScreen.CategoryDefinition(
+         "biomes", biomeSettings(RandomBiomeCatalog.minecraft26_2OverworldBiomeIds())
+      ).hideFromRoot().parent("ecological");
       categories.add(
          new EarthCustomizeScreen.CategoryDefinition(
             "ecological",
             List.of(
                toggle("random_biomes", EarthGeneratorSettings.DEFAULT.randomBiomes()),
+               this.categoryLink(biomesCategory),
                slider("random_biome_density", EarthGeneratorSettings.DEFAULT.randomBiomeDensity() * 100.0, 0.0, 40.0, 1.0).withDisplay(EarthCustomizeScreen::formatPercent),
                slider("trees_density", 100.0, 0.0, 200.0, 5.0).withDisplay(EarthCustomizeScreen::formatPercent).locked(true),
                toggle("aquatic_vegetation", true).locked(true)
             )
          )
       );
+      categories.add(biomesCategory);
       categories.add(
          new EarthCustomizeScreen.CategoryDefinition(
             "geological",
             List.of(
                toggle("cave_generation", EarthGeneratorSettings.DEFAULT.caveGeneration()),
+               toggle("caves_reach_surface", EarthGeneratorSettings.DEFAULT.cavesReachSurface()),
                toggle("ore_distribution", EarthGeneratorSettings.DEFAULT.oreDistribution()),
                toggle("lava_pools", EarthGeneratorSettings.DEFAULT.lavaPools())
             )
@@ -938,6 +965,45 @@ public class EarthCustomizeScreen extends Screen {
       return new EarthCustomizeScreen.ToggleDefinition(key, defaultValue);
    }
 
+   private static List<EarthCustomizeScreen.SettingDefinition> biomeSettings(List<String> biomeIds) {
+      List<EarthCustomizeScreen.SettingDefinition> settings = new ArrayList<>(biomeIds.size());
+      for (String biomeId : biomeIds) {
+         settings.add(toggle(BIOME_TOGGLE_PREFIX + biomeId, true));
+      }
+      return List.copyOf(settings);
+   }
+
+   private List<String> selectedRandomBiomeIds() {
+      EarthCustomizeScreen.CategoryDefinition category = this.findCategoryById("biomes");
+      if (category == null) {
+         return EarthGeneratorSettings.DEFAULT.randomBiomeIds();
+      }
+
+      List<String> selected = new ArrayList<>();
+      for (EarthCustomizeScreen.SettingDefinition setting : category.getSettings()) {
+         if (setting instanceof EarthCustomizeScreen.ToggleDefinition toggle
+            && toggle.value
+            && toggle.key.startsWith(BIOME_TOGGLE_PREFIX)) {
+            selected.add(toggle.key.substring(BIOME_TOGGLE_PREFIX.length()));
+         }
+      }
+      return List.copyOf(selected);
+   }
+
+   private void setRandomBiomeSelection(List<String> biomeIds) {
+      EarthCustomizeScreen.CategoryDefinition category = this.findCategoryById("biomes");
+      if (category == null) {
+         return;
+      }
+
+      for (EarthCustomizeScreen.SettingDefinition setting : category.getSettings()) {
+         if (setting instanceof EarthCustomizeScreen.ToggleDefinition toggle && toggle.key.startsWith(BIOME_TOGGLE_PREFIX)) {
+            String biomeId = toggle.key.substring(BIOME_TOGGLE_PREFIX.length());
+            toggle.value = biomeIds.contains(biomeId);
+         }
+      }
+   }
+
    private static EarthCustomizeScreen.ModeDefinition mode(String key, EarthGeneratorSettings.DistantHorizonsRenderMode defaultValue) {
       return new EarthCustomizeScreen.ModeDefinition(key, defaultValue);
    }
@@ -979,61 +1045,61 @@ public class EarthCustomizeScreen extends Screen {
 
    private static List<EarthCustomizeScreen.SettingDefinition> dataSourcesEntries() {
       List<EarthCustomizeScreen.SettingDefinition> entries = new ArrayList<>();
-      entries.add(infoHeader("Overture Maps land cover"));
-      entries.add(infoLine("Overture Maps base-theme vector land cover with adaptive zoom levels."));
-      entries.add(infoLine("© Overture Maps Foundation; derived from ESA WorldCover 2020."));
-      entries.add(infoLine("Contains modified Copernicus Sentinel data processed by ESA WorldCover consortium."));
-      entries.add(infoSubtle("Licenses: ODbL (Overture base theme) / CC BY 4.0 (ESA WorldCover)"));
+      entries.add(infoHeader("tellus.data_sources.overture.title"));
+      entries.add(infoLine("tellus.data_sources.overture.description"));
+      entries.add(infoLine("tellus.data_sources.overture.copyright"));
+      entries.add(infoLine("tellus.data_sources.overture.sentinel"));
+      entries.add(infoSubtle("tellus.data_sources.overture.licenses"));
       entries.add(infoLink("https://docs.overturemaps.org/attribution/"));
       entries.add(infoLink("https://docs.overturemaps.org/schema/reference/base/land_cover/"));
-      entries.add(infoLine("In-game processing: fetched as PMTiles ranges, rasterized for the selected scale,"));
-      entries.add(infoLine("and cached as compact local tiles for fast lookup."));
+      entries.add(infoLine("tellus.data_sources.overture.processing_1"));
+      entries.add(infoLine("tellus.data_sources.overture.processing_2"));
       entries.add(infoSpacer());
-      entries.add(infoHeader("Köppen–Geiger climate classification (1 km, Beck et al. 2018)"));
-      entries.add(infoLine("Source: Beck, H.E., Zimmermann, N.E., McVicar, T.R., et al. (2018)."));
-      entries.add(infoLine("Present and future Köppen–Geiger climate classification maps at 1-km resolution"));
-      entries.add(infoLine("(Scientific Data)."));
-      entries.add(infoSubtle("License: CC BY 4.0"));
+      entries.add(infoHeader("tellus.data_sources.koppen.title"));
+      entries.add(infoLine("tellus.data_sources.koppen.source"));
+      entries.add(infoLine("tellus.data_sources.koppen.publication_1"));
+      entries.add(infoLine("tellus.data_sources.koppen.publication_2"));
+      entries.add(infoSubtle("tellus.data_sources.license_cc_by"));
       entries.add(infoLink("https://creativecommons.org/licenses/by/4.0/"));
-      entries.add(infoSubtle("Publication DOI:"));
+      entries.add(infoSubtle("tellus.data_sources.publication_doi"));
       entries.add(infoLink("https://doi.org/10.1038/sdata.2018.214"));
-      entries.add(infoLine("In-game processing: reprojected and resampled to match the world grid."));
-      entries.add(infoLine("Cached for fast lookup."));
+      entries.add(infoLine("tellus.data_sources.koppen.processing_1"));
+      entries.add(infoLine("tellus.data_sources.koppen.processing_2"));
       entries.add(infoSpacer());
-      entries.add(infoHeader("Mapterhorn terrain DEM"));
-      entries.add(infoLine("Mapterhorn global terrain tiles"));
-      entries.add(infoLine("Accessed on " + formatLocalDate() + " from"));
+      entries.add(infoHeader("tellus.data_sources.mapterhorn.title"));
+      entries.add(infoLine("tellus.data_sources.mapterhorn.source"));
+      entries.add(infoLine("tellus.data_sources.accessed", formatLocalDate()));
       entries.add(infoLink("https://mapterhorn.com/"));
-      entries.add(infoLine("In-game processing: sampled from Mapterhorn Terrarium elevation tiles,"));
-      entries.add(infoLine("with zoom selected from player scale and cached locally for reuse."));
+      entries.add(infoLine("tellus.data_sources.mapterhorn.processing_1"));
+      entries.add(infoLine("tellus.data_sources.mapterhorn.processing_2"));
       entries.add(infoSpacer());
-      entries.add(infoHeader("OpenWaters bathymetry"));
-      entries.add(infoLine("OpenWaters ocean and inland-water bathymetry tiles"));
-      entries.add(infoLine("Accessed on " + formatLocalDate() + " from"));
+      entries.add(infoHeader("tellus.data_sources.openwaters.title"));
+      entries.add(infoLine("tellus.data_sources.openwaters.source"));
+      entries.add(infoLine("tellus.data_sources.accessed", formatLocalDate()));
       entries.add(infoLink("https://github.com/openwatersio/openwaters.io"));
-      entries.add(infoLine("In-game processing: used where the ocean mask agrees with missing or"));
-      entries.add(infoLine("non-positive Mapterhorn terrain; positive terrain overrides the mask."));
+      entries.add(infoLine("tellus.data_sources.openwaters.processing_1"));
+      entries.add(infoLine("tellus.data_sources.openwaters.processing_2"));
       entries.add(infoSpacer());
-      entries.add(infoHeader("Open-Meteo (weather)"));
-      entries.add(infoLine("Weather data provided by Open-Meteo.com."));
+      entries.add(infoHeader("tellus.data_sources.openmeteo.title"));
+      entries.add(infoLine("tellus.data_sources.openmeteo.data"));
       entries.add(infoLink("https://open-meteo.com/"));
-      entries.add(infoSubtle("License: CC BY 4.0"));
+      entries.add(infoSubtle("tellus.data_sources.license_cc_by"));
       entries.add(infoLink("https://creativecommons.org/licenses/by/4.0/"));
-      entries.add(infoLine("Credit: \"Weather data by Open-Meteo.com\"."));
+      entries.add(infoLine("tellus.data_sources.openmeteo.credit"));
       entries.add(infoLink("https://doi.org/10.5281/ZENODO.7970649"));
       return entries;
    }
 
-   private static EarthCustomizeScreen.TextLineDefinition infoHeader(String text) {
-      return new EarthCustomizeScreen.TextLineDefinition(Component.literal(text), -604044, null);
+   private static EarthCustomizeScreen.TextLineDefinition infoHeader(String translationKey, Object... args) {
+      return new EarthCustomizeScreen.TextLineDefinition(Component.translatable(translationKey, args), -604044, null);
    }
 
-   private static EarthCustomizeScreen.TextLineDefinition infoLine(String text) {
-      return new EarthCustomizeScreen.TextLineDefinition(Component.literal(text), -1710619, null);
+   private static EarthCustomizeScreen.TextLineDefinition infoLine(String translationKey, Object... args) {
+      return new EarthCustomizeScreen.TextLineDefinition(Component.translatable(translationKey, args), -1710619, null);
    }
 
-   private static EarthCustomizeScreen.TextLineDefinition infoSubtle(String text) {
-      return new EarthCustomizeScreen.TextLineDefinition(Component.literal(text), -4605511, null);
+   private static EarthCustomizeScreen.TextLineDefinition infoSubtle(String translationKey, Object... args) {
+      return new EarthCustomizeScreen.TextLineDefinition(Component.translatable(translationKey, args), -4605511, null);
    }
 
    private static EarthCustomizeScreen.TextLineDefinition infoSubtle( Component text) {
@@ -1069,7 +1135,11 @@ public class EarthCustomizeScreen extends Screen {
    }
 
    private static String formatHeightOffset(double value) {
-      return String.format(Locale.ROOT, "%.0f blocks", value);
+      return Component.translatable("tellus.value.blocks", String.format(Locale.ROOT, "%.0f", value)).getString();
+   }
+
+   private static String formatUndergroundDepth(double value) {
+      return Component.translatable("tellus.value.blocks", String.format(Locale.ROOT, "-%.0f", value)).getString();
    }
 
    private static String formatPercent(double value) {
@@ -1077,11 +1147,11 @@ public class EarthCustomizeScreen extends Screen {
    }
 
    private static String formatChunkRadius(double value) {
-      return String.format(Locale.ROOT, "%.0f chunks", value);
+      return Component.translatable("tellus.value.chunks", String.format(Locale.ROOT, "%.0f", value)).getString();
    }
 
    private static String formatChunksPerTick(double value) {
-      return String.format(Locale.ROOT, "%.0f chunks/tick", value);
+      return Component.translatable("tellus.value.chunks_per_tick", String.format(Locale.ROOT, "%.0f", value)).getString();
    }
 
    private static String formatMaxAltitude(double value) {
@@ -1100,33 +1170,35 @@ public class EarthCustomizeScreen extends Screen {
 
 
    private static String formatAltitude(double value, double autoValue) {
-      return value <= autoValue + 0.5 ? "Automatic" : String.format(Locale.ROOT, "%.0f blocks", value);
+      return value <= autoValue + 0.5
+         ? Component.translatable("tellus.value.automatic").getString()
+         : Component.translatable("tellus.value.blocks", String.format(Locale.ROOT, "%.0f", value)).getString();
    }
 
    private static double findBestWorldScale(EarthGeneratorSettings settings, TerrainPreview.PreviewInfo info) {
-      for (int step = 10; step <= 5000; step++) {
+      for (int step = 10; step <= (int)Math.round(EarthGeneratorSettings.MAX_WORLD_SCALE * 10.0); step++) {
          double worldScale = step / 10.0;
          if (canFitPreviewAtWorldScale(settings, info, worldScale)) {
             return worldScale;
          }
       }
 
-      return 500.0;
+      return EarthGeneratorSettings.MAX_WORLD_SCALE;
    }
 
    private static boolean canFitPreviewAtWorldScale(EarthGeneratorSettings settings, TerrainPreview.PreviewInfo info, double worldScale) {
       int minBase = scaledSurfaceY(info.minElevationMeters(), worldScale, settings.terrestrialHeightScale(), settings.oceanicHeightScale(), 0);
       int maxBase = scaledSurfaceY(info.maxElevationMeters(), worldScale, settings.terrestrialHeightScale(), settings.oceanicHeightScale(), 0);
-      int minOffset = Math.max(EarthGeneratorSettings.MIN_WORLD_Y - minBase, -2000);
-      int maxOffset = Math.min(EarthGeneratorSettings.MAX_WORLD_Y - maxBase, 128);
+      int minOffset = Math.max(EarthGeneratorSettings.MIN_WORLD_Y + settings.undergroundDepth() - minBase, -2000);
+      int maxOffset = Math.min(EarthGeneratorSettings.MAX_WORLD_Y - 50 - maxBase, 128);
       return minOffset <= maxOffset;
    }
 
    private static int findBestHeightOffset(EarthGeneratorSettings settings, TerrainPreview.PreviewInfo info, double worldScale) {
       int minBase = scaledSurfaceY(info.minElevationMeters(), worldScale, settings.terrestrialHeightScale(), settings.oceanicHeightScale(), 0);
       int maxBase = scaledSurfaceY(info.maxElevationMeters(), worldScale, settings.terrestrialHeightScale(), settings.oceanicHeightScale(), 0);
-      int minOffset = Math.max(EarthGeneratorSettings.MIN_WORLD_Y - minBase, -2000);
-      int maxOffset = Math.min(EarthGeneratorSettings.MAX_WORLD_Y - maxBase, 128);
+      int minOffset = Math.max(EarthGeneratorSettings.MIN_WORLD_Y + settings.undergroundDepth() - minBase, -2000);
+      int maxOffset = Math.min(EarthGeneratorSettings.MAX_WORLD_Y - 50 - maxBase, 128);
       if (minOffset > maxOffset) {
          return Mth.clamp(settings.heightOffset(), -2000, 128);
       } else {
@@ -1161,11 +1233,19 @@ public class EarthCustomizeScreen extends Screen {
 
 
    private static Component settingName(String key) {
+      if (key.startsWith(BIOME_TOGGLE_PREFIX)) {
+         return Objects.requireNonNull(
+            Component.translatable("biome.minecraft." + key.substring(BIOME_TOGGLE_PREFIX.length())), "biomeName"
+         );
+      }
       return Objects.requireNonNull(Component.translatable("property.tellus." + key + ".name"), "settingName");
    }
 
 
    private static Component settingTooltip(String key) {
+      if (key.startsWith(BIOME_TOGGLE_PREFIX)) {
+         return Objects.requireNonNull(Component.translatable("property.tellus.biomes.tooltip").withStyle(ChatFormatting.GRAY), "biomeTooltip");
+      }
       return Objects.requireNonNull(Component.translatable("property.tellus." + key + ".tooltip").withStyle(ChatFormatting.GRAY), "settingTooltip");
    }
 
@@ -1350,12 +1430,15 @@ public class EarthCustomizeScreen extends Screen {
          this.list.addWidget(this.createWorldHeaderActions(category));
       }
 
-      if ("structure".equals(category.getId())) {
+      if ("structure".equals(category.getId()) || "biomes".equals(category.getId())) {
          this.list.addWidget(this.createStructureHeaderActions(category));
       }
 
       Runnable onChange = this::onSettingsChanged;
-      if ("world".equals(category.getId()) || "distant_horizons".equals(category.getId()) || "voxy".equals(category.getId())) {
+      if ("world".equals(category.getId())
+         || "geological".equals(category.getId())
+         || "distant_horizons".equals(category.getId())
+         || "voxy".equals(category.getId())) {
          onChange = () -> {
             this.onSettingsChanged();
             this.showCategory(category);
@@ -1437,6 +1520,19 @@ public class EarthCustomizeScreen extends Screen {
             if (setting instanceof EarthCustomizeScreen.SliderDefinition slider && isExperimentalAltitudeControl(slider.key)) {
                slider.forceDisabled(experimentalIncreaseHeight);
             }
+         }
+      } else if ("geological".equals(category.getId())) {
+         EarthCustomizeScreen.ToggleDefinition caveGeneration = null;
+         EarthCustomizeScreen.ToggleDefinition cavesReachSurface = null;
+         for (EarthCustomizeScreen.SettingDefinition setting : category.getSettings()) {
+            if (setting instanceof EarthCustomizeScreen.ToggleDefinition toggle && toggle.key.equals("cave_generation")) {
+               caveGeneration = toggle;
+            } else if (setting instanceof EarthCustomizeScreen.ToggleDefinition toggle && toggle.key.equals("caves_reach_surface")) {
+               cavesReachSurface = toggle;
+            }
+         }
+         if (cavesReachSurface != null) {
+            cavesReachSurface.forceDisabled(caveGeneration == null || !caveGeneration.value);
          }
       } else if ("network".equals(category.getId())) {
          EarthCustomizeScreen.ToggleDefinition managedDownloads = null;
@@ -1593,6 +1689,31 @@ public class EarthCustomizeScreen extends Screen {
 
    private static boolean isShiftDown() {
       return InputConstants.isKeyDown(Minecraft.getInstance().getWindow(), 340) || InputConstants.isKeyDown(Minecraft.getInstance().getWindow(), 344);
+   }
+
+   private final class AutoAdjustDefinition implements EarthCustomizeScreen.SettingDefinition {
+      @Override
+      public AbstractWidget createWidget(Runnable onChange) {
+         boolean disabled = EarthCustomizeScreen.this.findToggleValue(
+            "experimental_increase_height", EarthGeneratorSettings.DEFAULT.experimentalIncreaseHeight()
+         );
+         Component tooltip = disabled
+            ? Component.translatable("tellus.experimental_increase_height.controls_disabled.tooltip").withStyle(ChatFormatting.GRAY)
+            : Component.translatable("property.tellus.auto_adjust.tooltip").withStyle(ChatFormatting.GRAY);
+         Button button = Button.builder(Component.translatable("tellus.preview.info.auto_adjust"), clicked -> {
+            TerrainPreview.PreviewInfo info = EarthCustomizeScreen.this.preview.getInfo();
+            if (info != null) {
+               EarthGeneratorSettings adjusted = EarthCustomizeScreen.this.applyPreviewAutoAdjust(info);
+               EarthCustomizeScreen.this.onSettingsChanged();
+               if (EarthCustomizeScreen.this.previewWidget != null) {
+                  EarthCustomizeScreen.this.previewWidget.requestRebuild(adjusted);
+               }
+            }
+         }).bounds(0, 0, 0, 20).build();
+         button.active = !disabled;
+         button.setTooltip(Tooltip.create(tooltip));
+         return button;
+      }
    }
 
    private static final class ButtonDefinition implements EarthCustomizeScreen.SettingDefinition {

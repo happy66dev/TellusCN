@@ -9,6 +9,7 @@ import com.yucareux.tellus.worldgen.EarthChunkGenerator;
 import com.yucareux.tellus.worldgen.EarthGeneratorSettings;
 import it.unimi.dsi.fastutil.longs.LongArrayFIFOQueue;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
+import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
@@ -66,6 +67,7 @@ public final class TellusRealtimeManager {
    private static final int NTP_TIMEOUT_MS = 2000;
    private static final int NTP_PORT = 123;
    private static final long NTP_EPOCH_OFFSET_SECONDS = 2208988800L;
+   private static final long MAX_NTP_OFFSET_MS = 86400000L;
    private static final String[] NTP_SERVERS = new String[]{"time.google.com", "pool.ntp.org", "time.cloudflare.com"};
    private final OpenMeteoClient client = new OpenMeteoClient();
    private final NominatimGeocoder geocoder = new NominatimGeocoder("en");
@@ -521,22 +523,57 @@ public final class TellusRealtimeManager {
 
    private static long queryNtpOffsetMillis(String host) throws Exception {
       byte[] buffer = new byte[48];
-      buffer[0] = 27;
+      buffer[0] = 35;
       long sendTime = System.currentTimeMillis();
+      long sendNanos = System.nanoTime();
+      writeNtpTimestamp(buffer, 40, sendTime);
+      byte[] requestTimestamp = new byte[8];
+      System.arraycopy(buffer, 40, requestTimestamp, 0, requestTimestamp.length);
       InetAddress address = InetAddress.getByName(host);
 
       try (DatagramSocket socket = new DatagramSocket()) {
          socket.setSoTimeout(NTP_TIMEOUT_MS);
-         DatagramPacket packet = new DatagramPacket(buffer, buffer.length, address, NTP_PORT);
+         socket.connect(address, NTP_PORT);
+         DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
          socket.send(packet);
          DatagramPacket response = new DatagramPacket(buffer, buffer.length);
          socket.receive(response);
+         validateNtpResponse(buffer, response.getLength(), requestTimestamp);
       }
 
-      long var13 = System.currentTimeMillis();
-      long var14 = readNtpTimestamp(buffer, 40);
-      long roundTrip = var13 - sendTime;
-      return var14 - (sendTime + roundTrip / 2L);
+      long roundTrip = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - sendNanos);
+      long serverTransmitTime = readNtpTimestamp(buffer, 40);
+      long offset = serverTransmitTime - (sendTime + roundTrip / 2L);
+      if (Math.abs(offset) > MAX_NTP_OFFSET_MS) {
+         throw new IOException("NTP response offset exceeds the 24-hour safety limit");
+      }
+      return offset;
+   }
+
+   private static void validateNtpResponse(byte[] buffer, int length, byte[] requestTimestamp) throws IOException {
+      int leapIndicator = buffer[0] >>> 6 & 3;
+      int version = buffer[0] >>> 3 & 7;
+      int mode = buffer[0] & 7;
+      int stratum = buffer[1] & 255;
+      if (length < 48 || leapIndicator == 3 || version < 3 || mode != 4 || stratum == 0 || stratum > 15) {
+         throw new IOException("Invalid NTP server response");
+      }
+      for (int index = 0; index < requestTimestamp.length; index++) {
+         if (buffer[24 + index] != requestTimestamp[index]) {
+            throw new IOException("NTP response does not match the request timestamp");
+         }
+      }
+   }
+
+   private static void writeNtpTimestamp(byte[] buffer, int offset, long unixMillis) {
+      long seconds = Math.floorDiv(unixMillis, 1000L) + NTP_EPOCH_OFFSET_SECONDS;
+      long fraction = Math.floorMod(unixMillis, 1000L) * 4294967296L / 1000L;
+      for (int index = 3; index >= 0; index--) {
+         buffer[offset + index] = (byte)seconds;
+         seconds >>>= 8;
+         buffer[offset + 4 + index] = (byte)fraction;
+         fraction >>>= 8;
+      }
    }
 
    private static long readNtpTimestamp(byte[] buffer, int offset) {

@@ -12,22 +12,30 @@ import com.yucareux.tellus.world.realtime.SnowGrid;
 import com.yucareux.tellus.world.realtime.TemperatureGrid;
 import com.yucareux.tellus.world.realtime.TellusRealtimeState;
 import java.util.Objects;
+import com.mojang.blaze3d.platform.InputConstants;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
+import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
+import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.Screen;
+import org.lwjgl.glfw.GLFW;
 
 @Environment(EnvType.CLIENT)
 public class TellusClient implements ClientModInitializer {
+   private static final KeyMapping OPEN_MAP_KEY = new KeyMapping(
+      "key.tellus.open_map", InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_M, "key.category.tellus.controls"
+   );
    private int managedTerrainViewUpdateTicks;
 
    @Override
    public void onInitializeClient() {
+      KeyBindingHelper.registerKeyBinding(OPEN_MAP_KEY);
       HudRenderCallback.EVENT.register((graphics, tickDelta) -> ManagedTerrainDownloadOverlay.render(graphics));
       ClientPlayNetworking.registerGlobalReceiver(Objects.requireNonNull(GeoTpOpenMapPayload.TYPE, "GeoTpOpenMapPayload.TYPE"), (payload, player, responseSender) -> {
          Minecraft minecraft = Minecraft.getInstance();
@@ -64,6 +72,12 @@ public class TellusClient implements ClientModInitializer {
          (payload, player, responseSender) -> Minecraft.getInstance().execute(() -> ManagedTerrainClientState.update(payload.status()))
       );
       ClientTickEvents.END_CLIENT_TICK.register(client -> {
+         while (OPEN_MAP_KEY.consumeClick()) {
+            if (client.screen == null && client.player != null && client.getConnection() != null) {
+               client.getConnection().sendCommand("tellus map");
+            }
+         }
+
          if (client.player != null && ++this.managedTerrainViewUpdateTicks >= 40) {
             this.managedTerrainViewUpdateTicks = 0;
             if (ClientPlayNetworking.canSend(ManagedTerrainViewPayload.TYPE)) {

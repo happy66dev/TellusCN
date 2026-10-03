@@ -178,17 +178,33 @@ final class NormalizedElevationCache implements TellusCacheHandle {
       NormalizedElevationTile cached = this.memoryCache.getIfPresent(key);
       if (cached != null) {
          return CompletableFuture.completedFuture(cached);
-      } else {
-         return this.inFlight.computeIfAbsent(
-            key,
-            missing -> CompletableFuture.supplyAsync(() -> this.loadOrBuild(missing, builder), this.builderExecutor).whenComplete((tile, error) -> {
-                  this.inFlight.remove(missing);
-                  if (error == null && tile != null) {
-                     this.memoryCache.put(missing, tile);
-                  }
-               })
-         );
       }
+
+      CompletableFuture<NormalizedElevationTile> scheduled = new CompletableFuture<>();
+      CompletableFuture<NormalizedElevationTile> existing = this.inFlight.putIfAbsent(key, scheduled);
+      if (existing != null) {
+         return existing;
+      }
+
+      try {
+         this.builderExecutor.execute(() -> {
+            try {
+               NormalizedElevationTile tile = this.loadOrBuild(key, builder);
+               if (scheduled.complete(tile)) {
+                  this.memoryCache.put(key, tile);
+               }
+            } catch (Throwable error) {
+               scheduled.completeExceptionally(error);
+            } finally {
+               this.inFlight.remove(key, scheduled);
+            }
+         });
+      } catch (RuntimeException | Error error) {
+         this.inFlight.remove(key, scheduled);
+         scheduled.completeExceptionally(error);
+      }
+
+      return scheduled;
    }
 
    private NormalizedElevationTile loadOrBuild(NormalizedElevationTileKey key, NormalizedElevationCache.TileBuilder builder) {

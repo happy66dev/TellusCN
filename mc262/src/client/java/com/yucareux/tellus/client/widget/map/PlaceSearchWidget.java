@@ -3,12 +3,11 @@ package com.yucareux.tellus.client.widget.map;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import com.yucareux.tellus.Tellus;
 import com.yucareux.tellus.world.data.source.Geocoder;
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -163,27 +162,35 @@ public class PlaceSearchWidget extends EditBox {
          this.cancelPendingSuggest();
          this.clearSuggestions();
          long requestId = ++this.suggestionRequestId;
-         CompletableFuture.runAsync(() -> {
-            try {
-               double[] coordinate = this.geocoder.get(text);
-               if (coordinate != null) {
+         try {
+            this.executor.execute(() -> {
+               try {
+                  double[] coordinate = this.geocoder.get(text);
                   Minecraft.getInstance().execute(() -> {
                      if (this.isActiveRequest(requestId)) {
-                        this.searchHandler.handle(coordinate[0], coordinate[1]);
-                        this.state = PlaceSearchWidget.State.FOUND;
+                        if (coordinate == null || coordinate.length < 2 || !isValidCoordinate(coordinate[0], coordinate[1])) {
+                           this.state = PlaceSearchWidget.State.NOT_FOUND;
+                        } else {
+                           this.searchHandler.handle(coordinate[0], coordinate[1]);
+                           this.state = PlaceSearchWidget.State.FOUND;
+                        }
                      }
                   });
-               } else {
+               } catch (Exception error) {
+                  Tellus.LOGGER.error("Failed to find searched place {}", text, error);
                   Minecraft.getInstance().execute(() -> {
                      if (this.isActiveRequest(requestId)) {
                         this.state = PlaceSearchWidget.State.NOT_FOUND;
                      }
                   });
                }
-            } catch (IOException var3) {
-               Tellus.LOGGER.error("Failed to find searched place {}", text, var3);
+            });
+         } catch (RejectedExecutionException error) {
+            if (!this.closed) {
+               Tellus.LOGGER.error("Failed to schedule place search {}", text, error);
+               this.state = PlaceSearchWidget.State.NOT_FOUND;
             }
-         }, this.executor);
+         }
       }
    }
 
@@ -195,10 +202,17 @@ public class PlaceSearchWidget extends EditBox {
       this.cancelPendingSuggest();
       this.clearSuggestions();
       long requestId = ++this.suggestionRequestId;
-      this.pendingSuggestTask = this.executor.schedule(() -> {
-         Geocoder.Suggestion[] result = this.fetchSuggestions(text);
-         Minecraft.getInstance().execute(() -> this.applySuggestions(requestId, text, result));
-      }, SUGGESTION_DEBOUNCE_MS, TimeUnit.MILLISECONDS);
+      try {
+         this.pendingSuggestTask = this.executor.schedule(() -> {
+            Geocoder.Suggestion[] result = this.fetchSuggestions(text);
+            Minecraft.getInstance().execute(() -> this.applySuggestions(requestId, text, result));
+         }, SUGGESTION_DEBOUNCE_MS, TimeUnit.MILLISECONDS);
+      } catch (RejectedExecutionException error) {
+         if (!this.closed) {
+            Tellus.LOGGER.error("Failed to schedule geocoder suggestions", error);
+            this.state = PlaceSearchWidget.State.NOT_FOUND;
+         }
+      }
    }
 
    private void applySuggestions(long requestId, String text, Geocoder.Suggestion[] result) {
@@ -207,7 +221,9 @@ public class PlaceSearchWidget extends EditBox {
             this.suggestions.clear();
             if (result != null) {
                for (int i = 0; i < result.length && this.suggestions.size() < SUGGESTION_COUNT; i++) {
-                  this.suggestions.add(result[i]);
+                  if (isValidSuggestion(result[i])) {
+                     this.suggestions.add(result[i]);
+                  }
                }
             }
 
@@ -235,6 +251,10 @@ public class PlaceSearchWidget extends EditBox {
       if (this.closed) {
          return;
       }
+      if (!isValidSuggestion(suggestion)) {
+         this.state = PlaceSearchWidget.State.NOT_FOUND;
+         return;
+      }
 
       this.pause = true;
       this.cancelPendingSuggest();
@@ -244,6 +264,22 @@ public class PlaceSearchWidget extends EditBox {
       this.setValue(displayName);
       this.state = PlaceSearchWidget.State.FOUND;
       this.searchHandler.handle(suggestion.latitude(), suggestion.longitude());
+   }
+
+   private static boolean isValidSuggestion(Geocoder.Suggestion suggestion) {
+      return suggestion != null
+         && suggestion.displayName() != null
+         && !suggestion.displayName().isBlank()
+         && isValidCoordinate(suggestion.latitude(), suggestion.longitude());
+   }
+
+   private static boolean isValidCoordinate(double latitude, double longitude) {
+      return Double.isFinite(latitude)
+         && Double.isFinite(longitude)
+         && latitude >= -90.0
+         && latitude <= 90.0
+         && longitude >= -180.0
+         && longitude <= 180.0;
    }
 
    private boolean isActiveRequest(long requestId) {

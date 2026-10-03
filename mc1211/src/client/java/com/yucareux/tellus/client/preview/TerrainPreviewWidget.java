@@ -4,7 +4,6 @@ import com.yucareux.tellus.world.data.elevation.TellusElevationSource;
 import com.yucareux.tellus.worldgen.EarthGeneratorSettings;
 import java.util.Locale;
 import java.util.Objects;
-import java.util.function.Function;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.minecraft.client.Minecraft;
@@ -39,7 +38,6 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
    private static final int INFO_PANEL_PADDING = 8;
    private static final int INFO_TITLE_SPACING = 14;
    private static final int INFO_LINE_SPACING = 11;
-   private static final int INFO_SECTION_SPACING = 8;
    private static final int INFO_PANEL_BG = -1609957376;
    private static final int INFO_PANEL_BORDER = -12961222;
    private static final int INFO_TEXT = -1710619;
@@ -61,10 +59,8 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
    private final boolean ownsPreview;
    private final Button modeButton;
    private final Button infoButton;
-   private final Button autoAdjustButton;
    private final Button fullscreenButton;
-   
-   private Function<TerrainPreview.PreviewInfo, EarthGeneratorSettings> autoAdjustAction;
+
    private Runnable fullscreenAction;
    private boolean dragging;
    private boolean infoPanelVisible;
@@ -89,14 +85,11 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
       this.modeButton = Button.builder(this.renderMode.buttonLabel(), button -> this.toggleRenderMode())
          .bounds(0, 0, MODE_BUTTON_WIDTH, MODE_BUTTON_HEIGHT)
          .build();
-      this.modeButton.setTooltip(Tooltip.create(Component.literal("Switch between terrain-only 3D and 3D with preview trees/roads")));
+      this.modeButton.setTooltip(Tooltip.create(Component.translatable("tellus.preview.mode.tooltip")));
       this.infoButton = Button.builder(Objects.requireNonNull(INFO_LABEL, "infoLabel"), button -> this.toggleInfoPanel())
          .bounds(0, 0, INFO_BUTTON_SIZE, INFO_BUTTON_SIZE)
          .build();
       this.infoButton.setTooltip(Tooltip.create(Component.translatable("tellus.preview.info.button.tooltip")));
-      this.autoAdjustButton = Button.builder(Component.translatable("tellus.preview.info.auto_adjust"), button -> this.runAutoAdjust())
-         .bounds(0, 0, 110, 20)
-         .build();
       this.fullscreenButton = Button.builder(Objects.requireNonNull(FULLSCREEN_LABEL, "fullscreenLabel"), button -> {
          if (this.fullscreenAction != null) {
             this.fullscreenAction.run();
@@ -112,10 +105,6 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
    public void setFullscreenAction(Runnable action) {
       this.fullscreenAction = action;
       this.fullscreenButton.active = action != null;
-   }
-
-   public void setAutoAdjustAction(Function<TerrainPreview.PreviewInfo, EarthGeneratorSettings> action) {
-      this.autoAdjustAction = action;
    }
 
    public TerrainPreview getPreview() {
@@ -170,10 +159,6 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
          this.infoButton.mouseClicked(mouseX, mouseY, button);
          this.lastInteractionTime = System.currentTimeMillis();
          return true;
-      } else if (this.infoPanelVisible && this.autoAdjustButton.isMouseOver(mouseX, mouseY)) {
-         this.autoAdjustButton.mouseClicked(mouseX, mouseY, button);
-         this.lastInteractionTime = System.currentTimeMillis();
-         return true;
       } else if (this.fullscreenAction != null && this.fullscreenButton.isMouseOver(mouseX, mouseY)) {
          this.fullscreenButton.mouseClicked(mouseX, mouseY, button);
          return true;
@@ -197,9 +182,6 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
       } else if (this.infoButton.isMouseOver(mouseX, mouseY)) {
          this.infoButton.mouseClicked(mouseX, mouseY, 0);
          this.lastInteractionTime = System.currentTimeMillis();
-      } else if (this.infoPanelVisible && this.autoAdjustButton.isMouseOver(mouseX, mouseY)) {
-         this.autoAdjustButton.mouseClicked(mouseX, mouseY, 0);
-         this.lastInteractionTime = System.currentTimeMillis();
       } else if (this.fullscreenAction != null && this.fullscreenButton.isMouseOver(mouseX, mouseY)) {
          this.fullscreenButton.mouseClicked(mouseX, mouseY, 0);
       } else if (this.infoPanelVisible && this.isMouseOverInfoPanel(mouseX, mouseY)) {
@@ -221,7 +203,6 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
    public void onRelease(double mouseX, double mouseY) {
       this.modeButton.mouseReleased(mouseX, mouseY, 0);
       this.infoButton.mouseReleased(mouseX, mouseY, 0);
-      this.autoAdjustButton.mouseReleased(mouseX, mouseY, 0);
       if (this.fullscreenAction != null) {
          this.fullscreenButton.mouseReleased(mouseX, mouseY, 0);
       }
@@ -266,15 +247,15 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
       if (this.preview.isLoading()) {
          TerrainPreview.PreviewStatus status = this.preview.getStatus();
          if (status.stage() != TerrainPreview.PreviewStage.COMPLETE) {
-            String label = status.activity();
-            if (label == null) {
-               label = Objects.requireNonNull(switch (status.stage()) {
-                  case DOWNLOADING -> "Downloading data";
-                  case PROCESSING_OSM -> "Processing OSM data";
-                  case LOADING -> "Processing data";
-                  case COMPLETE -> "Processing data";
-               }, "loadingLabel");
+            String activityKey = status.activity();
+            if (activityKey == null) {
+               activityKey = switch (status.stage()) {
+                  case DOWNLOADING -> "tellus.preview.loading.downloading";
+                  case PROCESSING_OSM -> "tellus.preview.loading.processing_osm";
+                  case LOADING, COMPLETE -> "tellus.preview.loading.processing";
+               };
             }
+            String label = Component.translatable(activityKey).getString();
             float displayedProgress = displayedProgress(status);
             float percentValue = status.stage() == TerrainPreview.PreviewStage.COMPLETE ? 100.0F : Mth.clamp(displayedProgress * 100.0F, 0.0F, 99.9F);
             String percentText = Objects.requireNonNull(
@@ -340,18 +321,6 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
       this.dragging = false;
    }
 
-   private void runAutoAdjust() {
-      if (this.autoAdjustAction != null) {
-         TerrainPreview.PreviewInfo info = this.preview.getInfo();
-         if (info != null) {
-            EarthGeneratorSettings settings = this.autoAdjustAction.apply(info);
-            if (settings != null) {
-               this.preview.requestRebuild(settings);
-            }
-         }
-      }
-   }
-
    private void updateModeButtonLabel() {
       this.modeButton.setMessage(this.renderMode.buttonLabel());
    }
@@ -391,7 +360,6 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
       if (info == null) {
          graphics.drawString(font, Component.translatable("tellus.preview.info.title"), textX, textY, INFO_TEXT, false);
          graphics.drawString(font, Component.translatable("tellus.preview.info.loading"), textX, textY + INFO_TITLE_SPACING, INFO_SUBTLE, false);
-         this.autoAdjustButton.active = false;
       } else {
          graphics.drawString(font, Component.translatable("tellus.preview.info.title"), textX, textY, INFO_TEXT, false);
          textY += INFO_TITLE_SPACING;
@@ -431,15 +399,7 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
             info.maxWithinLimits() ? INFO_GOOD : INFO_BAD,
             layout.contentWidth()
          );
-         textY += INFO_SECTION_SPACING;
-         this.autoAdjustButton.active = this.autoAdjustAction != null;
       }
-
-      this.autoAdjustButton.setX(layout.buttonX());
-      this.autoAdjustButton.setY(layout.buttonY());
-      this.autoAdjustButton.setWidth(layout.buttonWidth());
-      this.autoAdjustButton.setHeight(20);
-      this.autoAdjustButton.render(graphics, mouseX, mouseY, delta);
    }
 
    private void renderFullscreenButton(GuiGraphics graphics, int mouseX, int mouseY, float delta) {
@@ -462,11 +422,9 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
       TerrainPreview.PreviewInfo info = this.preview.getInfo();
       int textLines = info == null ? 2 : 6 + (info.hasBlendedProviders() ? 1 : 0);
       int textHeight = INFO_TITLE_SPACING + (textLines - 1) * INFO_LINE_SPACING;
-      int height = INFO_PANEL_PADDING + textHeight + INFO_SECTION_SPACING + 20 + INFO_PANEL_PADDING;
-      int buttonWidth = 110;
+      int height = INFO_PANEL_PADDING + textHeight + INFO_PANEL_PADDING;
       int y = infoButtonY;
-      int buttonY = y + height - 20 - INFO_PANEL_PADDING;
-      return new TerrainPreviewWidget.InfoPanelLayout(x, y, width, height, x + width - INFO_PANEL_PADDING - buttonWidth, buttonY, buttonWidth);
+      return new TerrainPreviewWidget.InfoPanelLayout(x, y, width, height);
    }
 
    private boolean isMouseOverInfoPanel(double mouseX, double mouseY) {
@@ -575,7 +533,7 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
    }
 
    @Environment(EnvType.CLIENT)
-   private record InfoPanelLayout(int x, int y, int width, int height, int buttonX, int buttonY, int buttonWidth) {
+   private record InfoPanelLayout(int x, int y, int width, int height) {
       private int right() {
          return this.x + this.width;
       }

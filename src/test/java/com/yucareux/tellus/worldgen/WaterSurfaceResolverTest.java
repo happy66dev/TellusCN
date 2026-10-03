@@ -12,6 +12,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class WaterSurfaceResolverTest {
    @Test
+   void transitionsConnectedWaterFromTheResolvedLocalOceanSurface() {
+      assertEquals(36, WaterSurfaceResolver.transitionedWaterSurface(50, 36, 0.0));
+      assertEquals(43, WaterSurfaceResolver.transitionedWaterSurface(50, 36, 0.5));
+      assertEquals(50, WaterSurfaceResolver.transitionedWaterSurface(50, 36, 1.0));
+   }
+
+   @Test
    void raisesDeepInlandShoreFloorNearBank() {
       assertEquals(79, WaterSurfaceResolver.rampedInlandShoreFloor(42, 80, 10));
       assertEquals(77, WaterSurfaceResolver.rampedInlandShoreFloor(42, 80, 20));
@@ -65,15 +72,6 @@ class WaterSurfaceResolverTest {
    }
 
    @Test
-   void quantizesRiverSurfaceIntoLongitudinalSteps() {
-      assertEquals(80, WaterSurfaceResolver.steppedRiverSurfaceAt(0.0, 80, 85, 1));
-      assertEquals(82, WaterSurfaceResolver.steppedRiverSurfaceAt(0.49, 80, 85, 1));
-      assertEquals(85, WaterSurfaceResolver.steppedRiverSurfaceAt(1.0, 80, 85, 1));
-      assertEquals(82, WaterSurfaceResolver.steppedRiverSurfaceAt(0.5, 80, 86, 2));
-      assertEquals(80, WaterSurfaceResolver.steppedRiverSurfaceAt(0.5, 80, 80, 1));
-   }
-
-   @Test
    void keepsBroadLineConnectedWaterOutOfRiverMode() {
       assertFalse(WaterSurfaceResolver.shouldClassifyInlandComponentAsRiver(32, 20, 1.6, 24, 12, 420, 12, true, false, false));
       assertFalse(WaterSurfaceResolver.shouldClassifyInlandComponentAsRiver(64, 20, 3.2, 24, 12, 512, 0, false, true, false));
@@ -114,13 +112,6 @@ class WaterSurfaceResolverTest {
       assertFalse(WaterSurfaceResolver.shouldRejectRiverWaterCell(90, 85, 4));
       assertFalse(WaterSurfaceResolver.shouldRejectRiverWaterCell(85, 85, 4));
       assertTrue(WaterSurfaceResolver.shouldRejectRiverWaterCell(83, 85, 4));
-   }
-
-   @Test
-   void riverSurfaceAdjustmentOnlyCapsAboveTerrain() {
-      assertEquals(85, WaterSurfaceResolver.adjustRiverWaterSurfaceForTerrain(85, 90, true, 4));
-      assertEquals(85, WaterSurfaceResolver.adjustRiverWaterSurfaceForTerrain(85, 90, false, 4));
-      assertEquals(90, WaterSurfaceResolver.adjustRiverWaterSurfaceForTerrain(92, 90, true, 4));
    }
 
    @Test
@@ -178,26 +169,56 @@ class WaterSurfaceResolverTest {
    }
 
    @Test
-   void directLineRiverWaterSitsOneBlockInsideTerrain() {
+   void treatsExplicitFlowingPolygonWaterAsRiverWithoutRequiringAThinShape() {
+      assertTrue(WaterSurfaceResolver.isFlowDominatedWaterComponent(100, 100));
+      assertTrue(WaterSurfaceResolver.isFlowDominatedWaterComponent(100, 50));
+      assertFalse(WaterSurfaceResolver.isFlowDominatedWaterComponent(100, 49));
+   }
+
+   @Test
+   void appliesTerrainFollowingModeOnlyToComponentsMadeEntirelyFromLines() {
+      assertTrue(WaterSurfaceResolver.isLineOnlyWaterComponent(20, 20, 20));
+      assertFalse(WaterSurfaceResolver.isLineOnlyWaterComponent(20, 19, 20));
+      assertFalse(WaterSurfaceResolver.isLineOnlyWaterComponent(20, 20, 19));
       assertEquals(90, WaterSurfaceResolver.directLineRiverWaterSurface(90));
-      assertEquals(Integer.MAX_VALUE, WaterSurfaceResolver.directLineRiverWaterSurface(Integer.MAX_VALUE));
       assertEquals(89, WaterSurfaceResolver.directLineRiverTerrainSurface(90));
    }
 
    @Test
-   void narrowLineWaterCellExcludesWideWaterFootprints() {
-      boolean[] waterMask = new boolean[9];
-      boolean[] lineWaterMask = new boolean[9];
-      waterMask[1] = true;
-      waterMask[4] = true;
-      waterMask[7] = true;
-      lineWaterMask[4] = true;
+   void repairsShortFlowingWaterGapsWithoutJoiningDistantWater() {
+      int side = 9;
+      boolean[] water = new boolean[side * side];
+      boolean[] ocean = new boolean[side * side];
+      boolean[] line = new boolean[side * side];
+      boolean[] flowing = new boolean[side * side];
+      int left = 4 * side + 1;
+      int right = 4 * side + 5;
+      water[left] = water[right] = true;
+      line[left] = line[right] = true;
+      flowing[left] = flowing[right] = true;
 
-      assertTrue(WaterSurfaceResolver.isNarrowLineWaterCell(4, 3, waterMask, lineWaterMask));
+      assertEquals(3, WaterSurfaceResolver.repairFlowingWaterGaps(water, ocean, line, flowing, side, 3));
+      for (int x = 1; x <= 5; x++) {
+         int index = 4 * side + x;
+         assertTrue(water[index]);
+         assertTrue(flowing[index]);
+         assertTrue(line[index]);
+      }
 
-      waterMask[3] = true;
+      int distant = 4 * side + 8;
+      water[distant] = true;
+      flowing[distant] = true;
+      assertEquals(0, WaterSurfaceResolver.repairFlowingWaterGaps(water, ocean, line, flowing, side, 1));
+      assertFalse(water[4 * side + 7]);
+   }
 
-      assertFalse(WaterSurfaceResolver.isNarrowLineWaterCell(4, 3, waterMask, lineWaterMask));
+   @Test
+   void limitsNaturalizedInlandBanksToOneBlockOfRisePerBlock() {
+      assertEquals(81, WaterSurfaceResolver.naturalizedInlandBankSurface(90, 80, 10, 5, true));
+      assertEquals(82, WaterSurfaceResolver.naturalizedInlandBankSurface(90, 80, 20, 5, true));
+      assertEquals(85, WaterSurfaceResolver.naturalizedInlandBankSurface(90, 80, 50, 5, true));
+      assertEquals(84, WaterSurfaceResolver.naturalizedInlandBankSurface(90, 80, 20, 5, false));
+      assertEquals(79, WaterSurfaceResolver.naturalizedInlandBankSurface(79, 80, 10, 5, true));
    }
 
 }

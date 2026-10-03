@@ -30,8 +30,17 @@ class PmTilesRangeReaderTest {
    @Test
    void cacheOnlyGenerationRejectsNetworkRanges() {
       PmTilesRangeReader reader = new PmTilesRangeReader("https://example.test/never-open.pmtiles", 1, 1, 1);
-      try (ManagedTerrainNetworkPolicy.Scope ignored = ManagedTerrainNetworkPolicy.cacheOnly()) {
+      ManagedTerrainNetworkPolicy.Scope networkScope = ManagedTerrainNetworkPolicy.cacheOnly();
+      try (networkScope) {
          assertThrows(IOException.class, reader::header);
       }
+   }
+
+   @Test
+   void rejectsNonHttpArchiveUrls() {
+      assertThrows(
+         IllegalArgumentException.class,
+         () -> new PmTilesRangeReader("file:///tmp/archive.pmtiles", 1000, 1000, 1)
+      );
    }
 }

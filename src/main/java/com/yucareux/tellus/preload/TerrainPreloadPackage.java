@@ -199,20 +199,25 @@ public final class TerrainPreloadPackage {
             throw new IOException("Terrain preload grid step must be positive");
          }
          int total = checkedSampleCount(gridWidth, gridDepth);
-         TerrainPreloadArea area = new TerrainPreloadArea(
-            centerLatitude,
-            centerLongitude,
-            chunksPerSide,
-            worldScale,
-            minChunkX,
-            minChunkZ,
-            maxChunkX,
-            maxChunkZ,
-            northLatitude,
-            southLatitude,
-            westLongitude,
-            eastLongitude
-         );
+         TerrainPreloadArea area;
+         try {
+            area = new TerrainPreloadArea(
+               centerLatitude,
+               centerLongitude,
+               chunksPerSide,
+               worldScale,
+               minChunkX,
+               minChunkZ,
+               maxChunkX,
+               maxChunkZ,
+               northLatitude,
+               southLatitude,
+               westLongitude,
+               eastLongitude
+            );
+         } catch (IllegalArgumentException error) {
+            throw new IOException("Invalid terrain preload area: " + error.getMessage(), error);
+         }
          int[] terrainHeights = new int[total];
          byte[] coverClasses = new byte[total];
          byte[] landMaskClasses = new byte[total];
@@ -222,6 +227,10 @@ public final class TerrainPreloadPackage {
             coverClasses[index] = input.readByte();
             landMaskClasses[index] = input.readByte();
             elevationFlags[index] = input.readByte();
+         }
+
+         if (input.read() != -1) {
+            throw new IOException("Trailing data in terrain preload package");
          }
 
          return new TerrainPreloadPackage(

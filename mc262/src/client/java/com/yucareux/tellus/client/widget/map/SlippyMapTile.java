@@ -17,6 +17,7 @@ public class SlippyMapTile {
    private final Object lock = new Object();
    private float transition;
    private volatile NativeImage image;
+   private volatile boolean deleted;
    private Identifier location;
    private DynamicTexture texture;
 
@@ -31,7 +32,12 @@ public class SlippyMapTile {
    }
 
    public void supplyImage(NativeImage image) {
+      Objects.requireNonNull(image, "image");
       synchronized (this.lock) {
+         if (this.deleted) {
+            image.close();
+            return;
+         }
          if (this.image != null) {
             this.image.close();
          }
@@ -41,11 +47,15 @@ public class SlippyMapTile {
    }
 
    public Identifier getLocation() {
-      if (this.location == null && this.image != null) {
-         this.location = this.uploadImage();
+      synchronized (this.lock) {
+         if (this.deleted) {
+            return null;
+         }
+         if (this.location == null && this.image != null) {
+            this.location = this.uploadImage();
+         }
+         return this.location;
       }
-
-      return this.location;
    }
 
    public float getTransition() {
@@ -53,20 +63,22 @@ public class SlippyMapTile {
    }
 
    public void delete() {
-      if (this.location != null) {
-         Minecraft.getInstance().getTextureManager().release(Objects.requireNonNull(this.location, "tileLocation"));
-         this.location = null;
-      }
-
-      if (this.texture != null) {
-         this.texture.close();
-         this.texture = null;
-      }
-
       synchronized (this.lock) {
+         if (this.deleted) {
+            return;
+         }
+         this.deleted = true;
          if (this.image != null) {
             this.image.close();
             this.image = null;
+         }
+         if (this.location != null) {
+            Minecraft.getInstance().getTextureManager().release(Objects.requireNonNull(this.location, "tileLocation"));
+            this.location = null;
+            this.texture = null;
+         } else if (this.texture != null) {
+            this.texture.close();
+            this.texture = null;
          }
       }
    }

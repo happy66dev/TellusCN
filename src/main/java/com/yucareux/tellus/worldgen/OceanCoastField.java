@@ -18,7 +18,16 @@ public final class OceanCoastField {
    private static final int DIAGONAL_COST = 14;
    private static final int[] DX = new int[]{1, 0, -1, 0, 1, 1, -1, -1};
    private static final int[] DZ = new int[]{0, 1, 0, -1, 1, -1, 1, -1};
-   private static final int[] COST = new int[]{10, 10, 10, 10, 14, 14, 14, 14};
+   private static final int[] COST = new int[]{
+      CARDINAL_COST,
+      CARDINAL_COST,
+      CARDINAL_COST,
+      CARDINAL_COST,
+      DIAGONAL_COST,
+      DIAGONAL_COST,
+      DIAGONAL_COST,
+      DIAGONAL_COST
+   };
    private static final int CACHE_TILES = intProperty("tellus.oceanCoastCacheTiles", 32, 4, 256);
    private static final ThreadLocal<Scratch> SCRATCH = ThreadLocal.withInitial(Scratch::new);
 
@@ -119,7 +128,8 @@ public final class OceanCoastField {
       Arrays.fill(correctedSeed, 0, area, false);
       Arrays.fill(validDepth, 0, area, false);
       Arrays.fill(rawDepth, 0, area, 0);
-      int triggerCost = Math.min(maxCost, OceanFloorProfile.TRIGGER_SCAN_BLOCKS * CARDINAL_COST);
+      int triggerBlocks = OceanFloorProfile.scaleBlockDistance(OceanFloorProfile.TRIGGER_SCAN_BLOCKS, this.worldScale);
+      int triggerCost = Math.min(maxCost, triggerBlocks * CARDINAL_COST);
 
       if (this.rawDepthSampler != null && triggerCost >= 0) {
          for (int z = 1; z < size - 1; z++) {
@@ -210,7 +220,8 @@ public final class OceanCoastField {
          return;
       }
 
-      int dilationCost = OceanFloorProfile.CORRECTION_DILATION_BLOCKS * CARDINAL_COST;
+      int dilationBlocks = OceanFloorProfile.scaleBlockDistance(OceanFloorProfile.CORRECTION_DILATION_BLOCKS, this.worldScale);
+      int dilationCost = dilationBlocks * CARDINAL_COST;
       propagate(null, false, size, dilationCost, dilationDistance, null, scratch.heap);
       for (int index = 0; index < area; index++) {
          if (coastDistance[index] == 0 && nearestSeed[index] == index && dilationDistance[index] <= dilationCost) {

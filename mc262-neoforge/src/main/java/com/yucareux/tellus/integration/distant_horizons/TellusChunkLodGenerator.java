@@ -42,6 +42,9 @@ public final class TellusChunkLodGenerator extends AbstractDhApiChunkWorldGenera
    }
 
    public byte getGenerationAvailability(int chunkPosMinX, int chunkPosMinZ, int widthChunks, byte targetDataDetail) {
+      if (!DistantHorizonsIntegration.isDistantGenerationReady()) {
+         return ManagedTerrainAvailability.WAIT;
+      }
       return this.managedDownloadsActive()
          ? ManagedTerrainAvailability.availability(this.managedTerrainKey, chunkPosMinX, chunkPosMinZ, widthChunks)
          : ManagedTerrainAvailability.READY;
@@ -56,7 +59,11 @@ public final class TellusChunkLodGenerator extends AbstractDhApiChunkWorldGenera
       boolean success = false;
 
       try {
-         try (ManagedTerrainNetworkPolicy.Scope ignored = this.managedDownloadsActive() ? ManagedTerrainNetworkPolicy.cacheOnly() : null) {
+         DistantHorizonsIntegration.awaitDistantGenerationReady();
+         ManagedTerrainNetworkPolicy.Scope networkScope = this.managedDownloadsActive()
+            ? ManagedTerrainNetworkPolicy.cacheOnly()
+            : null;
+         try (networkScope) {
             LevelChunk chunk = this.level.getChunk(chunkPosX, chunkPosZ);
             success = true;
             return new Object[]{chunk, this.level};

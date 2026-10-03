@@ -79,7 +79,7 @@ public class EarthTeleportScreen extends Screen {
          if (marker != null && this.minecraft != null) {
             if (!ClientPlayNetworking.canSend(GeoTpTeleportPayload.TYPE)) {
                if (this.minecraft.player != null) {
-                  this.minecraft.player.sendOverlayMessage(Component.literal("Tellus: Server does not accept GeoTP requests."));
+                  this.minecraft.player.sendOverlayMessage(Component.translatable("tellus.geotp.server_rejected"));
                }
 
                this.closeScreen();

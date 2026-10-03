@@ -26,6 +26,10 @@ class EarthGeneratorSettingsCodecTest {
       assertTrue(EarthGeneratorSettings.DEFAULT.demSelection().terrainTilesEnabled());
       assertEquals(List.of("terrarium"), EarthGeneratorSettings.DEFAULT.demSelection().enabledProviderIds());
       assertFalse(EarthGeneratorSettings.DEFAULT.experimentalIncreaseHeight());
+      assertFalse(EarthGeneratorSettings.DEFAULT.cavesReachSurface());
+      assertEquals(256, EarthGeneratorSettings.DEFAULT.undergroundDepth());
+      assertTrue(EarthGeneratorSettings.DEFAULT.usesTerrainShell());
+      assertFalse(EarthGeneratorSettings.DEFAULT.suppressesUndergroundGenerationForTerrainShell());
       assertFalse(EarthGeneratorSettings.DEFAULT.tellusManagedTerrainDownloads());
       assertFalse(EarthGeneratorSettings.DEFAULT.showTerrainDownloadOverlay());
       assertFalse(EarthGeneratorSettings.DEFAULT.addStrongholds());
@@ -72,6 +76,38 @@ class EarthGeneratorSettingsCodecTest {
    }
 
    @Test
+   void experimentalHeightPreservesSelectedWorldScale() {
+      JsonElement input = JsonParser.parseString(
+         """
+         {
+           "world_scale": 30.0,
+           "experimental_increase_height": true,
+           "experimental_height_coordinate_profile": "%s"
+         }
+         """.formatted(HighYPackedCoordinateProfile.PROFILE_ID)
+      );
+
+      EarthGeneratorSettings decoded = requireSuccess(EarthGeneratorSettings.CODEC.parse(JsonOps.INSTANCE, input));
+
+      assertTrue(decoded.experimentalIncreaseHeight());
+      assertEquals(30.0, decoded.worldScale());
+      assertEquals(decoded.worldScale(), decoded.effectiveVerticalWorldScale());
+   }
+
+   @Test
+   void acceptsWorldScaleThroughOneThousandAndClampsLargerValues() {
+      EarthGeneratorSettings maximum = requireSuccess(
+         EarthGeneratorSettings.CODEC.parse(JsonOps.INSTANCE, JsonParser.parseString("{\"world_scale\":1000.0}"))
+      );
+      EarthGeneratorSettings oversized = requireSuccess(
+         EarthGeneratorSettings.CODEC.parse(JsonOps.INSTANCE, JsonParser.parseString("{\"world_scale\":1001.0}"))
+      );
+
+      assertEquals(EarthGeneratorSettings.MAX_WORLD_SCALE, maximum.worldScale());
+      assertEquals(EarthGeneratorSettings.MAX_WORLD_SCALE, oversized.worldScale());
+   }
+
+   @Test
    void legacyProviderIdsNormalizeToMapterhorn() {
       EarthGeneratorSettings.DemSelection automatic = EarthGeneratorSettings.DemSelection.automaticSelection();
       EarthGeneratorSettings.DemSelection manual = EarthGeneratorSettings.DemSelection.manual(0);
@@ -109,6 +145,8 @@ class EarthGeneratorSettingsCodecTest {
            "ocean_shoreline_blend": 9,
            "shoreline_blend_cliff_limit": false,
            "cave_generation": true,
+           "caves_reach_surface": true,
+           "underground_depth": 192,
            "ore_distribution": true,
            "lava_pools": true,
            "add_strongholds": false,
@@ -149,7 +187,8 @@ class EarthGeneratorSettingsCodecTest {
            "tellus_managed_terrain_downloads": false,
            "show_terrain_download_overlay": false,
            "random_biome_density": 0.25,
-           "random_biome_seed": 987654321
+           "random_biome_seed": 987654321,
+           "random_biome_ids": ["desert", "warm_ocean", "lush_caves"]
          }
          """
       );
@@ -161,6 +200,8 @@ class EarthGeneratorSettingsCodecTest {
       assertEquals(decoded, reparsed);
       assertFalse(encoded.getAsJsonObject().has("sea_level"));
       assertTrue(decoded.thinShellTerrain());
+      assertTrue(decoded.cavesReachSurface());
+      assertEquals(192, decoded.undergroundDepth());
       assertTrue(decoded.climateBasedBuiltUpTerrain());
       assertTrue(decoded.randomBiomes());
       assertFalse(decoded.tellusManagedTerrainDownloads());
@@ -168,12 +209,16 @@ class EarthGeneratorSettingsCodecTest {
       assertFalse(decoded.experimentalIncreaseHeight());
       assertEquals(0.25, decoded.randomBiomeDensity());
       assertEquals(987654321L, decoded.randomBiomeSeed());
+      assertEquals(List.of("desert", "warm_ocean", "lush_caves"), decoded.randomBiomeIds());
       assertTrue(reparsed.thinShellTerrain());
+      assertTrue(reparsed.cavesReachSurface());
+      assertEquals(192, reparsed.undergroundDepth());
       assertTrue(reparsed.climateBasedBuiltUpTerrain());
       assertTrue(reparsed.randomBiomes());
       assertFalse(reparsed.experimentalIncreaseHeight());
       assertEquals(0.25, reparsed.randomBiomeDensity());
       assertEquals(987654321L, reparsed.randomBiomeSeed());
+      assertEquals(decoded.randomBiomeIds(), reparsed.randomBiomeIds());
       assertFalse(decoded.demSelection().automatic());
       assertTrue(decoded.demSelection().terrainTilesEnabled());
       assertEquals(List.of("terrarium"), decoded.demSelection().enabledProviderIds());
@@ -186,12 +231,15 @@ class EarthGeneratorSettingsCodecTest {
       assertFalse(encodedObject.has("dem_provider"));
       assertEquals("detailed", encodedObject.get("distant_horizons_render_mode").getAsString());
       assertTrue(encodedObject.get("thin_shell_terrain").getAsBoolean());
+      assertTrue(encodedObject.get("caves_reach_surface").getAsBoolean());
+      assertEquals(192, encodedObject.get("underground_depth").getAsInt());
       assertTrue(encodedObject.get("climate_based_built_up_terrain").getAsBoolean());
       assertTrue(encodedObject.get("random_biomes").getAsBoolean());
       assertFalse(encodedObject.get("tellus_managed_terrain_downloads").getAsBoolean());
       assertFalse(encodedObject.get("show_terrain_download_overlay").getAsBoolean());
       assertEquals(0.25, encodedObject.get("random_biome_density").getAsDouble());
       assertEquals(987654321L, encodedObject.get("random_biome_seed").getAsLong());
+      assertEquals(3, encodedObject.getAsJsonArray("random_biome_ids").size());
       if (encodedObject.has("experimental_increase_height")) {
          assertFalse(encodedObject.get("experimental_increase_height").getAsBoolean());
       }
@@ -219,10 +267,12 @@ class EarthGeneratorSettingsCodecTest {
       assertFalse(decoded.climateBasedBuiltUpTerrain());
       assertFalse(decoded.randomBiomes());
       assertFalse(decoded.experimentalIncreaseHeight());
+      assertFalse(decoded.cavesReachSurface());
       assertFalse(decoded.tellusManagedTerrainDownloads());
       assertFalse(decoded.showTerrainDownloadOverlay());
       assertEquals(EarthGeneratorSettings.DEFAULT_RANDOM_BIOME_DENSITY, decoded.randomBiomeDensity());
       assertEquals(EarthGeneratorSettings.DEFAULT_RANDOM_BIOME_SEED, decoded.randomBiomeSeed());
+      assertEquals(EarthGeneratorSettings.DEFAULT.randomBiomeIds(), decoded.randomBiomeIds());
       assertTrue(decoded.voxyChunkPregenEnabled());
       assertEquals(192, decoded.voxyChunkPregenMaxRadius());
       assertEquals(10, decoded.voxyChunkPregenChunksPerTick());

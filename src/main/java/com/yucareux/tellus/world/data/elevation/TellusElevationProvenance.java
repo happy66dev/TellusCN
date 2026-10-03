@@ -12,12 +12,11 @@ record TellusElevationProvenance(
    byte[] blendedFlags,
    byte[] mapterhornAvailableFlags
 ) {
-   TellusElevationProvenance {
-      if (width <= 0 || height <= 0) {
-         throw new IllegalArgumentException("Invalid provenance dimensions");
-      }
+   private static final int MAX_DIMENSION = 8192;
+   private static final int MAX_SAMPLE_COUNT = 16_000_000;
 
-      int sampleCount = width * height;
+   TellusElevationProvenance {
+      int sampleCount = checkedSampleCount(width, height);
       Objects.requireNonNull(primaryProviders, "primaryProviders");
       Objects.requireNonNull(blendedFlags, "blendedFlags");
       Objects.requireNonNull(mapterhornAvailableFlags, "mapterhornAvailableFlags");
@@ -67,6 +66,27 @@ record TellusElevationProvenance(
    }
 
    static int bitSetLength(int sampleCount) {
-      return (sampleCount + 7) >> 3;
+      if (sampleCount < 0 || sampleCount > MAX_SAMPLE_COUNT) {
+         throw new IllegalArgumentException("Invalid provenance sample count " + sampleCount);
+      }
+
+      return (sampleCount + 7) >>> 3;
+   }
+
+   static int checkedSampleCount(int width, int height) {
+      if (width <= 0 || height <= 0 || width > MAX_DIMENSION || height > MAX_DIMENSION) {
+         throw new IllegalArgumentException("Invalid provenance dimensions " + width + "x" + height);
+      }
+
+      try {
+         int sampleCount = Math.multiplyExact(width, height);
+         if (sampleCount > MAX_SAMPLE_COUNT) {
+            throw new IllegalArgumentException("Elevation provenance is too large");
+         }
+
+         return sampleCount;
+      } catch (ArithmeticException error) {
+         throw new IllegalArgumentException("Invalid provenance dimensions " + width + "x" + height, error);
+      }
    }
 }

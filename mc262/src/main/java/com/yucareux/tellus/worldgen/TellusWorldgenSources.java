@@ -11,7 +11,6 @@ import com.yucareux.tellus.world.data.mask.TellusLandMaskSource;
 import com.yucareux.tellus.world.data.ocean.OisstOceanClimateSource;
 import com.yucareux.tellus.world.data.osm.TellusOsmBuildingSource;
 import com.yucareux.tellus.world.data.osm.TellusOsmInfrastructureSource;
-import com.yucareux.tellus.world.data.osm.OsmQueryMode;
 import com.yucareux.tellus.world.data.osm.TellusOsmRoadSource;
 import com.yucareux.tellus.world.data.osm.TellusOsmSandSource;
 import com.yucareux.tellus.world.data.osm.TellusOsmWaterSource;

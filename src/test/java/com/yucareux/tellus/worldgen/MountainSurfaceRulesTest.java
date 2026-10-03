@@ -98,4 +98,51 @@ class MountainSurfaceRulesTest {
       assertTrue(surface.isMountain());
    }
 
+   @Test
+   void vegetatedLandCoverDoesNotBecomeMountainStoneFromElevationOrRuggedness() {
+      int[] vegetatedCoverClasses = new int[]{
+         MountainSurfaceRules.ESA_TREE_COVER,
+         MountainSurfaceRules.ESA_SHRUBLAND,
+         MountainSurfaceRules.ESA_GRASSLAND,
+         MountainSurfaceRules.ESA_CROPLAND,
+         MountainSurfaceRules.ESA_MOSS_LICHEN
+      };
+
+      for (int coverClass : vegetatedCoverClasses) {
+         assertFalse(
+            MountainSurfaceRules.qualifiesForMountainPalette(coverClass, 260, 6, -2),
+            "Vegetated land-cover class " + coverClass + " should keep its land-cover palette"
+         );
+
+         MountainSurfaceRules.ApproximateSurface surface = MountainSurfaceRules.classifyApproximateSurface(
+            coverClass, coverClass, 260, 6, -2, false, 0.0F, 64, 96
+         );
+         assertEquals(
+            MountainSurfaceRules.ApproximatePalette.NONE,
+            surface.palette(),
+            "Vegetated land-cover class " + coverClass + " should not be reclassified as stone"
+         );
+      }
+   }
+
+   @Test
+   void mountainPaletteStillHandlesBareSnowAndNoDataTerrain() {
+      assertTrue(MountainSurfaceRules.qualifiesForMountainPalette(MountainSurfaceRules.ESA_BARE, 260, 1, 0));
+      assertTrue(MountainSurfaceRules.qualifiesForMountainPalette(MountainSurfaceRules.ESA_SNOW_ICE, 0, 0, 0));
+      assertTrue(MountainSurfaceRules.qualifiesForMountainPalette(MountainSurfaceRules.ESA_NO_DATA, 260, 1, 0));
+
+      int[] otherCoverClasses = new int[]{
+         MountainSurfaceRules.ESA_BUILT,
+         MountainSurfaceRules.ESA_WATER,
+         MountainSurfaceRules.ESA_WETLAND,
+         MountainSurfaceRules.ESA_MANGROVES
+      };
+      for (int coverClass : otherCoverClasses) {
+         assertFalse(
+            MountainSurfaceRules.qualifiesForMountainPalette(coverClass, 260, 6, -2),
+            "Land-cover class " + coverClass + " should not enter the mountain palette"
+         );
+      }
+   }
+
 }

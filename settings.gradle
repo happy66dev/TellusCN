@@ -20,6 +20,7 @@ plugins {
 rootProject.name = 'Tellus'
 
 include('mc1211')
+include('mc1211-neoforge')
 include('mc262')
 include('mc262-neoforge')
 include('mc1201')

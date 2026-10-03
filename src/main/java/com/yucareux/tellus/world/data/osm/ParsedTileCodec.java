@@ -24,6 +24,7 @@ final class ParsedTileCodec {
    private static final int STREET_LIGHT_VERSION = 2;
    private static final int MAX_FEATURES = 100000;
    private static final int MAX_POINTS_PER_FEATURE = 100000;
+   private static final long MAX_PARSED_TILE_BYTES = 64L * 1024L * 1024L;
    private static final RoadClass[] ROAD_CLASSES = RoadClass.values();
    private static final RoadMode[] ROAD_MODES = RoadMode.values();
    private static final RoadPointKind[] ROAD_POINT_KINDS = RoadPointKind.values();
@@ -34,6 +35,7 @@ final class ParsedTileCodec {
    }
 
    static OverpassRoadTile readRoadTile(Path path) throws IOException {
+      validateFileSize(path);
       try (DataInputStream input = new DataInputStream(new BufferedInputStream(Files.newInputStream(path)))) {
          int magic = input.readInt();
          if (magic != MAGIC_ROAD) {
@@ -203,6 +205,7 @@ final class ParsedTileCodec {
    }
 
    static OsmStreetLightTile readStreetLightTile(Path path) throws IOException {
+      validateFileSize(path);
       try (DataInputStream input = new DataInputStream(new BufferedInputStream(Files.newInputStream(path)))) {
          int magic = input.readInt();
          if (magic != MAGIC_STREET_LIGHT) {
@@ -262,6 +265,7 @@ final class ParsedTileCodec {
    }
 
    static OsmWaterTile readWaterTile(Path path) throws IOException {
+      validateFileSize(path);
       try (DataInputStream input = new DataInputStream(new BufferedInputStream(Files.newInputStream(path)))) {
          int magic = input.readInt();
          if (magic != MAGIC_WATER) {
@@ -354,6 +358,7 @@ final class ParsedTileCodec {
    }
 
    static OsmSandTile readSandTile(Path path) throws IOException {
+      validateFileSize(path);
       try (DataInputStream input = new DataInputStream(new BufferedInputStream(Files.newInputStream(path)))) {
          int magic = input.readInt();
          if (magic != MAGIC_SAND) {
@@ -430,6 +435,7 @@ final class ParsedTileCodec {
    }
 
    static OsmBuildingTile readBuildingTile(Path path) throws IOException {
+      validateFileSize(path);
       try (DataInputStream input = new DataInputStream(new BufferedInputStream(Files.newInputStream(path)))) {
          int magic = input.readInt();
          if (magic != MAGIC_BUILDING) {
@@ -606,6 +612,13 @@ final class ParsedTileCodec {
       Path parent = path.getParent();
       if (parent != null) {
          Files.createDirectories(parent);
+      }
+   }
+
+   private static void validateFileSize(Path path) throws IOException {
+      long size = Files.size(path);
+      if (size > MAX_PARSED_TILE_BYTES) {
+         throw new IOException("Parsed tile cache exceeds the " + MAX_PARSED_TILE_BYTES + " byte safety limit");
       }
    }
 

@@ -284,7 +284,7 @@ public class Tellus implements ModInitializer {
    private static int openGeoTpMap(CommandSourceStack source) {
       ServerPlayer player = source.getPlayer();
       if (player == null) {
-         source.sendFailure(Component.literal("Tellus: GeoTP map can only be used by a player."));
+         source.sendFailure(Component.translatable("tellus.command.geotp.player_only"));
          return 0;
       } else {
          ServerLevel level = player.serverLevel();
@@ -294,7 +294,7 @@ public class Tellus implements ModInitializer {
             ServerPlayNetworking.send(player, new GeoTpOpenMapPayload(latitude, longitude));
             return 1;
          } else {
-            source.sendFailure(Component.literal("Tellus: GeoTP map is only available in Tellus worlds."));
+            source.sendFailure(Component.translatable("tellus.command.geotp.tellus_world_only"));
             return 0;
          }
       }
@@ -303,18 +303,18 @@ public class Tellus implements ModInitializer {
    private static int showTellusWeather(CommandSourceStack source) {
       ServerPlayer player = source.getPlayer();
       if (player == null) {
-         source.sendFailure(Component.literal("Tellus: /tellus weather can only be used by a player."));
+         source.sendFailure(Component.translatable("tellus.command.weather.player_only"));
          return 0;
       }
 
       ServerLevel level = player.serverLevel();
       if (!(level.getChunkSource().getGenerator() instanceof EarthChunkGenerator earthGenerator)) {
-         source.sendFailure(Component.literal("Tellus: /tellus weather is only available in Tellus worlds."));
+         source.sendFailure(Component.translatable("tellus.command.weather.tellus_world_only"));
          return 0;
       }
 
       BlockPos pos = player.blockPosition();
-      source.sendSuccess(() -> Component.literal("Tellus: fetching local weather...").withStyle(ChatFormatting.GRAY), false);
+      source.sendSuccess(() -> Component.translatable("tellus.command.weather.fetching").withStyle(ChatFormatting.GRAY), false);
       TellusRealtimeManager.WeatherReportRequestResult requestResult = REALTIME_MANAGER.requestWeatherReport(
          source.getServer(),
          player.getUUID(),
@@ -323,11 +323,11 @@ public class Tellus implements ModInitializer {
          report -> sendTellusWeatherReport(source, level, pos, earthGenerator.settings(), report)
       );
       if (requestResult == TellusRealtimeManager.WeatherReportRequestResult.RATE_LIMITED) {
-         source.sendFailure(Component.literal("Tellus: wait for the current weather request to finish."));
+         source.sendFailure(Component.translatable("tellus.command.weather.rate_limited"));
          return 0;
       }
       if (requestResult == TellusRealtimeManager.WeatherReportRequestResult.UNAVAILABLE) {
-         source.sendFailure(Component.literal("Tellus: weather service is unavailable."));
+         source.sendFailure(Component.translatable("tellus.command.weather.unavailable"));
          return 0;
       }
 
@@ -348,7 +348,9 @@ public class Tellus implements ModInitializer {
       Tellus.WeatherDisplay weather = realtimeWeatherActive
          ? weatherFromRealtime(mode)
          : weatherFromVanilla(level, pos, report.temperatureC());
-      source.sendSuccess(() -> Component.literal("Tellus Weather").withStyle(new ChatFormatting[]{ChatFormatting.GOLD, ChatFormatting.BOLD}), false);
+      source.sendSuccess(
+         () -> Component.translatable("tellus.command.weather.title").withStyle(new ChatFormatting[]{ChatFormatting.GOLD, ChatFormatting.BOLD}), false
+      );
       String coordinates = Objects.requireNonNull(
          String.format(Locale.ROOT, "%.4f, %.4f", report.latitude(), report.longitude()), "coordinates"
       );
@@ -356,12 +358,16 @@ public class Tellus implements ModInitializer {
          ? coordinates
          : report.locationName() + " (" + coordinates + ")";
       source.sendSuccess(
-         () -> Component.literal("Location: ").withStyle(ChatFormatting.GRAY).append(Component.literal(locationText).withStyle(ChatFormatting.AQUA)),
+         () -> Component.translatable("tellus.command.weather.location")
+            .withStyle(ChatFormatting.GRAY)
+            .append(Component.literal(locationText).withStyle(ChatFormatting.AQUA)),
          false
       );
       String gameTime = Objects.requireNonNull(formatGameTime(level), "gameTime");
       source.sendSuccess(
-         () -> Component.literal("Game time: ").withStyle(ChatFormatting.GRAY).append(Component.literal(gameTime).withStyle(ChatFormatting.YELLOW)),
+         () -> Component.translatable("tellus.command.weather.game_time")
+            .withStyle(ChatFormatting.GRAY)
+            .append(Component.literal(gameTime).withStyle(ChatFormatting.YELLOW)),
          false
       );
       ZoneId zone = resolveZoneId(report.timeZoneId());
@@ -384,35 +390,34 @@ public class Tellus implements ModInitializer {
       int offsetSeconds = zone.getRules().getOffset(now).getTotalSeconds();
       String timeLabel = formatLocalTime(now, zone);
       String utcOffsetLabel = formatUtcOffset(offsetSeconds);
-      MutableComponent timeLine = Component.literal("Real time: ")
+      MutableComponent timeLine = Component.translatable("tellus.command.weather.real_time")
          .withStyle(ChatFormatting.GRAY)
          .append(Component.literal(timeLabel + " " + utcOffsetLabel).withStyle(ChatFormatting.YELLOW));
       if (approximateTime) {
-         timeLine.append(Component.literal(" (approx)").withStyle(ChatFormatting.DARK_GRAY));
+         timeLine.append(Component.translatable("tellus.command.weather.approximate").withStyle(ChatFormatting.DARK_GRAY));
       }
 
       source.sendSuccess(() -> timeLine, false);
-      MutableComponent tempLine = Component.literal("Temperature: ").withStyle(ChatFormatting.GRAY);
+      MutableComponent tempLine = Component.translatable("tellus.command.weather.temperature").withStyle(ChatFormatting.GRAY);
       if (Float.isFinite(report.temperatureC())) {
          String tempLabel = Objects.requireNonNull(String.format(Locale.ROOT, "%.1f C", report.temperatureC()), "tempLabel");
          tempLine.append(Component.literal(tempLabel).withStyle(ChatFormatting.YELLOW));
       } else {
-         tempLine.append(Component.literal("n/a").withStyle(ChatFormatting.DARK_GRAY));
+         tempLine.append(Component.translatable("tellus.command.weather.not_available").withStyle(ChatFormatting.DARK_GRAY));
       }
 
       source.sendSuccess(() -> tempLine, false);
-      String weatherLabel = Objects.requireNonNull(weather.label(), "weatherLabel");
       ChatFormatting weatherColor = Objects.requireNonNull(weather.color(), "weatherColor");
-      MutableComponent weatherLine = Component.literal("Weather: ")
+      MutableComponent weatherLine = Component.translatable("tellus.command.weather.weather")
          .withStyle(ChatFormatting.GRAY)
-         .append(Component.literal(weatherLabel).withStyle(weatherColor));
+         .append(Component.translatable(weather.translationKey()).withStyle(weatherColor));
       if (!realtimeWeather) {
-         String weatherSource = Float.isFinite(report.temperatureC())
-            ? " (vanilla timing, real temperature)"
-            : " (vanilla fallback)";
-         weatherLine.append(Component.literal(weatherSource).withStyle(ChatFormatting.DARK_GRAY));
+         String weatherSourceKey = Float.isFinite(report.temperatureC())
+            ? "tellus.command.weather.source.vanilla_temperature"
+            : "tellus.command.weather.source.vanilla_fallback";
+         weatherLine.append(Component.translatable(weatherSourceKey).withStyle(ChatFormatting.DARK_GRAY));
       } else if (!realtimeWeatherActive) {
-         weatherLine.append(Component.literal(" (real-time pending)").withStyle(ChatFormatting.DARK_GRAY));
+         weatherLine.append(Component.translatable("tellus.command.weather.source.realtime_pending").withStyle(ChatFormatting.DARK_GRAY));
       }
 
       source.sendSuccess(() -> weatherLine, false);
@@ -421,11 +426,13 @@ public class Tellus implements ModInitializer {
    private static int setRealtimeTimeOverride(CommandSourceStack source, boolean enabled) {
       EarthChunkGenerator earthGenerator = resolveEarthGenerator(source);
       if (earthGenerator == null) {
-         source.sendFailure(Component.literal("Tellus: /tellus config weather is only available in Tellus worlds."));
+         source.sendFailure(Component.translatable("tellus.command.config.weather_world_only"));
          return 0;
       } else {
          REALTIME_MANAGER.setRealtimeTimeOverride(enabled);
-         source.sendSuccess(() -> Component.literal("Tellus: real-time time set to " + enabled + "."), false);
+         source.sendSuccess(
+            () -> Component.translatable("tellus.command.config.time_set", booleanLabel(enabled)), false
+         );
          return 1;
       }
    }
@@ -433,11 +440,13 @@ public class Tellus implements ModInitializer {
    private static int setRealtimeWeatherOverride(CommandSourceStack source, boolean enabled) {
       EarthChunkGenerator earthGenerator = resolveEarthGenerator(source);
       if (earthGenerator == null) {
-         source.sendFailure(Component.literal("Tellus: /tellus config weather is only available in Tellus worlds."));
+         source.sendFailure(Component.translatable("tellus.command.config.weather_world_only"));
          return 0;
       } else {
          REALTIME_MANAGER.setRealtimeWeatherOverride(enabled);
-         source.sendSuccess(() -> Component.literal("Tellus: real-time weather set to " + enabled + "."), false);
+         source.sendSuccess(
+            () -> Component.translatable("tellus.command.config.weather_set", booleanLabel(enabled)), false
+         );
          return 1;
       }
    }
@@ -445,11 +454,13 @@ public class Tellus implements ModInitializer {
    private static int setVoxyPregenEnabledOverride(CommandSourceStack source, boolean enabled) {
       EarthChunkGenerator earthGenerator = resolveEarthGenerator(source);
       if (earthGenerator == null) {
-         source.sendFailure(Component.literal("Tellus: /tellus config voxy is only available in Tellus worlds."));
+         source.sendFailure(Component.translatable("tellus.command.config.voxy_world_only"));
          return 0;
       } else {
          VOXY_PREGEN_MANAGER.setEnabledOverride(enabled);
-         source.sendSuccess(() -> Component.literal("Tellus: Voxy pregen enabled override set to " + enabled + "."), false);
+         source.sendSuccess(
+            () -> Component.translatable("tellus.command.config.voxy_enabled_set", booleanLabel(enabled)), false
+         );
          return 1;
       }
    }
@@ -457,11 +468,11 @@ public class Tellus implements ModInitializer {
    private static int setVoxyPregenMaxRadiusOverride(CommandSourceStack source, int chunks) {
       EarthChunkGenerator earthGenerator = resolveEarthGenerator(source);
       if (earthGenerator == null) {
-         source.sendFailure(Component.literal("Tellus: /tellus config voxy is only available in Tellus worlds."));
+         source.sendFailure(Component.translatable("tellus.command.config.voxy_world_only"));
          return 0;
       } else {
          VOXY_PREGEN_MANAGER.setMaxRadiusOverride(chunks);
-         source.sendSuccess(() -> Component.literal("Tellus: Voxy pregen max radius override set to " + chunks + " chunks."), false);
+         source.sendSuccess(() -> Component.translatable("tellus.command.config.voxy_radius_set", chunks), false);
          return 1;
       }
    }
@@ -469,11 +480,11 @@ public class Tellus implements ModInitializer {
    private static int setVoxyPregenChunksPerTickOverride(CommandSourceStack source, int chunksPerTick) {
       EarthChunkGenerator earthGenerator = resolveEarthGenerator(source);
       if (earthGenerator == null) {
-         source.sendFailure(Component.literal("Tellus: /tellus config voxy is only available in Tellus worlds."));
+         source.sendFailure(Component.translatable("tellus.command.config.voxy_world_only"));
          return 0;
       } else {
          VOXY_PREGEN_MANAGER.setChunksPerTickOverride(chunksPerTick);
-         source.sendSuccess(() -> Component.literal("Tellus: Voxy pregen budget override set to " + chunksPerTick + " chunks/tick."), false);
+         source.sendSuccess(() -> Component.translatable("tellus.command.config.voxy_budget_set", chunksPerTick), false);
          return 1;
       }
    }
@@ -481,11 +492,11 @@ public class Tellus implements ModInitializer {
    private static int resetVoxyPregenOverrides(CommandSourceStack source) {
       EarthChunkGenerator earthGenerator = resolveEarthGenerator(source);
       if (earthGenerator == null) {
-         source.sendFailure(Component.literal("Tellus: /tellus config voxy is only available in Tellus worlds."));
+         source.sendFailure(Component.translatable("tellus.command.config.voxy_world_only"));
          return 0;
       } else {
          VOXY_PREGEN_MANAGER.clearOverrides();
-         source.sendSuccess(() -> Component.literal("Tellus: Voxy pregen overrides reset to world settings."), false);
+         source.sendSuccess(() -> Component.translatable("tellus.command.config.voxy_reset"), false);
          return 1;
       }
    }
@@ -493,60 +504,59 @@ public class Tellus implements ModInitializer {
    private static int showVoxyPregenStatus(CommandSourceStack source) {
       EarthChunkGenerator earthGenerator = resolveEarthGenerator(source);
       if (earthGenerator == null) {
-         source.sendFailure(Component.literal("Tellus: /tellus config voxy is only available in Tellus worlds."));
+         source.sendFailure(Component.translatable("tellus.command.config.voxy_world_only"));
          return 0;
       } else {
          EarthGeneratorSettings settings = earthGenerator.settings();
          boolean enabled = VOXY_PREGEN_MANAGER.effectiveEnabled(settings);
          int maxRadius = VOXY_PREGEN_MANAGER.effectiveMaxRadius(settings);
          int chunksPerTick = VOXY_PREGEN_MANAGER.effectiveChunksPerTick(settings);
-         source.sendSuccess(() -> Component.literal("Tellus Voxy pregen").withStyle(new ChatFormatting[]{ChatFormatting.GOLD, ChatFormatting.BOLD}), false);
          source.sendSuccess(
-            () -> Component.literal(
-                  "Enabled: " + enabled + " (world=" + settings.voxyChunkPregenEnabled() + ", override=" + VOXY_PREGEN_MANAGER.enabledOverride() + ")"
+            () -> Component.translatable("tellus.command.voxy.title").withStyle(new ChatFormatting[]{ChatFormatting.GOLD, ChatFormatting.BOLD}), false
+         );
+         source.sendSuccess(
+            () -> Component.translatable(
+                  "tellus.command.voxy.enabled",
+                  booleanLabel(enabled),
+                  booleanLabel(settings.voxyChunkPregenEnabled()),
+                  overrideLabel(VOXY_PREGEN_MANAGER.enabledOverride())
                )
                .withStyle(ChatFormatting.GRAY),
             false
          );
          source.sendSuccess(
-            () -> Component.literal(
-                  "Max radius: "
-                     + maxRadius
-                     + " chunks (world="
-                     + settings.voxyChunkPregenMaxRadius()
-                     + ", override="
-                     + VOXY_PREGEN_MANAGER.maxRadiusOverride()
-                     + ")"
+            () -> Component.translatable(
+                  "tellus.command.voxy.radius",
+                  maxRadius,
+                  settings.voxyChunkPregenMaxRadius(),
+                  overrideLabel(VOXY_PREGEN_MANAGER.maxRadiusOverride())
                )
                .withStyle(ChatFormatting.GRAY),
             false
          );
          source.sendSuccess(
-            () -> Component.literal(
-                  "Budget: "
-                     + chunksPerTick
-                     + " chunks/tick (world="
-                     + settings.voxyChunkPregenChunksPerTick()
-                     + ", override="
-                     + VOXY_PREGEN_MANAGER.chunksPerTickOverride()
-                     + ")"
+            () -> Component.translatable(
+                  "tellus.command.voxy.budget",
+                  chunksPerTick,
+                  settings.voxyChunkPregenChunksPerTick(),
+                  overrideLabel(VOXY_PREGEN_MANAGER.chunksPerTickOverride())
                )
                .withStyle(ChatFormatting.GRAY),
             false
          );
          source.sendSuccess(
-            () -> Component.literal(
-                  "Voxy radius: configured="
-                     + VOXY_PREGEN_MANAGER.lastConfiguredVoxyRadiusChunks()
-                     + " chunks, effective="
-                     + VOXY_PREGEN_MANAGER.lastEffectiveRadiusChunks()
-                     + " chunks"
+            () -> Component.translatable(
+                  "tellus.command.voxy.effective_radius",
+                  VOXY_PREGEN_MANAGER.lastConfiguredVoxyRadiusChunks(),
+                  VOXY_PREGEN_MANAGER.lastEffectiveRadiusChunks()
                )
                .withStyle(ChatFormatting.DARK_AQUA),
             false
          );
          source.sendSuccess(
-            () -> Component.literal("Queue: queued=" + VOXY_PREGEN_MANAGER.queuedChunkCount() + ", in-flight=" + VOXY_PREGEN_MANAGER.inFlightChunkCount())
+            () -> Component.translatable(
+                  "tellus.command.voxy.queue", VOXY_PREGEN_MANAGER.queuedChunkCount(), VOXY_PREGEN_MANAGER.inFlightChunkCount()
+               )
                .withStyle(ChatFormatting.DARK_AQUA),
             false
          );
@@ -556,33 +566,44 @@ public class Tellus implements ModInitializer {
 
    private static Tellus.WeatherDisplay weatherFromRealtime(TellusRealtimeState.PrecipitationMode mode) {
       return switch (mode) {
-         case THUNDER -> new Tellus.WeatherDisplay("Thunder", ChatFormatting.DARK_PURPLE);
-         case SNOW -> new Tellus.WeatherDisplay("Snow", ChatFormatting.AQUA);
-         case RAIN -> new Tellus.WeatherDisplay("Rain", ChatFormatting.BLUE);
-         case CLEAR -> new Tellus.WeatherDisplay("Clear", ChatFormatting.GREEN);
+         case THUNDER -> new Tellus.WeatherDisplay("tellus.command.weather.value.thunder", ChatFormatting.DARK_PURPLE);
+         case SNOW -> new Tellus.WeatherDisplay("tellus.command.weather.value.snow", ChatFormatting.AQUA);
+         case RAIN -> new Tellus.WeatherDisplay("tellus.command.weather.value.rain", ChatFormatting.BLUE);
+         case CLEAR -> new Tellus.WeatherDisplay("tellus.command.weather.value.clear", ChatFormatting.GREEN);
       };
    }
 
    private static Tellus.WeatherDisplay weatherFromVanilla(ServerLevel level, BlockPos pos, float temperatureC) {
       if (!level.isRaining()) {
-         return new Tellus.WeatherDisplay("Clear", ChatFormatting.GREEN);
+         return new Tellus.WeatherDisplay("tellus.command.weather.value.clear", ChatFormatting.GREEN);
       }
 
       Biome biome = (Biome)level.getBiome(pos).value();
       if (!biome.hasPrecipitation()) {
-         return new Tellus.WeatherDisplay("Clear", ChatFormatting.GREEN);
+         return new Tellus.WeatherDisplay("tellus.command.weather.value.clear", ChatFormatting.GREEN);
       }
 
       boolean snow = Float.isFinite(temperatureC)
          ? WeatherTemperaturePolicy.shouldSnow(temperatureC)
          : biome.getPrecipitationAt(pos) == Precipitation.SNOW;
       if (snow) {
-         return new Tellus.WeatherDisplay("Snow", ChatFormatting.AQUA);
+         return new Tellus.WeatherDisplay("tellus.command.weather.value.snow", ChatFormatting.AQUA);
       }
 
       return level.isThundering()
-         ? new Tellus.WeatherDisplay("Thunder", ChatFormatting.DARK_PURPLE)
-         : new Tellus.WeatherDisplay("Rain", ChatFormatting.BLUE);
+         ? new Tellus.WeatherDisplay("tellus.command.weather.value.thunder", ChatFormatting.DARK_PURPLE)
+         : new Tellus.WeatherDisplay("tellus.command.weather.value.rain", ChatFormatting.BLUE);
+   }
+
+   private static Component booleanLabel(boolean value) {
+      return Component.translatable(value ? "options.on" : "options.off");
+   }
+
+   private static Component overrideLabel(Object value) {
+      if (value == null) {
+         return Component.translatable("tellus.value.not_set");
+      }
+      return value instanceof Boolean booleanValue ? booleanLabel(booleanValue) : Component.literal(value.toString());
    }
 
    private static ZoneId resolveZoneId(String zoneId) {
@@ -633,7 +654,7 @@ public class Tellus implements ModInitializer {
 
          server.execute(() -> {
             if (!player.createCommandSourceStack().hasPermission(2)) {
-               player.sendSystemMessage(Component.literal("Tellus: You do not have permission to use GeoTP."));
+               player.sendSystemMessage(Component.translatable("tellus.command.geotp.no_permission"));
                return;
             }
 
@@ -644,7 +665,7 @@ public class Tellus implements ModInitializer {
                BlockPos target = earthGenerator.getSurfacePosition(level, latitude, longitude);
                player.teleportTo(target.getX() + 0.5, target.getY(), target.getZ() + 0.5);
             } else {
-               player.sendSystemMessage(Component.literal("Tellus: GeoTP is only available in Tellus worlds."));
+               player.sendSystemMessage(Component.translatable("tellus.command.geotp.tellus_world_only"));
             }
          });
       }
@@ -762,6 +783,6 @@ public class Tellus implements ModInitializer {
       }
    }
 
-   private record WeatherDisplay(String label, ChatFormatting color) {
+   private record WeatherDisplay(String translationKey, ChatFormatting color) {
    }
 }

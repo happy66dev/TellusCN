@@ -1,5 +1,6 @@
 package com.yucareux.tellus.worldgen;
 
+import com.mojang.datafixers.util.Pair;
 import com.mojang.serialization.MapCodec;
 import com.mojang.serialization.codecs.RecordCodecBuilder;
 import com.yucareux.tellus.world.data.biome.BiomeClassification;
@@ -7,11 +8,15 @@ import com.yucareux.tellus.world.data.cover.TellusLandCoverSource;
 import com.yucareux.tellus.world.data.elevation.TellusElevationSource;
 import com.yucareux.tellus.world.data.koppen.TellusKoppenSource;
 import com.yucareux.tellus.world.data.ocean.OisstOceanClimateSource;
+import com.yucareux.tellus.worldgen.caves.TellusCaveBiomeDepthPolicy;
 import java.util.HashSet;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Predicate;
 import java.util.stream.Stream;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.core.Holder;
 import net.minecraft.core.HolderGetter;
 import net.minecraft.core.QuartPos;
@@ -19,6 +24,7 @@ import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.RegistryOps;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.util.Mth;
+import net.minecraft.world.level.LevelReader;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.biome.BiomeSource;
 import net.minecraft.world.level.biome.Biomes;
@@ -39,15 +45,13 @@ public final class EarthBiomeSource extends BiomeSource {
    private static final int ESA_BARE = 60;
    private static final int ESA_MANGROVES = 95;
    private static final int ESA_NO_DATA = 0;
-   private static final int CAVE_MIN_DEPTH = 8;
    private static final int LUSH_MIN_DEPTH = 12;
    private static final int DRIPSTONE_MIN_DEPTH = 16;
-   private static final int DEEP_DARK_MIN_DEPTH = 24;
    private static final int CAVE_BIOME_GRID = 48;
    private static final int CAVE_BIOME_Y_GRID = 32;
    private static final int DEEP_DARK_GRID = 96;
    private static final int DEEP_DARK_Y_GRID = 48;
-   private static final int DEEP_DARK_Y_OFFSET = 32;
+   private static final int STRUCTURE_BIOME_PROBE_CEILING_ABOVE_MIN_Y = 64;
    private static final double MAX_CAVE_BIOME_CHANCE = 0.55;
    private static final double DEEP_OCEAN_DEPTH_METERS = 200.0;
    private static final double FROZEN_OCEAN_SST_C = -1.5;
@@ -119,13 +123,18 @@ public final class EarthBiomeSource extends BiomeSource {
    
    private final WaterSurfaceResolver waterResolver;
    private final RandomBiomeMixer randomBiomeMixer;
-   private final int deepDarkCeiling;
+   private final ThreadLocal<Integer> structureBiomeQueryDepth = new ThreadLocal<>();
+   private final ThreadLocal<EarthBiomeSource.RegionalReliefCache> badlandsReliefCache = ThreadLocal.withInitial(
+      EarthBiomeSource.RegionalReliefCache::new
+   );
+   private final int structureBiomeProbeCeilingY;
    private volatile boolean fastSpawnMode = true;
 
    public EarthBiomeSource(HolderGetter<Biome> biomeLookup, EarthGeneratorSettings settings) {
       this.biomeLookup = Objects.requireNonNull(biomeLookup, "biomeLookup");
       this.settings = Objects.requireNonNull(settings, "settings");
-      this.deepDarkCeiling = settings.effectiveHeightOffset() - DEEP_DARK_Y_OFFSET;
+      this.structureBiomeProbeCeilingY = EarthGeneratorSettings.resolveHeightLimits(settings).minY()
+         + STRUCTURE_BIOME_PROBE_CEILING_ABOVE_MIN_Y;
       this.plains = this.biomeLookup.getOrThrow(Biomes.PLAINS);
       this.sunflowerPlains = this.resolveBiome(Biomes.SUNFLOWER_PLAINS, this.plains);
       this.flowerForest = this.resolveBiome(Biomes.FLOWER_FOREST, this.plains);
@@ -158,6 +167,20 @@ public final class EarthBiomeSource extends BiomeSource {
       this.fastSpawnMode = enabled;
    }
 
+   void beginStructureBiomeQueries() {
+      Integer depth = this.structureBiomeQueryDepth.get();
+      this.structureBiomeQueryDepth.set(depth == null ? 1 : depth + 1);
+   }
+
+   void endStructureBiomeQueries() {
+      Integer currentDepth = this.structureBiomeQueryDepth.get();
+      if (currentDepth == null || currentDepth <= 1) {
+         this.structureBiomeQueryDepth.remove();
+      } else {
+         this.structureBiomeQueryDepth.set(currentDepth - 1);
+      }
+   }
+
    
    protected Stream<Holder<Biome>> collectPossibleBiomes() {
       return Objects.requireNonNull(this.possibleBiomes.stream(), "possibleBiomes.stream()");
@@ -174,6 +197,63 @@ public final class EarthBiomeSource extends BiomeSource {
       int blockY = QuartPos.toBlock(y);
       int blockZ = QuartPos.toBlock(z);
       return this.resolveBiomeAtBlock(blockX, blockY, blockZ);
+   }
+
+   /**
+    * Vanilla samples biome locate queries at absolute Y levels 64 blocks
+    * apart. Tellus terrain and cave biomes are surface-relative, so use the
+    * exact local terrain column and inspect every eligible biome quart instead.
+    */
+   @Override
+   public Pair<BlockPos, Holder<Biome>> findClosestBiome3d(
+      BlockPos origin,
+      int radius,
+      int horizontalInterval,
+      int verticalInterval,
+      Predicate<Holder<Biome>> predicate,
+      Sampler sampler,
+      LevelReader level
+   ) {
+      Objects.requireNonNull(origin, "origin");
+      Objects.requireNonNull(predicate, "predicate");
+      if (this.possibleBiomes.stream().noneMatch(predicate)) {
+         return null;
+      }
+
+      int horizontalStep = Math.max(1, horizontalInterval);
+      int horizontalRadius = Math.floorDiv(Math.max(0, radius), horizontalStep);
+      for (BlockPos.MutableBlockPos offset : BlockPos.spiralAround(BlockPos.ZERO, horizontalRadius, Direction.EAST, Direction.SOUTH)) {
+         int blockX = quartBlock(origin.getX() + offset.getX() * horizontalStep);
+         int blockZ = quartBlock(origin.getZ() + offset.getZ() * horizontalStep);
+         EarthBiomeSource.ResolvedBiomeColumn resolved = this.resolveBiomeColumn(blockX, blockZ, true);
+         int surfaceY = resolved.waterColumn().terrainSurface();
+         Holder<Biome> surfaceBiome = resolved.surfaceBiome();
+         Pair<BlockPos, Holder<Biome>> closestInColumn = predicate.test(surfaceBiome)
+            ? Pair.of(new BlockPos(blockX, surfaceY, blockZ), surfaceBiome)
+            : null;
+         long closestVerticalDistance = closestInColumn == null ? Long.MAX_VALUE : Math.abs((long)surfaceY - origin.getY());
+
+         if (this.settings.caveGeneration()) {
+            for (int blockY : TellusBiomeLocatePolicy.caveBiomeQuartYs(surfaceY, this.settings.undergroundDepth(), origin.getY())) {
+               Holder<Biome> biome = this.resolveBiomeForColumn(resolved, blockX, blockY, blockZ);
+               if (!predicate.test(biome)) {
+                  continue;
+               }
+
+               long verticalDistance = Math.abs((long)blockY - origin.getY());
+               if (verticalDistance < closestVerticalDistance) {
+                  closestInColumn = Pair.of(new BlockPos(blockX, blockY, blockZ), biome);
+                  closestVerticalDistance = verticalDistance;
+               }
+            }
+         }
+
+         if (closestInColumn != null) {
+            return closestInColumn;
+         }
+      }
+
+      return null;
    }
 
    
@@ -226,22 +306,52 @@ public final class EarthBiomeSource extends BiomeSource {
 
    
    private Holder<Biome> resolveBiomeAtBlock(int blockX, int blockY, int blockZ) {
-      if (this.fastSpawnMode) {
+      Integer structureQueryDepth = this.structureBiomeQueryDepth.get();
+      boolean structureBiomeQuery = structureQueryDepth != null && structureQueryDepth > 0;
+      if (structureBiomeQuery && blockY <= this.structureBiomeProbeCeilingY) {
+         return this.resolveStructureBiomeProbe(blockX, blockZ);
+      } else if (this.fastSpawnMode) {
          return this.resolveFastSpawnSurfaceBiome(blockX, blockZ);
       } else {
-         int rawCoverClass = LAND_COVER_SOURCE.sampleCoverClass(blockX, blockZ, this.settings.worldScale());
-         int visualCoverClass = this.sampleVisualCoverClass(blockX, blockZ, rawCoverClass);
-         WaterSurfaceResolver.WaterColumnData column = this.settings.enableWater()
+         return this.resolveBiomeForColumn(this.resolveBiomeColumn(blockX, blockZ, false), blockX, blockY, blockZ);
+      }
+   }
+
+   private EarthBiomeSource.ResolvedBiomeColumn resolveBiomeColumn(int blockX, int blockZ, boolean exact) {
+      int rawCoverClass = LAND_COVER_SOURCE.sampleCoverClass(blockX, blockZ, this.settings.worldScale());
+      int visualCoverClass = this.sampleVisualCoverClass(blockX, blockZ, rawCoverClass);
+      WaterSurfaceResolver.WaterColumnData column = exact
+         ? this.waterResolver.resolveColumnData(blockX, blockZ, rawCoverClass)
+         : this.settings.enableWater()
             ? this.waterResolver.resolveFastColumnData(blockX, blockZ, rawCoverClass)
             : this.waterResolver.resolveColumnData(blockX, blockZ, rawCoverClass);
-         Holder<Biome> surfaceBiome = this.resolveSurfaceBiomeAtBlock(blockX, blockZ, rawCoverClass, visualCoverClass, column, null);
-         if (!this.settings.caveGeneration()) {
-            return surfaceBiome;
-         } else {
-            int depth = column.terrainSurface() - blockY;
-            return depth < CAVE_MIN_DEPTH ? surfaceBiome : this.resolveCaveBiome(surfaceBiome, blockX, blockY, blockZ, depth);
-         }
+      Holder<Biome> surfaceBiome = this.resolveSurfaceBiomeAtBlock(blockX, blockZ, rawCoverClass, visualCoverClass, column, null);
+      return new EarthBiomeSource.ResolvedBiomeColumn(surfaceBiome, column);
+   }
+
+   private Holder<Biome> resolveBiomeForColumn(
+      EarthBiomeSource.ResolvedBiomeColumn resolved, int blockX, int blockY, int blockZ
+   ) {
+      Holder<Biome> surfaceBiome = resolved.surfaceBiome();
+      if (!this.settings.caveGeneration()) {
+         return surfaceBiome;
       }
+
+      int depth = resolved.waterColumn().terrainSurface() - blockY;
+      return TellusCaveBiomeDepthPolicy.isCaveBiomeDepth(depth, this.settings.undergroundDepth())
+         ? this.resolveCaveBiome(surfaceBiome, blockX, blockY, blockZ, depth)
+         : surfaceBiome;
+   }
+
+   private static int quartBlock(int blockCoordinate) {
+      return QuartPos.toBlock(QuartPos.fromBlock(blockCoordinate));
+   }
+
+   private Holder<Biome> resolveStructureBiomeProbe(int blockX, int blockZ) {
+      int probeDepth = TellusCaveBiomeDepthPolicy.structureProbeDepth(this.settings.undergroundDepth());
+      return probeDepth != TellusCaveBiomeDepthPolicy.NO_STRUCTURE_PROBE_DEPTH && this.isDeepDarkAtDepth(blockX, blockZ, probeDepth)
+         ? this.deepDark
+         : this.plains;
    }
 
    
@@ -274,13 +384,13 @@ public final class EarthBiomeSource extends BiomeSource {
             ? column
             : this.waterResolver.resolveFastColumnData(blockX, blockZ, rawCoverClass);
          if (waterColumn.hasWater()) {
-            return waterColumn.isOcean() ? this.resolveOceanBiome(blockX, blockZ, waterColumn) : this.river;
+            return waterColumn.isOcean() ? this.resolveOceanBiome(blockX, blockZ, waterColumn) : this.applyRandomRiverBiome(blockX, blockZ);
          }
          visualCoverClass = this.resolveDryOsmVisualCoverClass(blockX, blockZ, rawCoverClass, visualCoverClass);
       } else if (rawCoverClass == ESA_NO_DATA || rawCoverClass == ESA_WATER) {
          WaterSurfaceResolver.WaterColumnData waterColumn = column != null ? column : this.waterResolver.resolveColumnData(blockX, blockZ, rawCoverClass);
          if (waterColumn.hasWater()) {
-            return waterColumn.isOcean() ? this.resolveOceanBiome(blockX, blockZ, waterColumn) : this.river;
+            return waterColumn.isOcean() ? this.resolveOceanBiome(blockX, blockZ, waterColumn) : this.applyRandomRiverBiome(blockX, blockZ);
          }
       }
       return this.resolveSurfaceBiomeAfterWater(blockX, blockZ, visualCoverClass, precomputedKoppen);
@@ -308,7 +418,7 @@ public final class EarthBiomeSource extends BiomeSource {
          return this.mangrove;
       }
       if ((this.settings.enableWater() || rawCoverClass == ESA_NO_DATA || rawCoverClass == ESA_WATER) && hasWater) {
-         return isOcean ? this.resolveOceanBiome(blockX, blockZ, null, previewResolutionMeters) : this.river;
+         return isOcean ? this.resolveOceanBiome(blockX, blockZ, null, previewResolutionMeters) : this.applyRandomRiverBiome(blockX, blockZ);
       }
       if (this.settings.enableWater() && !hasWater) {
          visualCoverClass = this.resolveDryOsmVisualCoverClass(blockX, blockZ, rawCoverClass, visualCoverClass);
@@ -350,19 +460,11 @@ public final class EarthBiomeSource extends BiomeSource {
       return this.applyRandomOceanBiome(biome, blockX, blockZ, deep);
    }
 
-   private boolean isDeepOcean(int blockX, int blockZ, WaterSurfaceResolver.WaterColumnData column) {
-      return this.isDeepOcean(blockX, blockZ, column, Double.NaN);
-   }
-
    private boolean isDeepOcean(
       int blockX, int blockZ, WaterSurfaceResolver.WaterColumnData column, double previewResolutionMeters
    ) {
       double depthMeters = this.sampleOceanDepthMeters(blockX, blockZ, column, previewResolutionMeters);
       return Double.isFinite(depthMeters) && depthMeters >= DEEP_OCEAN_DEPTH_METERS;
-   }
-
-   private double sampleOceanDepthMeters(int blockX, int blockZ, WaterSurfaceResolver.WaterColumnData column) {
-      return this.sampleOceanDepthMeters(blockX, blockZ, column, Double.NaN);
    }
 
    private double sampleOceanDepthMeters(
@@ -397,9 +499,25 @@ public final class EarthBiomeSource extends BiomeSource {
          }
       }
 
+      if (BadlandsTerrainPolicy.isDryCanyonCover(visualCoverClass)) {
+         String coherentKoppen = KOPPEN_SOURCE.sampleSmoothedCode(blockX, blockZ, this.settings.worldScale());
+         if (BadlandsTerrainPolicy.shouldUseCoherentAridClimate(visualCoverClass, coherentKoppen)) {
+            koppen = coherentKoppen;
+         }
+      }
+
       ResourceKey<Biome> biomeKey = BiomeClassification.findBiomeKey(visualCoverClass, koppen);
       if (biomeKey == null) {
          biomeKey = BiomeClassification.findFallbackKey(visualCoverClass);
+      }
+
+      if (!Biomes.BADLANDS.equals(biomeKey)
+         && BadlandsTerrainPolicy.isDryCanyonCover(visualCoverClass)
+         && BadlandsTerrainPolicy.isAridClimate(koppen)
+         && BadlandsTerrainPolicy.shouldPromoteToBadlands(
+            visualCoverClass, koppen, this.sampleRegionalReliefMeters(blockX, blockZ)
+         )) {
+         biomeKey = Biomes.BADLANDS;
       }
 
       Holder<Biome> biome = biomeKey == null ? this.plains : this.resolveBiome(biomeKey, this.plains);
@@ -413,6 +531,10 @@ public final class EarthBiomeSource extends BiomeSource {
 
    private Holder<Biome> applyRandomOceanBiome(Holder<Biome> base, int blockX, int blockZ, boolean deep) {
       return this.settings.randomBiomes() ? this.randomBiomeMixer.mixOcean(base, blockX, blockZ, deep) : base;
+   }
+
+   private Holder<Biome> applyRandomRiverBiome(int blockX, int blockZ) {
+      return this.settings.randomBiomes() ? this.randomBiomeMixer.mixRiver(this.river, blockX, blockZ) : this.river;
    }
 
    private Holder<Biome> applyRareBiomeVariants(Holder<Biome> biome, int blockX, int blockZ, int visualCoverClass, String koppen) {
@@ -440,6 +562,7 @@ public final class EarthBiomeSource extends BiomeSource {
 
    private boolean isCherryGroveCandidate(int blockX, int blockZ, String koppen) {
       return this.settings.randomBiomes()
+         && this.settings.randomBiomeIds().contains("cherry_grove")
          && isCherryGroveClimate(koppen)
          && sampleValueNoise(blockX, blockZ, CHERRY_GROVE_GRID_BLOCKS, CHERRY_GROVE_NOISE_SALT) >= CHERRY_GROVE_NOISE_THRESHOLD
          && this.isCherryGroveTerrain(blockX, blockZ);
@@ -493,6 +616,58 @@ public final class EarthBiomeSource extends BiomeSource {
       return samples >= 3 && relief >= CHERRY_GROVE_MIN_RELIEF_METERS && relief <= CHERRY_GROVE_MAX_RELIEF_METERS;
    }
 
+   private double sampleRegionalReliefMeters(int blockX, int blockZ) {
+      double worldScale = this.settings.worldScale();
+      if (!(worldScale > 0.0)) {
+         return Double.NaN;
+      }
+
+      int cellSize = BadlandsTerrainPolicy.regionalSampleCellBlocks(worldScale);
+      int cellX = Math.floorDiv(blockX, cellSize);
+      int cellZ = Math.floorDiv(blockZ, cellSize);
+      EarthBiomeSource.RegionalReliefCache cache = this.badlandsReliefCache.get();
+      if (cache.cellX == cellX && cache.cellZ == cellZ) {
+         return cache.reliefMeters;
+      }
+
+      int sampleX = cellCenter(cellX, cellSize);
+      int sampleZ = cellCenter(cellZ, cellSize);
+      int offset = Math.max(4, Mth.ceil(BadlandsTerrainPolicy.CANYON_RELIEF_SAMPLE_METERS / worldScale));
+      double[] elevations = new double[]{
+         ELEVATION_SOURCE.sampleElevationMeters(sampleX, sampleZ, worldScale, false, this.settings.demSelection()),
+         ELEVATION_SOURCE.sampleElevationMeters(offsetCoordinate(sampleX, offset), sampleZ, worldScale, false, this.settings.demSelection()),
+         ELEVATION_SOURCE.sampleElevationMeters(offsetCoordinate(sampleX, -offset), sampleZ, worldScale, false, this.settings.demSelection()),
+         ELEVATION_SOURCE.sampleElevationMeters(sampleX, offsetCoordinate(sampleZ, offset), worldScale, false, this.settings.demSelection()),
+         ELEVATION_SOURCE.sampleElevationMeters(sampleX, offsetCoordinate(sampleZ, -offset), worldScale, false, this.settings.demSelection())
+      };
+      double min = Double.POSITIVE_INFINITY;
+      double max = Double.NEGATIVE_INFINITY;
+      int samples = 0;
+      for (double elevation : elevations) {
+         if (Double.isFinite(elevation)) {
+            min = Math.min(min, elevation);
+            max = Math.max(max, elevation);
+            samples++;
+         }
+      }
+
+      double relief = samples >= 3 ? max - min : Double.NaN;
+      cache.cellX = cellX;
+      cache.cellZ = cellZ;
+      cache.reliefMeters = relief;
+      return relief;
+   }
+
+   private static int cellCenter(int cell, int cellSize) {
+      long center = (long)cell * cellSize + cellSize / 2L;
+      return (int)Math.max(Integer.MIN_VALUE, Math.min(Integer.MAX_VALUE, center));
+   }
+
+   private static int offsetCoordinate(int coordinate, int offset) {
+      long result = (long)coordinate + offset;
+      return (int)Math.max(Integer.MIN_VALUE, Math.min(Integer.MAX_VALUE, result));
+   }
+
    private int sampleVisualCoverClass(int blockX, int blockZ, int rawCoverClass) {
       double worldScale = this.settings.worldScale();
       return worldScale > 0.0 && worldScale < 10.0 ? LAND_COVER_SOURCE.sampleVisualCoverClass(blockX, blockZ, worldScale) : rawCoverClass;
@@ -538,17 +713,19 @@ public final class EarthBiomeSource extends BiomeSource {
 
    
    private Holder<Biome> resolveCaveBiome( Holder<Biome> surfaceBiome, int blockX, int blockY, int blockZ, int depth) {
-      double depthFactor = Mth.clamp((depth - CAVE_MIN_DEPTH) / 80.0, 0.0, 1.0);
+      if (this.settings.randomBiomes()) {
+         Holder<Biome> selected = this.randomBiomeMixer.mixCave(surfaceBiome, blockX, blockY, blockZ);
+         if (selected != surfaceBiome) {
+            return selected;
+         }
+      }
+
+      double depthFactor = Mth.clamp((depth - TellusCaveBiomeDepthPolicy.MIN_CAVE_BIOME_DEPTH) / 80.0, 0.0, 1.0);
       double noise = sampleCaveNoise(blockX, blockY, blockZ, CAVE_BIOME_GRID, CAVE_BIOME_Y_GRID);
-      Holder<Biome> deepDarkBiome = this.deepDark;
       Holder<Biome> lushCavesBiome = this.lushCaves;
       Holder<Biome> dripstoneCavesBiome = this.dripstoneCaves;
-      if (this.settings.deepDark() && deepDarkBiome != null && blockY <= this.deepDarkCeiling && depth >= DEEP_DARK_MIN_DEPTH) {
-         double deepNoise = sampleCaveNoise(blockX, blockY, blockZ, DEEP_DARK_GRID, DEEP_DARK_Y_GRID);
-         double deepChance = 0.28 + depthFactor * 0.22;
-         if (deepNoise < deepChance) {
-            return deepDarkBiome;
-         }
+      if (this.isDeepDarkAtDepth(blockX, blockZ, depth)) {
+         return this.deepDark;
       }
 
       double lushChance = (isLushSurface(surfaceBiome) ? 0.45 : 0.25) * (1.0 - depthFactor * 0.35);
@@ -572,6 +749,18 @@ public final class EarthBiomeSource extends BiomeSource {
       } else {
          return surfaceBiome;
       }
+   }
+
+   private boolean isDeepDarkAtDepth(int blockX, int blockZ, int depth) {
+      if (!this.settings.deepDark()
+         || this.deepDark == null
+         || !TellusCaveBiomeDepthPolicy.isDeepDarkDepth(depth, this.settings.undergroundDepth())) {
+         return false;
+      }
+
+      double depthFactor = Mth.clamp((depth - TellusCaveBiomeDepthPolicy.MIN_CAVE_BIOME_DEPTH) / 80.0, 0.0, 1.0);
+      double deepNoise = sampleCaveNoise(blockX, -depth, blockZ, DEEP_DARK_GRID, DEEP_DARK_Y_GRID);
+      return deepNoise < 0.28 + depthFactor * 0.22;
    }
 
    private static boolean isLushSurface(Holder<Biome> surfaceBiome) {
@@ -692,5 +881,14 @@ public final class EarthBiomeSource extends BiomeSource {
    
    private Holder<Biome> resolveOptionalBiome( ResourceKey<Biome> key) {
       return key == null ? null : this.biomeLookup.get(key).map(holder -> (Holder<Biome>)holder).orElse(null);
+   }
+
+   private record ResolvedBiomeColumn(Holder<Biome> surfaceBiome, WaterSurfaceResolver.WaterColumnData waterColumn) {
+   }
+
+   private static final class RegionalReliefCache {
+      private int cellX = Integer.MIN_VALUE;
+      private int cellZ = Integer.MIN_VALUE;
+      private double reliefMeters = Double.NaN;
    }
 }

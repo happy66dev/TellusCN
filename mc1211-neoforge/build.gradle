@@ -1,0 +1,214 @@
+plugins {
+	id 'java-library'
+	id 'maven-publish'
+	id 'net.neoforged.moddev' version '2.0.141'
+	id 'com.gradleup.shadow' version '9.0.0'
+}
+
+def minecraftVersion = '1.21.1'
+def neoForgeVersion = '21.1.238'
+def distantHorizonsApiVersion = '7.0.0'
+def twelveMonkeysImageioVersion = '3.13.1'
+def javaVersion = 21
+def distantHorizonsRuntimePath = providers.gradleProperty('mc1211_neoforge_distant_horizons_runtime_path').orNull
+
+base {
+	archivesName = "${rootProject.archives_base_name}-neoforge-${minecraftVersion}"
+}
+
+tasks.withType(AbstractArchiveTask).configureEach {
+	archiveVersion.set('')
+}
+
+repositories {
+	mavenCentral()
+	maven {
+		url = 'https://api.modrinth.com/maven/'
+		content {
+			includeGroup 'maven.modrinth'
+		}
+	}
+}
+
+sourceSets {
+	main {
+		java {
+			setSrcDirs([rootProject.file('src/main/java'), project.file('src/main/java'), project.file('src/client/java')])
+		}
+		resources {
+			setSrcDirs([rootProject.file('src/main/resources'), project.file('src/main/resources'), project.file('src/client/resources')])
+		}
+	}
+	test {
+		java.setSrcDirs([rootProject.file('src/test/java'), project.file('src/test/java')])
+		resources.setSrcDirs([rootProject.file('src/test/resources'), project.file('src/test/resources')])
+	}
+}
+
+neoForge {
+	version = neoForgeVersion
+
+	runs {
+		client {
+			client()
+		}
+
+		server {
+			server()
+			programArgument '--nogui'
+		}
+
+		configureEach {
+			systemProperty 'forge.logging.markers', 'REGISTRIES'
+			logLevel = org.slf4j.event.Level.INFO
+		}
+	}
+
+	mods {
+		tellus {
+			sourceSet(sourceSets.main)
+		}
+	}
+
+	unitTest {
+		enable()
+		testedMod = mods.tellus
+	}
+}
+
+configurations {
+	relocatedXz
+	runtimeClasspath.extendsFrom localRuntime
+}
+
+dependencies {
+	compileOnly 'org.tukaani:xz:1.10'
+	relocatedXz 'org.tukaani:xz:1.10'
+	jarJar(implementation('io.github.sebasbaumh:mapbox-vector-tile-java:24.1.1') {
+		exclude group: 'org.slf4j', module: 'slf4j-api'
+	}) {
+		version {
+			strictly '[24.1.1,25.0)'
+			prefer '24.1.1'
+		}
+	}
+	jarJar(implementation('com.google.protobuf:protobuf-java:4.28.2')) {
+		version {
+			strictly '[4.28.2,5.0)'
+			prefer '4.28.2'
+		}
+	}
+	jarJar(implementation("com.twelvemonkeys.imageio:imageio-webp:${twelveMonkeysImageioVersion}")) {
+		version {
+			strictly '[3.13.1,3.14)'
+			prefer twelveMonkeysImageioVersion
+		}
+	}
+	jarJar(implementation("com.twelvemonkeys.imageio:imageio-core:${twelveMonkeysImageioVersion}")) {
+		version {
+			strictly '[3.13.1,3.14)'
+			prefer twelveMonkeysImageioVersion
+		}
+	}
+	jarJar(implementation("com.twelvemonkeys.imageio:imageio-metadata:${twelveMonkeysImageioVersion}")) {
+		version {
+			strictly '[3.13.1,3.14)'
+			prefer twelveMonkeysImageioVersion
+		}
+	}
+	jarJar(implementation("com.twelvemonkeys.common:common-lang:${twelveMonkeysImageioVersion}")) {
+		version {
+			strictly '[3.13.1,3.14)'
+			prefer twelveMonkeysImageioVersion
+		}
+	}
+	jarJar(implementation("com.twelvemonkeys.common:common-io:${twelveMonkeysImageioVersion}")) {
+		version {
+			strictly '[3.13.1,3.14)'
+			prefer twelveMonkeysImageioVersion
+		}
+	}
+	jarJar(implementation("com.twelvemonkeys.common:common-image:${twelveMonkeysImageioVersion}")) {
+		version {
+			strictly '[3.13.1,3.14)'
+			prefer twelveMonkeysImageioVersion
+		}
+	}
+
+	testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+	testImplementation 'org.tukaani:xz:1.10'
+	testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.10.2'
+	testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.10.2'
+
+	compileOnly "maven.modrinth:DistantHorizonsApi:${distantHorizonsApiVersion}"
+	if (distantHorizonsRuntimePath) {
+		localRuntime files(distantHorizonsRuntimePath)
+	} else {
+		localRuntime 'org.tukaani:xz:1.10'
+	}
+}
+
+processResources {
+	inputs.property 'version', project.version
+	inputs.property 'minecraftVersion', minecraftVersion
+	inputs.property 'neoForgeVersion', neoForgeVersion
+
+	filesMatching('META-INF/neoforge.mods.toml') {
+		expand version: inputs.properties.version,
+			minecraftVersion: inputs.properties.minecraftVersion,
+			neoForgeVersion: inputs.properties.neoForgeVersion
+	}
+}
+
+tasks.withType(JavaCompile).configureEach {
+	options.encoding = 'UTF-8'
+	options.release = javaVersion
+}
+
+tasks.named('test').configure {
+	useJUnitPlatform()
+}
+
+java {
+	toolchain {
+		languageVersion = JavaLanguageVersion.of(javaVersion)
+	}
+
+	withSourcesJar()
+
+	sourceCompatibility = JavaVersion.toVersion(javaVersion)
+	targetCompatibility = JavaVersion.toVersion(javaVersion)
+}
+
+jar {
+	inputs.property 'archivesName', project.base.archivesName
+	archiveClassifier = 'unshaded'
+
+	from(rootProject.file('LICENSE')) {
+		rename { "${it}_${inputs.properties.archivesName}" }
+	}
+}
+
+shadowJar {
+	dependsOn jarJar
+	archiveClassifier = ''
+	configurations = [project.configurations.relocatedXz]
+	from(layout.buildDirectory.dir('generated/jarJar'))
+	relocate 'org.tukaani.xz', 'com.yucareux.tellus.shaded.org.tukaani.xz'
+
+	from(rootProject.file('LICENSE')) {
+		rename { "${it}_${project.base.archivesName.get()}" }
+	}
+}
+
+publishing {
+	publications {
+		create('mavenJava', MavenPublication) {
+			artifactId = project.base.archivesName.get()
+			from components.java
+		}
+	}
+
+	repositories {
+	}
+}

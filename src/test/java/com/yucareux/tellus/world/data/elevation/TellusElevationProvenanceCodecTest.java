@@ -2,10 +2,13 @@ package com.yucareux.tellus.world.data.elevation;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.DataOutputStream;
+import java.nio.charset.StandardCharsets;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class TellusElevationProvenanceCodecTest {
@@ -33,5 +36,22 @@ class TellusElevationProvenanceCodecTest {
       assertEquals(TellusElevationSource.DemUsage.OPENWATERS, decoded.primaryProvider(1, 0));
       assertTrue(decoded.mapterhornAvailable(0, 0));
       assertFalse(decoded.mapterhornAvailable(1, 0));
+   }
+
+   @Test
+   void rejectsOverflowingDimensionsBeforeAllocating() throws Exception {
+      ByteArrayOutputStream output = new ByteArrayOutputStream();
+      try (DataOutputStream data = new DataOutputStream(output)) {
+         data.write("TELLUS/PROVENANCE".getBytes(StandardCharsets.US_ASCII));
+         data.writeByte(1);
+         data.writeInt(Integer.MAX_VALUE);
+         data.writeInt(Integer.MAX_VALUE);
+         data.writeInt(0);
+      }
+
+      assertThrows(
+         java.io.IOException.class,
+         () -> TellusElevationProvenanceCodec.read(new ByteArrayInputStream(output.toByteArray()))
+      );
    }
 }

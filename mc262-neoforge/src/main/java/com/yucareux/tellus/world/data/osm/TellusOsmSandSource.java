@@ -9,6 +9,7 @@ import com.yucareux.tellus.cache.TellusCacheDomain;
 import com.yucareux.tellus.cache.TellusCacheFiles;
 import com.yucareux.tellus.cache.TellusCacheHandle;
 import com.yucareux.tellus.cache.TellusCacheRegistry;
+import com.yucareux.tellus.world.data.pmtiles.PmTilesSafety;
 import com.yucareux.tellus.world.data.source.ParallelDownloadRunner;
 import com.yucareux.tellus.worldgen.EarthProjection;
 import io.github.sebasbaumh.mapbox.vectortile.VectorTile.Tile;
@@ -429,7 +430,9 @@ public final class TellusOsmSandSource implements TellusCacheHandle {
 
    private byte[] readCompressed(Path path) throws IOException {
       try (InputStream input = new GZIPInputStream(Files.newInputStream(path))) {
-         return input.readAllBytes();
+         return PmTilesSafety.readBounded(
+            input, PmTilesSafety.MAX_DECOMPRESSED_TILE_BYTES, "Cached Overture sand tile"
+         );
       }
    }
 

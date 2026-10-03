@@ -45,8 +45,9 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
    private static final double EXPECTED_MAX_OCEAN_DEPTH_METERS = 11034.0;
    private static final double FALLBACK_OCEAN_MIN_DEPTH_METERS = 600.0;
    private static final double FALLBACK_OCEAN_MAX_DEPTH_METERS = 3200.0;
-   private static final int RIVER_SURFACE_STEP_HEIGHT = intProperty("tellus.water.riverSurfaceStepHeight", 1, 1, 1);
+   private static final int SHORELINE_WALL_CLAMP_HEIGHT = 1;
    private static final int RIVER_MAX_TERRAIN_CUT = intProperty("tellus.water.riverMaxTerrainCut", 6, 0, 32);
+   private static final int RIVER_CONNECT_GAP_BLOCKS = intProperty("tellus.water.riverConnectGapBlocks", 4, 0, 16);
    private static final double RIVER_LINE_COMPONENT_RATIO = 0.5;
    private static final double RIVER_LINE_ASPECT_RATIO = 2.0;
    private static final int CLIFF_SLOPE_THRESHOLD = 5;
@@ -58,7 +59,7 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
       OceanFloorProfile.MAX_TRANSITION_BLOCKS
    );
    private static final int INLAND_SHORE_BANK_RAMP_MAX_SLOPE = 2;
-   private static final int SHORELINE_CLIFF_FOOT_HEIGHT = 3;
+   private static final int INLAND_BANK_MAX_RISE_PER_BLOCK = 1;
    private static final double RIVER_MIN_LENGTH_METERS = 750.0;
    private static final double RIVER_MAX_WIDTH_METERS = 400.0;
    private static final double RIVER_ASPECT_RATIO = 3.0;
@@ -111,7 +112,6 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
    private final AtomicLong cacheGeneration = new AtomicLong();
    private final long regionSalt;
    private final int riverLakeBlendDistance;
-   private final int oceanBlendDistance;
    private final int cliffSlopeThreshold;
    private final int riverMinLength;
    private final int riverMaxWidth;
@@ -120,6 +120,8 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
    private final boolean regionClamped;
    private final Cache<Long, Integer> lakeSurfaceCache;
    private final OceanCoastField oceanCoastField;
+   private final int oceanFloorTransitionBlocks;
+   private final int minimumOffshoreDepth;
    private final int minimumOceanFloor;
    private final int expectedMaximumOceanDepth;
 
@@ -138,7 +140,6 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
       this.osmWaterEnabled = settings.enableWater();
       this.seaLevel = settings.effectiveHeightOffset();
       this.riverLakeBlendDistance = clampBlend(settings.riverLakeShorelineBlend());
-      this.oceanBlendDistance = clampBlend(settings.oceanShorelineBlend());
       double scale = Math.max(1.0, settings.worldScale());
       this.cliffSlopeThreshold = Math.max(2, (int)Math.round(CLIFF_SLOPE_THRESHOLD / Math.sqrt(scale)));
       this.riverMinLength = this.metersToBlocks(RIVER_MIN_LENGTH_METERS);
@@ -164,10 +165,15 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
                / Math.max(1.0E-4, settings.effectiveVerticalWorldScale())
          )
       );
+      this.oceanFloorTransitionBlocks = OceanFloorProfile.transitionBlocksForScale(
+         OCEAN_FLOOR_TRANSITION_BLOCKS,
+         settings.worldScale()
+      );
+      this.minimumOffshoreDepth = OceanFloorProfile.minimumOffshoreDepthForScale(settings.worldScale());
       this.oceanCoastField = new OceanCoastField(
          this.osmWaterSource,
          settings.worldScale(),
-         OCEAN_FLOOR_TRANSITION_BLOCKS,
+         this.oceanFloorTransitionBlocks,
          this::sampleRawOceanDepth
       );
       this.regionSalt = Double.doubleToLongBits(settings.worldScale()) ^ -7046029254386353131L;
@@ -369,7 +375,7 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
                return new WaterSurfaceResolver.WaterColumnData(false, false, surface, surface);
             } else {
                boolean isOcean = this.classifyWaterAsOcean(sample.ocean(), landMaskSample, surface, coverClass);
-               int waterSurface = isOcean ? this.seaLevel : Math.max(surface + 1, this.seaLevel);
+               int waterSurface = isOcean ? this.resolveOceanWaterSurface(blockX, blockZ) : Math.max(surface + 1, this.seaLevel);
                int terrainSurface = surface;
                if (isOcean) {
                   terrainSurface = this.sampleOceanTerrainHeight(blockX, blockZ, waterSurface, previewResolutionMeters);
@@ -611,7 +617,7 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
          }
 
          boolean ocean = overture.ocean();
-         int waterSurface = ocean ? this.seaLevel : Math.max(surface + 1, this.seaLevel);
+         int waterSurface = ocean ? this.resolveOceanWaterSurface(blockX, blockZ) : Math.max(surface + 1, this.seaLevel);
          int terrainSurface = ocean
             ? this.sampleOceanTerrainHeight(blockX, blockZ, waterSurface, previewResolutionMeters)
             : Math.min(surface, waterSurface - OCEAN_MIN_DEPTH);
@@ -635,7 +641,7 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
       if (!shouldEmitCoarseFallbackWater(this.osmWaterEnabled, coverClass, isOcean)) {
          return new WaterSurfaceResolver.WaterColumnData(false, false, surface, surface);
       } else {
-         int waterSurface = isOcean ? this.seaLevel : Math.max(surface + 1, this.seaLevel);
+         int waterSurface = isOcean ? this.resolveOceanWaterSurface(blockX, blockZ) : Math.max(surface + 1, this.seaLevel);
          int terrainSurface = surface;
          int minDepth = Math.max(1, OCEAN_MIN_DEPTH);
          if (isOcean) {
@@ -682,6 +688,7 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
       boolean[] mapterhornLandOverride = scratch.mapterhornLandOverride;
       boolean[] landMaskLand = scratch.landMaskLand;
       boolean[] lineWaterMask = scratch.lineWaterMask;
+      boolean[] flowingWaterMask = scratch.flowingWaterMask;
       long[] waterBodyKeys = scratch.waterBodyKeys;
       int[] waterBodySurfaceHints = scratch.waterBodySurfaceHints;
       int[] surfaceHeights = scratch.surfaceHeights;
@@ -699,6 +706,7 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
       Arrays.fill(oceanHintMask, 0, gridArea, false);
       Arrays.fill(mapterhornLandOverride, 0, gridArea, false);
       Arrays.fill(lineWaterMask, 0, gridArea, false);
+      Arrays.fill(flowingWaterMask, 0, gridArea, false);
       Arrays.fill(waterBodyKeys, 0, gridArea, 0L);
       Arrays.fill(waterBodySurfaceHints, 0, gridArea, Integer.MIN_VALUE);
       boolean hasWater = false;
@@ -777,6 +785,7 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
                noDataMask,
                oceanHintMask,
                lineWaterMask,
+               flowingWaterMask,
                waterBodyKeys,
                waterBodySurfaceHints
             );
@@ -800,6 +809,7 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
                   noDataMask[index] = true;
                   oceanHintMask[index] = true;
                   lineWaterMask[index] = false;
+                  flowingWaterMask[index] = false;
                   waterBodyKeys[index] = 0L;
                   waterBodySurfaceHints[index] = Integer.MIN_VALUE;
                   hasWater = true;
@@ -875,6 +885,7 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
                   oceanHintMask,
                   landMaskLand,
                   lineWaterMask,
+                  flowingWaterMask,
                   waterBodyKeys,
                   waterBodySurfaceHints,
                   surfaceHeights,
@@ -911,7 +922,10 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
 
             int componentSurface;
             if (isOcean) {
-               componentSurface = this.seaLevel;
+               int representativeCell = component.cells.getInt(0);
+               int representativeX = gridMinX + representativeCell % gridSize;
+               int representativeZ = gridMinZ + representativeCell / gridSize;
+               componentSurface = this.resolveOceanWaterSurface(representativeX, representativeZ);
             } else {
                int spillHeight = component.borderHeights.isEmpty() ? component.averageHeight() : percentile(component.borderHeights, BORDER_HEIGHT_PERCENTILE);
                componentSurface = spillHeight;
@@ -937,12 +951,19 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
                   this.regionClamped
                );
                boolean lineDominated = isLineDominatedWaterComponent(component.cellCount, component.lineWaterCellCount);
+               boolean flowDominated = isFlowDominatedWaterComponent(component.cellCount, component.flowingWaterCellCount);
+               boolean lineOnlyRiver = isLineOnlyWaterComponent(
+                  component.cellCount, component.lineWaterCellCount, component.flowingWaterCellCount
+               );
+               if (flowDominated) {
+                  riverShape = true;
+               }
                if (riverShape && !lineDominated && this.shouldTreatRiverAsLake(component, width, height, minDim, aspect)) {
-                  riverShape = false;
+                  riverShape = flowDominated;
                }
 
                component.riverShape = riverShape;
-               component.lineDominatedRiver = riverShape && lineDominated;
+               component.lineOnlyRiver = riverShape && lineOnlyRiver;
                if (!riverShape) {
                   componentSurface = this.resolveStableLakeSurface(
                      component, capInlandLakeWaterSurface(componentSurface, component.minBorderHeight), buildCacheGeneration
@@ -950,16 +971,15 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
                   this.fillComponentSurface(component, waterSurface, componentSurface);
                }
 
-	               if (riverShape) {
-	                  WaterSurfaceResolver.RiverSurface riverSurface = this.buildRiverSurface(component, componentSurface, gridSize);
-
-	                  for (int c = 0; c < component.cells.size(); c++) {
-	                     int cell = component.cells.getInt(c);
-	                     int x = cell % gridSize;
-	                     int z = cell / gridSize;
-	                     waterSurface[cell] = riverSurface.surfaceAt(x, z);
-	                  }
-	               }
+               if (riverShape && !component.lineOnlyRiver) {
+                  // A connected river uses one navigation pool. Copying DEM height
+                  // per cell creates one-block waterfalls that strand boats and can
+                  // vary across the river width.
+                  componentSurface = lowestInlandRiverWaterSurface(
+                     component.minHeight, component.minBorderHeight, componentSurface
+                  );
+                  this.fillComponentSurface(component, waterSurface, componentSurface);
+               }
             }
          }
 
@@ -980,7 +1000,7 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
 	               int cell = componentx.cells.getInt(c);
 	               if (ocean) {
 	                  oceanComponentMask[cell] = true;
-	               } else if (componentx.lineDominatedRiver || isNarrowLineWaterCell(cell, gridSize, baseWaterMask, lineWaterMask)) {
+	               } else if (componentx.lineOnlyRiver) {
 	                  directRiverWaterMask[cell] = true;
 	               } else {
 	                  if (componentx.riverShape && this.shouldRejectWaterCell(componentx, surfaceHeights[cell], waterSurface[cell])) {
@@ -1037,8 +1057,8 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
 	            this.collectInlandShoreWater(shoreWater, inlandWaterMask, gridSize, gridArea);
 	            this.computeWeightedDistance(waterDistanceCost, inlandWaterMask, shoreWater, gridSize, maxDistanceBlocks, DIST_COST_CARDINAL);
 	         }
-			         applyDirectRiverWaterSurfaces(waterSurface, surfaceHeights, directRiverWaterMask);
-			         boolean[] cliffLandMask = scratch.cliffLandMask;
+	         applyDirectRiverWaterSurfaces(waterSurface, surfaceHeights, directRiverWaterMask);
+	         boolean[] cliffLandMask = scratch.cliffLandMask;
          boolean[] cliffWaterMask = scratch.cliffWaterMask;
          Arrays.fill(cliffLandMask, 0, gridArea, false);
          Arrays.fill(cliffWaterMask, 0, gridArea, false);
@@ -1078,10 +1098,10 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
 	               terrainSurface[indexxxxx] = this.sampleOceanTerrainHeight(
                      gridMinX + x, gridMinZ + z, waterSurface[indexxxxx], this.settings.worldScale()
                   );
-		            } else if (directRiverWaterMask[indexxxxx]) {
-		               waterFlags[indexxxxx] = WATER_INLAND;
-		               terrainSurface[indexxxxx] = directLineRiverTerrainSurface(waterSurface[indexxxxx]);
-		            } else if (inlandWaterMask[indexxxxx]) {
+	            } else if (directRiverWaterMask[indexxxxx]) {
+	               waterFlags[indexxxxx] = WATER_INLAND;
+	               terrainSurface[indexxxxx] = directLineRiverTerrainSurface(waterSurface[indexxxxx]);
+	            } else if (inlandWaterMask[indexxxxx]) {
                waterFlags[indexxxxx] = WATER_INLAND;
                if (cliffWaterMask[indexxxxx]) {
                   int floor = surfaceHeights[indexxxxx];
@@ -1218,6 +1238,7 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
       boolean[] oceanHintMask,
       boolean[] landMaskLand,
       boolean[] lineWaterMask,
+      boolean[] flowingWaterMask,
       long[] waterBodyKeys,
       int[] waterBodySurfaceHints,
       int[] surfaceHeights,
@@ -1246,12 +1267,6 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
          component.maxZ = Math.max(component.maxZ, z);
          if (height < component.minHeight) {
             component.minHeight = height;
-            component.minHeightIndex = index;
-         }
-
-         if (height > component.maxHeight) {
-            component.maxHeight = height;
-            component.maxHeightIndex = index;
          }
 
          if (noDataMask[index]) {
@@ -1268,6 +1283,9 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
 
          if (lineWaterMask[index]) {
             component.lineWaterCellCount++;
+         }
+         if (flowingWaterMask[index]) {
+            component.flowingWaterCellCount++;
          }
 
          long waterBodyKey = waterBodyKeys[index];
@@ -1402,6 +1420,13 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
       return this.sampleOceanTerrainHeight(blockX, blockZ, waterSurface, requestedResolutionMeters);
    }
 
+   public int resolveOceanWaterSurface(int blockX, int blockZ) {
+      double localSurfaceElevation = LandlockedSeaLevel.surfaceElevationMetersAtBlock(
+         blockX, blockZ, this.settings.worldScale()
+      );
+      return Double.isFinite(localSurfaceElevation) ? this.scaleElevationToHeight(localSurfaceElevation) : this.seaLevel;
+   }
+
    int resolveFastStableLakeSurface(
       long waterBodyKey, int candidateSurface, long expectedCacheGeneration
    ) {
@@ -1450,9 +1475,13 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
 	      return LAKE_MAX_TERRAIN_CUT;
 	   }
 
-		   static int riverMaxTerrainCut() {
-		      return RIVER_MAX_TERRAIN_CUT;
-		   }
+   static int riverMaxTerrainCut() {
+      return RIVER_MAX_TERRAIN_CUT;
+   }
+
+   static int riverConnectGapBlocks() {
+      return RIVER_CONNECT_GAP_BLOCKS;
+   }
 
 	   static int capInlandLakeWaterSurface(int waterSurface, int minAdjacentLandSurface) {
 	      return minAdjacentLandSurface == Integer.MAX_VALUE ? waterSurface : Math.min(waterSurface, minAdjacentLandSurface);
@@ -1463,41 +1492,17 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
 	      return minAdjacentLandSurface == Integer.MAX_VALUE ? surface : Math.min(surface, minAdjacentLandSurface);
 	   }
 
-	   static int directLineRiverWaterSurface(int rawSurface) {
-	      return rawSurface;
-	   }
+   static int directLineRiverWaterSurface(int rawSurface) {
+      return rawSurface;
+   }
 
-	   static int directLineRiverTerrainSurface(int rawSurface) {
-	      return rawSurface == Integer.MIN_VALUE ? rawSurface : rawSurface - 1;
-	   }
-
-	   static boolean isNarrowLineWaterCell(int index, int gridSize, boolean[] waterMask, boolean[] lineWaterMask) {
-	      if (!lineWaterMask[index]) {
-	         return false;
-	      } else {
-	         int x = index % gridSize;
-	         int z = index / gridSize;
-	         int cardinalWaterNeighbors = 0;
-
-	         for (int offsetIndex = 0; offsetIndex < NEIGHBOR_OFFSETS.length; offsetIndex += 2) {
-	            int nx = x + NEIGHBOR_OFFSETS[offsetIndex];
-	            int nz = z + NEIGHBOR_OFFSETS[offsetIndex + 1];
-	            if (nx >= 0 && nz >= 0 && nx < gridSize && nz < gridSize && waterMask[nz * gridSize + nx]) {
-	               cardinalWaterNeighbors++;
-	            }
-	         }
-
-	         return cardinalWaterNeighbors <= 2;
-	      }
-	   }
+   static int directLineRiverTerrainSurface(int waterSurface) {
+      return waterSurface == Integer.MIN_VALUE ? waterSurface : waterSurface - 1;
+   }
 
 		   static int capInlandRiverWaterSurface(int waterSurface, int rawSurface, int minAdjacentLandSurface) {
 	      int capped = Math.min(waterSurface, rawSurface);
 	      return minAdjacentLandSurface == Integer.MAX_VALUE ? capped : Math.min(capped, minAdjacentLandSurface);
-	   }
-
-	   static int adjustRiverWaterSurfaceForTerrain(int profileSurface, int rawSurface, boolean lineDominatedRiver, int maxTerrainCut) {
-	      return Math.min(profileSurface, rawSurface);
 	   }
 
 	   static int repairRejectedRiverWaterSurface(int waterSurface, int rawSurface, int maxTerrainCut) {
@@ -1508,6 +1513,14 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
 
    static boolean isLineDominatedWaterComponent(int cellCount, int lineWaterCellCount) {
       return cellCount > 0 && lineWaterCellCount > 0 && (double)lineWaterCellCount / cellCount >= RIVER_LINE_COMPONENT_RATIO;
+   }
+
+   static boolean isFlowDominatedWaterComponent(int cellCount, int flowingWaterCellCount) {
+      return cellCount > 0 && flowingWaterCellCount > 0 && (double)flowingWaterCellCount / cellCount >= RIVER_LINE_COMPONENT_RATIO;
+   }
+
+   static boolean isLineOnlyWaterComponent(int cellCount, int lineWaterCellCount, int flowingWaterCellCount) {
+      return cellCount > 0 && lineWaterCellCount == cellCount && flowingWaterCellCount == cellCount;
    }
 
    static boolean isLineWaterGeometry(OsmWaterFeature feature) {
@@ -1550,61 +1563,6 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
          && maxDim >= riverMinLength
          && minDim <= riverMaxWidth
          && aspect >= RIVER_LINE_ASPECT_RATIO;
-   }
-
-	   private WaterSurfaceResolver.RiverSurface buildRiverSurface(WaterSurfaceResolver.ComponentData component, int inlandSurface, int gridSize) {
-	      int minIndex = component.minHeightIndex;
-	      int maxIndex = component.maxHeightIndex;
-	      int lowSurface = lowestInlandRiverWaterSurface(component.minHeight, component.minBorderHeight, inlandSurface);
-	      int highSurface = lowSurface;
-      if (minIndex < 0 || maxIndex < 0) {
-         return new WaterSurfaceResolver.RiverSurface(0, 0, 0.0, 0.0, 0.0, 1.0, lowSurface, highSurface);
-      }
-
-      int minX = minIndex % gridSize;
-      int minZ = minIndex / gridSize;
-      int maxX = maxIndex % gridSize;
-      int maxZ = maxIndex / gridSize;
-      double axisX = maxX - minX;
-      double axisZ = maxZ - minZ;
-      double axisLength = Math.sqrt(axisX * axisX + axisZ * axisZ);
-      if (axisLength < 1.0) {
-         return new WaterSurfaceResolver.RiverSurface(minX, minZ, 0.0, 0.0, 0.0, 1.0, lowSurface, highSurface);
-      } else {
-         double ux = axisX / axisLength;
-         double uz = axisZ / axisLength;
-         double minProj = Double.POSITIVE_INFINITY;
-         double maxProj = Double.NEGATIVE_INFINITY;
-
-         for (int i = 0; i < component.cells.size(); i++) {
-            int cell = component.cells.getInt(i);
-            int x = cell % gridSize;
-            int z = cell / gridSize;
-            double proj = (x - minX) * ux + (z - minZ) * uz;
-            minProj = Math.min(minProj, proj);
-            maxProj = Math.max(maxProj, proj);
-         }
-
-         double length = Math.max(1.0, maxProj - minProj);
-         return new WaterSurfaceResolver.RiverSurface(minX, minZ, ux, uz, minProj, length, lowSurface, highSurface);
-      }
-   }
-
-   static int steppedRiverSurfaceAt(double progress, int lowSurface, int highSurface, int stepHeight) {
-      if (highSurface <= lowSurface) {
-         return lowSurface;
-      }
-
-      double t = Double.isFinite(progress) ? Mth.clamp(progress, 0.0, 1.0) : 0.0;
-      if (t >= 1.0) {
-         return highSurface;
-      }
-
-      int step = Math.max(1, stepHeight);
-      int range = highSurface - lowSurface;
-      int offset = (int)Math.floor(t * range);
-      int steppedOffset = offset / step * step;
-      return Mth.clamp(lowSurface + steppedOffset, lowSurface, highSurface);
    }
 
    private int computeInlandDepth(double distance, int worldX, int worldZ) {
@@ -1685,6 +1643,7 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
       boolean[] noDataMask,
       boolean[] oceanHintMask,
       boolean[] lineWaterMask,
+      boolean[] flowingWaterMask,
       long[] waterBodyKeys,
       int[] waterBodySurfaceHints
    ) {
@@ -1714,11 +1673,16 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
                   noDataMask,
                   oceanHintMask,
                   lineWaterMask,
+                  flowingWaterMask,
                   waterBodyKeys,
                   waterBodySurfaceHints
                );
             }
          }
+
+         repairFlowingWaterGaps(
+            baseWaterMask, oceanHintMask, lineWaterMask, flowingWaterMask, gridSize, RIVER_CONNECT_GAP_BLOCKS
+         );
 
          for (boolean water : baseWaterMask) {
             if (water) {
@@ -1740,6 +1704,7 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
       boolean[] noDataMask,
       boolean[] oceanHintMask,
       boolean[] lineWaterMask,
+      boolean[] flowingWaterMask,
       long[] waterBodyKeys,
       int[] waterBodySurfaceHints
    ) {
@@ -1792,8 +1757,10 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
                   noDataMask,
                   oceanHintMask,
                   lineWaterMask,
+                  flowingWaterMask,
                   feature.oceanHint(),
                   lineWaterGeometry,
+                  feature.flowingWater(),
                   waterBodyKey,
                   waterBodySurfaceHint,
                   waterBodyKeys,
@@ -1825,8 +1792,10 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
                      noDataMask,
                      oceanHintMask,
                      lineWaterMask,
+                     flowingWaterMask,
                      feature.oceanHint(),
-                     lineWaterGeometry,
+                     false,
+                     feature.flowingWater(),
                      waterBodyKey,
                      waterBodySurfaceHint,
                      waterBodyKeys,
@@ -1850,7 +1819,9 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
       boolean[] noDataMask,
       boolean[] oceanHintMask,
       boolean[] lineWaterMask,
+      boolean[] flowingWaterMask,
       boolean oceanHint,
+      boolean lineWater,
       boolean flowingWater,
       long waterBodyKey,
       int waterBodySurfaceHint,
@@ -1879,7 +1850,9 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
                   noDataMask,
                   oceanHintMask,
                   lineWaterMask,
+                  flowingWaterMask,
                   oceanHint,
+                  lineWater,
                   flowingWater,
                   waterBodyKey,
                   waterBodySurfaceHint,
@@ -1902,7 +1875,9 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
          noDataMask,
          oceanHintMask,
          lineWaterMask,
+         flowingWaterMask,
          oceanHint,
+         lineWater,
          flowingWater,
          waterBodyKey,
          waterBodySurfaceHint,
@@ -1923,7 +1898,9 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
       boolean[] noDataMask,
       boolean[] oceanHintMask,
       boolean[] lineWaterMask,
+      boolean[] flowingWaterMask,
       boolean oceanHint,
+      boolean lineWater,
       boolean flowingWater,
       long waterBodyKey,
       int waterBodySurfaceHint,
@@ -1947,7 +1924,9 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
          noDataMask,
          oceanHintMask,
          lineWaterMask,
+         flowingWaterMask,
          oceanHint,
+         lineWater,
          flowingWater,
          waterBodyKey,
          waterBodySurfaceHint,
@@ -1971,7 +1950,9 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
             noDataMask,
             oceanHintMask,
             lineWaterMask,
+            flowingWaterMask,
             oceanHint,
+            lineWater,
             flowingWater,
             waterBodyKey,
             waterBodySurfaceHint,
@@ -1995,7 +1976,9 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
       boolean[] noDataMask,
       boolean[] oceanHintMask,
       boolean[] lineWaterMask,
+      boolean[] flowingWaterMask,
       boolean oceanHint,
+      boolean lineWater,
       boolean flowingWater,
       long waterBodyKey,
       int waterBodySurfaceHint,
@@ -2014,7 +1997,9 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
          noDataMask,
          oceanHintMask,
          lineWaterMask,
+         flowingWaterMask,
          oceanHint,
+         lineWater,
          flowingWater,
          waterBodyKey,
          waterBodySurfaceHint,
@@ -2036,7 +2021,9 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
                noDataMask,
                oceanHintMask,
                lineWaterMask,
+               flowingWaterMask,
                oceanHint,
+               lineWater,
                flowingWater,
                waterBodyKey,
                waterBodySurfaceHint,
@@ -2058,7 +2045,9 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
                noDataMask,
                oceanHintMask,
                lineWaterMask,
+               flowingWaterMask,
                oceanHint,
+               lineWater,
                flowingWater,
                waterBodyKey,
                waterBodySurfaceHint,
@@ -2079,7 +2068,9 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
       boolean[] noDataMask,
       boolean[] oceanHintMask,
       boolean[] lineWaterMask,
+      boolean[] flowingWaterMask,
       boolean oceanHint,
+      boolean lineWater,
       boolean flowingWater,
       long waterBodyKey,
       int waterBodySurfaceHint,
@@ -2096,7 +2087,9 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
          noDataMask,
          oceanHintMask,
          lineWaterMask,
+         flowingWaterMask,
          oceanHint,
+         lineWater,
          flowingWater,
          waterBodyKey,
          waterBodySurfaceHint,
@@ -2115,8 +2108,10 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
       boolean[] noDataMask,
       boolean[] oceanHintMask,
       boolean[] lineWaterMask,
+      boolean[] flowingWaterMask,
       boolean oceanHint,
       boolean lineWater,
+      boolean flowingWater,
       long waterBodyKey,
       int waterBodySurfaceHint,
       long[] waterBodyKeys,
@@ -2133,6 +2128,9 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
          }
          if (lineWater) {
             lineWaterMask[index] = true;
+         }
+         if (flowingWater) {
+            flowingWaterMask[index] = true;
          }
 
          if (waterBodyKey != 0L) {
@@ -2153,6 +2151,113 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
       }
 
       return feature.featureId();
+   }
+
+   static int repairFlowingWaterGaps(
+      boolean[] waterMask,
+      boolean[] oceanHintMask,
+      boolean[] lineWaterMask,
+      boolean[] flowingWaterMask,
+      int gridSize,
+      int maxGap
+   ) {
+      if (maxGap <= 0 || gridSize <= 0 || waterMask.length < gridSize * gridSize) {
+         return 0;
+      }
+
+      int repaired = 0;
+      int maxDistance = maxGap + 1;
+      for (int start = 0; start < gridSize * gridSize; start++) {
+         if (!flowingWaterMask[start] || oceanHintMask[start]) {
+            continue;
+         }
+
+         int startX = start % gridSize;
+         int startZ = start / gridSize;
+         for (int direction = 0; direction < NEIGHBOR_OFFSETS_8.length; direction += 2) {
+            int dx = NEIGHBOR_OFFSETS_8[direction];
+            int dz = NEIGHBOR_OFFSETS_8[direction + 1];
+            for (int distance = 1; distance <= maxDistance; distance++) {
+               int x = startX + dx * distance;
+               int z = startZ + dz * distance;
+               if (x < 0 || z < 0 || x >= gridSize || z >= gridSize) {
+                  break;
+               }
+
+               int target = z * gridSize + x;
+               if (oceanHintMask[target]) {
+                  break;
+               }
+               if (!waterMask[target]) {
+                  continue;
+               }
+               if (distance > 1) {
+                  repaired += fillFlowingWaterConnection(
+                     startX,
+                     startZ,
+                     x,
+                     z,
+                     gridSize,
+                     waterMask,
+                     lineWaterMask,
+                     flowingWaterMask,
+                     lineWaterMask[start] && lineWaterMask[target]
+                  );
+               }
+               break;
+            }
+         }
+      }
+      return repaired;
+   }
+
+   private static int fillFlowingWaterConnection(
+      int fromX,
+      int fromZ,
+      int toX,
+      int toZ,
+      int gridSize,
+      boolean[] waterMask,
+      boolean[] lineWaterMask,
+      boolean[] flowingWaterMask,
+      boolean lineWater
+   ) {
+      int repaired = 0;
+      int x = fromX;
+      int z = fromZ;
+      while (x != toX || z != toZ) {
+         int stepX = Integer.compare(toX, x);
+         if (stepX != 0) {
+            x += stepX;
+            repaired += markFlowingConnectionCell(x, z, gridSize, waterMask, lineWaterMask, flowingWaterMask, lineWater);
+         }
+
+         int stepZ = Integer.compare(toZ, z);
+         if (stepZ != 0) {
+            z += stepZ;
+            repaired += markFlowingConnectionCell(x, z, gridSize, waterMask, lineWaterMask, flowingWaterMask, lineWater);
+         }
+      }
+      return repaired;
+   }
+
+   private static int markFlowingConnectionCell(
+      int x,
+      int z,
+      int gridSize,
+      boolean[] waterMask,
+      boolean[] lineWaterMask,
+      boolean[] flowingWaterMask,
+      boolean lineWater
+   ) {
+      int index = z * gridSize + x;
+      boolean repaired = !waterMask[index];
+      waterMask[index] = true;
+      flowingWaterMask[index] = true;
+      if (lineWater) {
+         lineWaterMask[index] = true;
+      }
+      return repaired ? 1 : 0;
    }
 
    private int estimateOsmFeatureSurface(double[][] partXs, double[][] partZs) {
@@ -2289,13 +2394,15 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
 	      }
 	   }
 
-	   private static void applyDirectRiverWaterSurfaces(int[] waterSurface, int[] surfaceHeights, boolean[] directRiverWaterMask) {
-	      for (int index = 0; index < directRiverWaterMask.length; index++) {
-	         if (directRiverWaterMask[index]) {
-	            waterSurface[index] = directLineRiverWaterSurface(surfaceHeights[index]);
-	         }
-	      }
-	   }
+   private static void applyDirectRiverWaterSurfaces(
+      int[] waterSurface, int[] surfaceHeights, boolean[] directRiverWaterMask
+   ) {
+      for (int index = 0; index < directRiverWaterMask.length; index++) {
+         if (directRiverWaterMask[index]) {
+            waterSurface[index] = directLineRiverWaterSurface(surfaceHeights[index]);
+         }
+      }
+   }
 
 	   private void collectInlandShoreWater(IntArrayList shoreWater, boolean[] inlandWaterMask, int gridSize, int gridArea) {
 	      shoreWater.clear();
@@ -2319,20 +2426,26 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
       int gridArea = gridSize * gridSize;
       WaterSurfaceResolver.RegionScratch scratch = REGION_SCRATCH.get();
       IntArrayList oceanEdge = scratch.shoreLand;
+      int[] nearestOceanSurface = scratch.nearestSurface;
       oceanEdge.clear();
 
       for (int index = 0; index < gridArea; index++) {
          if (inlandWaterMask[index]) {
             int x = index % gridSize;
             int z = index / gridSize;
+            int adjacentOceanSurface = Integer.MAX_VALUE;
 
             for (int n = 0; n < NEIGHBOR_OFFSETS.length; n += 2) {
                int nx = x + NEIGHBOR_OFFSETS[n];
                int nz = z + NEIGHBOR_OFFSETS[n + 1];
                if (nx >= 0 && nz >= 0 && nx < gridSize && nz < gridSize && oceanWaterMask[nz * gridSize + nx]) {
-                  oceanEdge.add(index);
-                  break;
+                  adjacentOceanSurface = Math.min(adjacentOceanSurface, waterSurface[nz * gridSize + nx]);
                }
+            }
+
+            if (adjacentOceanSurface != Integer.MAX_VALUE) {
+               nearestOceanSurface[index] = adjacentOceanSurface;
+               oceanEdge.add(index);
             }
          }
       }
@@ -2347,7 +2460,9 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
       }
 
       int[] oceanDistanceCost = scratch.landDistanceCost;
-      this.computeWeightedDistance(oceanDistanceCost, inlandWaterMask, oceanEdge, gridSize, transitionBlocks, 0);
+      this.computeWeightedDistanceWithSurface(
+         oceanDistanceCost, nearestOceanSurface, inlandWaterMask, oceanEdge, gridSize, transitionBlocks, 0
+      );
       int maxCost = transitionBlocks * DIST_COST_CARDINAL;
 
       for (int index = 0; index < gridArea; index++) {
@@ -2355,71 +2470,17 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
          if (inlandWaterMask[index] && distanceCost != Integer.MAX_VALUE && distanceCost <= maxCost) {
             double t = smoothstep(distanceCost / (double)Math.max(1, maxCost));
             int currentSurface = waterSurface[index];
-            int transitioned = (int)Math.round(Mth.lerp(t, this.seaLevel, currentSurface));
-            waterSurface[index] = currentSurface >= this.seaLevel
-               ? Mth.clamp(transitioned, this.seaLevel, currentSurface)
-               : Mth.clamp(transitioned, currentSurface, this.seaLevel);
+            int oceanSurface = nearestOceanSurface[index];
+            waterSurface[index] = transitionedWaterSurface(currentSurface, oceanSurface, t);
          }
       }
    }
 
-   private void applyOceanFloorTransition(int[] terrainSurface, int[] waterSurface, boolean[] oceanWaterMask, int gridSize) {
-      int transitionBlocks = Math.min(OCEAN_FLOOR_TRANSITION_BLOCKS, this.regionMargin);
-      if (transitionBlocks <= 0) {
-         return;
-      }
-
-      int gridArea = gridSize * gridSize;
-      WaterSurfaceResolver.RegionScratch scratch = REGION_SCRATCH.get();
-      IntArrayList shoreOcean = scratch.shoreLand;
-      shoreOcean.clear();
-      int[] floorDistanceCost = scratch.landDistanceCost;
-      int[] nearestFloor = scratch.nearestSurface;
-
-      for (int index = 0; index < gridArea; index++) {
-         if (oceanWaterMask[index]) {
-            int x = index % gridSize;
-            int z = index / gridSize;
-            int maxFloor = waterSurface[index] - OCEAN_MIN_DEPTH;
-            int shorelineFloor = Integer.MIN_VALUE;
-
-            for (int n = 0; n < NEIGHBOR_OFFSETS_8.length; n += 2) {
-               int nx = x + NEIGHBOR_OFFSETS_8[n];
-               int nz = z + NEIGHBOR_OFFSETS_8[n + 1];
-               if (nx >= 0 && nz >= 0 && nx < gridSize && nz < gridSize) {
-                  int neighbor = nz * gridSize + nx;
-                  if (!oceanWaterMask[neighbor]) {
-                     int neighborFloor = Math.min(terrainSurface[neighbor], maxFloor);
-                     shorelineFloor = shorelineFloor == Integer.MIN_VALUE ? neighborFloor : Math.max(shorelineFloor, neighborFloor);
-                  }
-               }
-            }
-
-            if (shorelineFloor != Integer.MIN_VALUE) {
-               nearestFloor[index] = shorelineFloor;
-               shoreOcean.add(index);
-            }
-         }
-      }
-
-      if (!shoreOcean.isEmpty()) {
-         this.computeWeightedDistanceWithSurface(floorDistanceCost, nearestFloor, oceanWaterMask, shoreOcean, gridSize, transitionBlocks, 0);
-         int maxCost = transitionBlocks * DIST_COST_CARDINAL;
-
-         for (int index = 0; index < gridArea; index++) {
-            if (oceanWaterMask[index]) {
-               int distanceCost = floorDistanceCost[index];
-               if (distanceCost != Integer.MAX_VALUE && distanceCost <= maxCost) {
-                  double t = smoothstep(distanceCost / (double)Math.max(1, maxCost));
-                  int maxFloor = waterSurface[index] - OCEAN_MIN_DEPTH;
-                  int shorelineFloor = Math.min(nearestFloor[index], maxFloor);
-                  int gebcoFloor = Math.min(terrainSurface[index], maxFloor);
-                  int blended = (int)Math.round(Mth.lerp(t, shorelineFloor, gebcoFloor));
-                  terrainSurface[index] = Math.min(blended, maxFloor);
-               }
-            }
-         }
-      }
+   static int transitionedWaterSurface(int currentSurface, int oceanSurface, double transitionProgress) {
+      int transitioned = (int)Math.round(Mth.lerp(transitionProgress, oceanSurface, currentSurface));
+      return currentSurface >= oceanSurface
+         ? Mth.clamp(transitioned, oceanSurface, currentSurface)
+         : Mth.clamp(transitioned, currentSurface, oceanSurface);
    }
 
    private void applyShorelineWallClamp(
@@ -2447,7 +2508,7 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
             if (minWaterSurface != Integer.MAX_VALUE) {
                int terrain = terrainSurface[index];
                int diff = minWaterSurface - terrain;
-               if (diff > 0 && diff <= RIVER_SURFACE_STEP_HEIGHT) {
+               if (diff > 0 && diff <= SHORELINE_WALL_CLAMP_HEIGHT) {
                   terrainSurface[index] = minWaterSurface;
                }
             }
@@ -2547,32 +2608,17 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
                if (blendLandMask[indexx]) {
                   int distanceCost = landDistanceCost[indexx];
                   if (distanceCost != Integer.MAX_VALUE && distanceCost <= maxBlendCost) {
-                     double distance = distanceCost / (double)DIST_COST_CARDINAL;
-                     int x = indexx % gridSize;
-                     int z = indexx / gridSize;
                      int sourceSurface = nearestSurface[indexx];
                      int base = baseSurface[indexx];
-                     int heightAboveWater = Math.max(0, base - sourceSurface);
-                     double localSlope = Math.max(estimateLocalSlope(baseSurface, gridSize, x, z), heightAboveWater / Math.max(1.0, distance));
-                     double cliffFactor = shorelineCliffFactor(localSlope, this.cliffSlopeThreshold);
-                     if (cliffLandMask[indexx]) {
-                        cliffFactor = Math.max(cliffFactor, 0.7);
-                     }
-
-                     double effectiveBlend = Math.max(1.0, blendDistance * (1.0 - 0.65 * cliffFactor));
-                     if (distance > effectiveBlend) {
-                        continue;
-                     }
-
-                     double t = smoothstep(distance / effectiveBlend);
-                     int blended = (int)Math.round(Mth.lerp(t, sourceSurface, base));
-                     if (cliffFactor > 0.0) {
-                        int cliffToe = sourceSurface + SHORELINE_CLIFF_FOOT_HEIGHT + (int)Math.round(distance * (1.0 + cliffFactor));
-                        blended = Math.max(blended, Math.min(base, cliffToe));
-                     }
-
-                     if (blended < base) {
-                        terrainSurface[indexx] = blended;
+                     int naturalized = naturalizedInlandBankSurface(
+                        base,
+                        sourceSurface,
+                        distanceCost,
+                        blendDistance,
+                        this.settings.shorelineBlendCliffLimit()
+                     );
+                     if (naturalized < terrainSurface[indexx]) {
+                        terrainSurface[indexx] = naturalized;
                      }
                   }
                }
@@ -2581,27 +2627,29 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
       }
    }
 
-   private static double estimateLocalSlope(int[] surfaceHeights, int gridSize, int x, int z) {
-      int index = z * gridSize + x;
-      int center = surfaceHeights[index];
-      int maxDiff = 0;
-
-      for (int n = 0; n < NEIGHBOR_OFFSETS_8.length; n += 2) {
-         int nx = x + NEIGHBOR_OFFSETS_8[n];
-         int nz = z + NEIGHBOR_OFFSETS_8[n + 1];
-         if (nx >= 0 && nz >= 0 && nx < gridSize && nz < gridSize) {
-            int neighbor = nz * gridSize + nx;
-            maxDiff = Math.max(maxDiff, Math.abs(center - surfaceHeights[neighbor]));
-         }
+   static int naturalizedInlandBankSurface(
+      int baseSurface,
+      int waterSurface,
+      int distanceCost,
+      int blendDistance,
+      boolean limitCliffSlope
+   ) {
+      if (distanceCost == Integer.MAX_VALUE || blendDistance <= 0) {
+         return baseSurface;
       }
 
-      return maxDiff;
-   }
+      int distanceBlocks = Math.max(1, (distanceCost + DIST_COST_CARDINAL - 1) / DIST_COST_CARDINAL);
+      if (distanceBlocks > blendDistance || baseSurface <= waterSurface) {
+         return baseSurface;
+      }
 
-   private static double shorelineCliffFactor(double slope, int cliffSlopeThreshold) {
-      double start = Math.max(1.0, cliffSlopeThreshold * 0.5);
-      double end = Math.max(start + 1.0, cliffSlopeThreshold * 2.0);
-      return Mth.clamp((slope - start) / (end - start), 0.0, 1.0);
+      double progress = distanceBlocks / (double)blendDistance;
+      int blended = (int)Math.round(Mth.lerp(smoothstep(progress), waterSurface, baseSurface));
+      if (limitCliffSlope) {
+         int slopeLimited = waterSurface + distanceBlocks * INLAND_BANK_MAX_RISE_PER_BLOCK;
+         blended = Math.min(blended, slopeLimited);
+      }
+      return Mth.clamp(blended, waterSurface, baseSurface);
    }
 
    private static double smoothstep(double value) {
@@ -2829,10 +2877,6 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
       usedBuckets.clear();
    }
 
-   private TerrainPreloadPackage.Sample samplePreloadedTerrain(double blockX, double blockZ) {
-      return this.samplePreloadedTerrain(blockX, blockZ, this.settings.worldScale());
-   }
-
    private TerrainPreloadPackage.Sample samplePreloadedTerrain(
       double blockX, double blockZ, double previewResolutionMeters
    ) {
@@ -2897,10 +2941,6 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
       return this.sampleSurface(blockX, blockZ, oceanMask, previewResolutionMeters);
    }
 
-   private int sampleSurfaceHeight(double blockX, double blockZ, boolean oceanZoom, double previewResolutionMeters) {
-      return this.sampleSurface(blockX, blockZ, oceanZoom, previewResolutionMeters).height();
-   }
-
    private WaterSurfaceResolver.SurfaceSample sampleSurface(
       double blockX, double blockZ, boolean oceanMask, double previewResolutionMeters
    ) {
@@ -2932,8 +2972,9 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
             rawFloor,
             coast.coastDistance(),
             coast.correctionRequired(),
-            OCEAN_FLOOR_TRANSITION_BLOCKS,
-            Math.max(1.0, previewResolutionMeters / Math.max(1.0E-4, this.settings.worldScale()))
+            this.oceanFloorTransitionBlocks,
+            Math.max(1.0, previewResolutionMeters / Math.max(1.0E-4, this.settings.worldScale())),
+            this.minimumOffshoreDepth
          );
       return this.clampOceanTerrainHeight(
          OceanFloorProfile.fitFloorToWorld(
@@ -2953,7 +2994,8 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
       if (Double.isFinite(elevation)) {
          if (elevation < 0.0) {
             int floor = this.scaleElevationToHeight(elevation);
-            return new OceanCoastField.BathymetrySample(true, Math.max(OCEAN_MIN_DEPTH, this.seaLevel - floor));
+            int waterSurface = this.resolveOceanWaterSurface(blockX, blockZ);
+            return new OceanCoastField.BathymetrySample(true, Math.max(OCEAN_MIN_DEPTH, waterSurface - floor));
          }
 
          // A zero or positive OpenWaters value inside a definitive Overture
@@ -2969,25 +3011,6 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
             this.settings.worldScale(),
             this.settings.effectiveOceanicHeightScale()
          )
-      );
-   }
-
-   private int fallbackOceanTerrainHeight(double blockX, double blockZ, int waterSurface, double previewResolutionMeters) {
-      TerrainPreloadPackage.Sample preloaded = this.samplePreloadedTerrain(blockX, blockZ, previewResolutionMeters);
-      if (preloaded != null) {
-         return this.clampOceanTerrainHeight(preloaded.terrainHeight(), waterSurface);
-      }
-
-      double fallbackElevation = this.elevationSource.samplePreviewElevationMeters(
-         blockX, blockZ, this.settings.worldScale(), false, this.settings.demSelection(), previewResolutionMeters
-      );
-      if (Double.isFinite(fallbackElevation) && fallbackElevation < 0.0) {
-         return this.clampOceanTerrainHeight(this.scaleElevationToHeight(fallbackElevation), waterSurface);
-      }
-
-      return this.clampOceanTerrainHeight(
-         waterSurface - fallbackOceanDepthBlocks(blockX, blockZ, this.settings.worldScale(), this.settings.effectiveOceanicHeightScale()),
-         waterSurface
       );
    }
 
@@ -3186,21 +3209,19 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
       private int minZ = Integer.MAX_VALUE;
       private int maxZ = Integer.MIN_VALUE;
 	      private int minHeight = Integer.MAX_VALUE;
-	      private int maxHeight = Integer.MIN_VALUE;
-	      private int minHeightIndex = -1;
-	      private int maxHeightIndex = -1;
 	      private int minBorderHeight = Integer.MAX_VALUE;
 	      private long heightSum;
       private int cellCount;
       private int landMaskLandCount;
       private int lineWaterCellCount;
+      private int flowingWaterCellCount;
       private int belowSeaCellCount;
       private boolean touchesNoData;
       private boolean touchesEdge;
       private boolean oceanHinted;
       private boolean isOcean;
       private boolean riverShape;
-      private boolean lineDominatedRiver;
+      private boolean lineOnlyRiver;
       private long waterBodyKey;
       private int maxDistanceCost;
       private final IntArrayList surfaceHints = new IntArrayList();
@@ -3320,6 +3341,7 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
       private boolean[] mapterhornLandOverride;
       private boolean[] landMaskLand;
       private boolean[] lineWaterMask;
+      private boolean[] flowingWaterMask;
       private long[] waterBodyKeys;
       private int[] waterBodySurfaceHints;
       private int[] surfaceHeights;
@@ -3364,6 +3386,7 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
             this.mapterhornLandOverride = new boolean[size];
             this.landMaskLand = new boolean[size];
             this.lineWaterMask = new boolean[size];
+            this.flowingWaterMask = new boolean[size];
             this.waterBodyKeys = new long[size];
             this.waterBodySurfaceHints = new int[size];
             this.surfaceHeights = new int[size];
@@ -3410,34 +3433,6 @@ public final class WaterSurfaceResolver implements TellusCacheHandle {
       private void resetLists() {
          this.shoreWater.clear();
          this.shoreLand.clear();
-      }
-   }
-
-   private static final class RiverSurface {
-      private final int originX;
-      private final int originZ;
-      private final double ux;
-      private final double uz;
-      private final double minProj;
-      private final double length;
-      private final int lowSurface;
-      private final int highSurface;
-
-      private RiverSurface(int originX, int originZ, double ux, double uz, double minProj, double length, int lowSurface, int highSurface) {
-         this.originX = originX;
-         this.originZ = originZ;
-         this.ux = ux;
-         this.uz = uz;
-         this.minProj = minProj;
-         this.length = length;
-         this.lowSurface = lowSurface;
-         this.highSurface = highSurface;
-      }
-
-      private int surfaceAt(int x, int z) {
-         double proj = (x - this.originX) * this.ux + (z - this.originZ) * this.uz;
-         double t = (proj - this.minProj) / Math.max(1.0, this.length);
-         return steppedRiverSurfaceAt(t, this.lowSurface, this.highSurface, RIVER_SURFACE_STEP_HEIGHT);
       }
    }
 

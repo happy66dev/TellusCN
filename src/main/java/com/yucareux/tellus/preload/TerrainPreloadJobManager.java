@@ -59,11 +59,13 @@ public final class TerrainPreloadJobManager {
       return PACKAGE_PRELOAD_THREADS;
    }
 
-   public TerrainPreloadJob start(TerrainPreloadArea area, EarthGeneratorSettings settings) {
+   public synchronized TerrainPreloadJob start(TerrainPreloadArea area, EarthGeneratorSettings settings) {
       TerrainPreloadJob previous = this.currentJob.getAndSet(null);
       if (previous != null) {
          TerrainPreloadProgress progress = previous.progress();
-         if (progress.stage() == TerrainPreloadStage.DOWNLOADING) {
+         if (progress.stage() != TerrainPreloadStage.COMPLETE
+            && progress.stage() != TerrainPreloadStage.CANCELLED
+            && progress.stage() != TerrainPreloadStage.FAILED) {
             previous.cancel();
          }
       }

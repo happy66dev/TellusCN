@@ -103,9 +103,11 @@ public final class MountainSurfaceRules {
    }
 
    public static boolean isMountainRockyCover(int coverClass, int heightAboveSea) {
+      // Keep vegetated land cover authoritative here. The generator can still
+      // expose stone locally through its steep-slope surface fallback.
       return coverClass == ESA_NO_DATA
          ? heightAboveSea >= SURFACE_ALPINE_HEIGHT_ABOVE_SEA
-         : coverClass == ESA_SNOW_ICE || coverClass == ESA_BARE || coverClass == ESA_SHRUBLAND || coverClass == ESA_MOSS_LICHEN;
+         : coverClass == ESA_SNOW_ICE || coverClass == ESA_BARE;
    }
 
    public static boolean qualifiesForMountainPalette(int coverClass, int heightAboveSea, int slopeDiff, int convexity) {

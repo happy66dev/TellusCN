@@ -14,6 +14,7 @@ import org.tukaani.xz.XZOutputStream;
 final class TellusElevationProvenanceCodec {
    private static final byte[] SIGNATURE = "TELLUS/PROVENANCE".getBytes(StandardCharsets.US_ASCII);
    private static final int VERSION = 1;
+   private static final int MAX_XZ_MEMORY_KIB = 64 * 1024;
 
    private TellusElevationProvenanceCodec() {
    }
@@ -49,14 +50,23 @@ final class TellusElevationProvenanceCodec {
             int width = dataIn.readInt();
             int height = dataIn.readInt();
             int providerMask = dataIn.readInt();
-            int sampleCount = width * height;
+            int sampleCount;
+            try {
+               sampleCount = TellusElevationProvenance.checkedSampleCount(width, height);
+            } catch (IllegalArgumentException error) {
+               throw new IOException("Invalid elevation provenance dimensions", error);
+            }
+
             byte[] primaryProviders = new byte[sampleCount];
             byte[] blendedFlags = new byte[TellusElevationProvenance.bitSetLength(sampleCount)];
             byte[] mapterhornAvailableFlags = new byte[TellusElevationProvenance.bitSetLength(sampleCount)];
-            try (SingleXZInputStream xzIn = new SingleXZInputStream(input); DataInputStream xzData = new DataInputStream(xzIn)) {
+            try (SingleXZInputStream xzIn = new SingleXZInputStream(input, MAX_XZ_MEMORY_KIB); DataInputStream xzData = new DataInputStream(xzIn)) {
                xzData.readFully(primaryProviders);
                xzData.readFully(blendedFlags);
                xzData.readFully(mapterhornAvailableFlags);
+               if (xzData.read() != -1) {
+                  throw new IOException("Trailing data in elevation provenance cache");
+               }
             }
 
             return new TellusElevationProvenance(

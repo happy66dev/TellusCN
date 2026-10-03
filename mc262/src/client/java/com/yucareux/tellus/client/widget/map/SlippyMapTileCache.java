@@ -11,6 +11,7 @@ import com.yucareux.tellus.cache.TellusCacheFiles;
 import com.yucareux.tellus.cache.TellusCacheHandle;
 import com.yucareux.tellus.cache.TellusCacheRegistry;
 import com.yucareux.tellus.config.TellusEndpointConfig;
+import com.yucareux.tellus.world.data.source.MapTileImageValidator;
 import java.io.BufferedInputStream;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -35,6 +36,8 @@ import net.minecraft.client.Minecraft;
 @Environment(EnvType.CLIENT)
 public class SlippyMapTileCache implements TellusCacheHandle {
    private static final int CACHE_SIZE = 1024;
+   private static final int MAX_TILE_BYTES = 4 * 1024 * 1024;
+   private static final int MAX_TILE_DIMENSION = 512;
    private final ExecutorService loadingService = Executors.newFixedThreadPool(
       4, new ThreadFactoryBuilder().setDaemon(true).setNameFormat("tellus-map-load-%d").build()
    );
@@ -116,7 +119,10 @@ public class SlippyMapTileCache implements TellusCacheHandle {
    private NativeImage downloadImage(SlippyMapTilePos pos, long generation) {
       try {
          byte[] data = this.readTileData(pos, generation);
-         return data == null ? null : NativeImage.read(new ByteArrayInputStream(data));
+         if (data == null) {
+            return null;
+         }
+         return NativeImage.read(new ByteArrayInputStream(data));
       } catch (IOException var4) {
          if (this.isCancelledLoad(var4)) {
             return null;
@@ -129,15 +135,30 @@ public class SlippyMapTileCache implements TellusCacheHandle {
 
    private byte[] readTileData(SlippyMapTilePos pos, long generation) throws IOException {
       Path cachePath = this.cacheRoot.resolve(pos.getCacheName());
-      if (Files.exists(cachePath)) {
-         return Files.readAllBytes(cachePath);
-      } else {
-         String tileUrl = getTileUrl(pos);
-         Tellus.LOGGER.info("[TellusCN] Downloading map tile: {} from URL: {}", pos, tileUrl);
-         URI uri = URI.create(tileUrl);
-         URL url = uri.toURL();
-         HttpURLConnection connection = (HttpURLConnection)url.openConnection();
-         try {
+      if (Files.isRegularFile(cachePath)) {
+         // 喵~防御：缓存文件超过大小上限说明内容不可信，直接删掉重新下载
+         if (Files.size(cachePath) <= MAX_TILE_BYTES) {
+            try (InputStream input = new BufferedInputStream(Files.newInputStream(cachePath))) {
+               // 喵~防御：读取时限制总量并校验确实是合法 PNG，避免坏缓存让后续解码崩溃
+               byte[] data = MapTileImageValidator.readBounded(input, MAX_TILE_BYTES);
+               MapTileImageValidator.validatePng(data, MAX_TILE_DIMENSION, MAX_TILE_DIMENSION);
+               return data;
+            } catch (IOException invalidCache) {
+               // 喵~防御：缓存损坏时删除它，下一次访问会重新走网络下载
+               Files.deleteIfExists(cachePath);
+            }
+         } else {
+            Files.deleteIfExists(cachePath);
+         }
+      }
+
+      // 解析地图瓦片地址：游戏内镜像设置 > JVM 参数 > 官方 OSM
+      String tileUrl = getTileUrl(pos);
+      Tellus.LOGGER.info("[TellusCN] Downloading map tile: {} from URL: {}", pos, tileUrl);
+      URI uri = URI.create(tileUrl);
+      URL url = uri.toURL();
+      HttpURLConnection connection = (HttpURLConnection)url.openConnection();
+      try {
             connection.setConnectTimeout(5000);
             connection.setReadTimeout(5000);
             connection.setRequestProperty("User-Agent", "Tellus/2.0.0 (Minecraft Mod)");
@@ -146,12 +167,18 @@ public class SlippyMapTileCache implements TellusCacheHandle {
             if (responseCode != 200) {
                throw new IOException("OpenStreetMap tile request failed with HTTP " + responseCode + " for " + pos);
             }
+            long contentLength = connection.getContentLengthLong();
+            if (contentLength > MAX_TILE_BYTES) {
+               throw new IOException("OpenStreetMap tile response exceeds the safety limit for " + pos);
+            }
 
             InputStream stream = Objects.requireNonNull(connection.getInputStream(), "tileStream");
             this.loadingStreams.add(stream);
 
             try (InputStream input = new BufferedInputStream(stream)) {
-               byte[] data = input.readAllBytes();
+               // 喵~防御：限制读取总量并校验确实是合法 PNG，避免超大或伪造内容进入缓存
+               byte[] data = MapTileImageValidator.readBounded(input, MAX_TILE_BYTES);
+               MapTileImageValidator.validatePng(data, MAX_TILE_DIMENSION, MAX_TILE_DIMENSION);
                Tellus.LOGGER.info("[TellusCN] Downloaded map tile: {} ({} bytes)", pos, data.length);
                if (!this.shuttingDown && !Thread.currentThread().isInterrupted() && TellusCacheRegistry.isCurrent(TellusCacheDomain.OSM, generation)) {
                   this.cacheData(cachePath, data, generation);
@@ -162,7 +189,6 @@ public class SlippyMapTileCache implements TellusCacheHandle {
             }
          } finally {
             connection.disconnect();
-         }
       }
    }
 

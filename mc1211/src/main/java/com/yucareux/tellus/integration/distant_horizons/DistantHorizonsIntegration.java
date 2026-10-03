@@ -20,6 +20,8 @@ import com.yucareux.tellus.worldgen.EarthGeneratorSettings;
 import java.lang.reflect.Method;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
+import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.core.Holder;
 import net.minecraft.server.level.ServerLevel;
@@ -48,6 +50,7 @@ public final class DistantHorizonsIntegration {
    private static final int FLOWERING_AZALEA_LEAVES_TEXTURE_COLOR = 0x646F3D;
    private static final Block PALE_OAK_LEAVES_BLOCK = blockByField("PALE_OAK_LEAVES");
    private static final Map<String, EarthChunkGenerator> TELLUS_GENERATORS_BY_DIMENSION = new ConcurrentHashMap<>();
+   private static final DistantHorizonsStartupGate STARTUP_GATE = new DistantHorizonsStartupGate();
    private static final DistantHorizonsRuntimeConfigGuard DIRECT_LOD_CONFIG_GUARD = DistantHorizonsRuntimeConfigGuard.reflective(
       Boolean.parseBoolean(System.getProperty("tellus.dhForceNSizedGeneration", "true"))
    );
@@ -75,10 +78,14 @@ public final class DistantHorizonsIntegration {
    }
 
    public static void bootstrap() {
+      registerStartupGateEvents();
       boolean gateAvailable = generationGateAvailable();
       ManagedTerrainCompatibility.setDistantHorizonsCompatibility(true, gateAvailable);
       if (!gateAvailable) {
-         LOGGER.warn("Tellus-managed terrain downloads are unavailable with this Distant Horizons build; worlds will use the legacy download path");
+         LOGGER.warn(
+            "Tellus-managed terrain downloads are unavailable with this Distant Horizons build; "
+               + "worlds will use the legacy download path after startup generation is released"
+         );
       }
       if (checkApiVersion()) {
          DhApiEventRegister.on(DhApiLevelLoadEvent.class, new DhApiLevelLoadEvent() {
@@ -92,6 +99,32 @@ public final class DistantHorizonsIntegration {
             }
          });
          registerLeafColorOverrideEvents();
+      }
+   }
+
+   private static void registerStartupGateEvents() {
+      STARTUP_GATE.reset();
+      ServerLifecycleEvents.SERVER_STARTING.register(server -> STARTUP_GATE.reset());
+      ServerLifecycleEvents.SERVER_STOPPING.register(server -> STARTUP_GATE.reset());
+      ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
+         if (STARTUP_GATE.release()) {
+            LOGGER.info("Released Tellus DH generation after initial player position became available");
+         }
+      });
+   }
+
+   static boolean isDistantGenerationReady() {
+      return STARTUP_GATE.isReady();
+   }
+
+   static void awaitDistantGenerationReady() {
+      try {
+         if (!STARTUP_GATE.awaitReady()) {
+            throw new java.util.concurrent.CancellationException("Tellus DH startup gate reset before release");
+         }
+      } catch (InterruptedException error) {
+         Thread.currentThread().interrupt();
+         throw new java.util.concurrent.CancellationException("Tellus DH startup gate interrupted");
       }
    }
 

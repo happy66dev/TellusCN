@@ -126,8 +126,15 @@ public final class TerrainPreloadJob {
    }
 
    public void start() {
-      if (this.started.compareAndSet(false, true)) {
-         this.future = this.coordinatorExecutor.submit(this::runDownload);
+      synchronized (this.lifecycleLock) {
+         if (this.started.compareAndSet(false, true)) {
+            try {
+               this.future = this.coordinatorExecutor.submit(this::runDownload);
+            } catch (RuntimeException error) {
+               this.started.set(false);
+               throw error;
+            }
+         }
       }
    }
 

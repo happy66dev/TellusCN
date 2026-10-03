@@ -13,6 +13,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.yucareux.tellus.Tellus;
 import com.yucareux.tellus.integration.distant_horizons.managed.ManagedTerrainNetworkPolicy;
+import com.yucareux.tellus.world.data.pmtiles.PmTilesSafety;
 import com.yucareux.tellus.world.data.source.ParallelDownloadRunner;
 import com.yucareux.tellus.worldgen.EarthProjection;
 import io.github.sebasbaumh.mapbox.vectortile.VectorTile.Tile;
@@ -263,7 +264,7 @@ public final class TellusOsmRoadSource implements TellusCacheHandle {
             Tellus.LOGGER.debug("Failed to load Overture road tile {}", key, var6);
             this.tileLoadFailures.add(key);
             OsmPerf.recordTileLoad(OsmPerf.TileSource.OSM_ROADS, OsmPerf.TileLoadPath.FAILURE);
-            return new TellusOsmRoadSource.TileLookup(OverpassRoadTile.empty(), false);
+            return new TellusOsmRoadSource.TileLookup(OverpassRoadTile.empty(), true);
          }
       }
    }
@@ -451,7 +452,9 @@ public final class TellusOsmRoadSource implements TellusCacheHandle {
    private byte[] readCompressed(Path path) throws IOException {
       byte[] var3;
       try (InputStream input = new GZIPInputStream(Files.newInputStream(path))) {
-         var3 = input.readAllBytes();
+         var3 = PmTilesSafety.readBounded(
+            input, PmTilesSafety.MAX_DECOMPRESSED_TILE_BYTES, "Cached Overture road tile"
+         );
       }
 
       return var3;
@@ -1452,17 +1455,15 @@ public final class TellusOsmRoadSource implements TellusCacheHandle {
    }
 
    private static long resolveFeatureId(Feature feature, Map<String, Object> tags) {
-      if (feature.hasId() && feature.getId() != 0L) {
-         return feature.getId();
-      } else {
-         long idFromTag = parseLongId(tags.get("id"));
-         if (idFromTag != 0L) {
-            return idFromTag;
-         } else {
-            long idFromSources = parseSourceWayId(tags.get("sources"));
-            return idFromSources != 0L ? idFromSources : 0L;
-         }
+      long idFromSources = parseSourceWayId(tags.get("sources"));
+      if (idFromSources != 0L) {
+         return idFromSources;
       }
+      if (feature.hasId() && feature.getId() != 0L) {
+         return syntheticId(feature.getId());
+      }
+      long idFromTag = parseLongId(tags.get("id"));
+      return idFromTag != 0L ? syntheticId(idFromTag) : -1L;
    }
 
    private static long parseLongId(Object value) {
@@ -1495,12 +1496,11 @@ public final class TellusOsmRoadSource implements TellusCacheHandle {
          int cursor = 0;
 
          while (true) {
-            int recordIndex = sources.indexOf("\"record_id\":\"w", cursor);
-            if (recordIndex < 0) {
+            int start = findOsmWayDigitsStart(sources, cursor);
+            if (start < 0) {
                return 0L;
             }
-
-            int start = recordIndex + "\"record_id\":\"w".length();
+            int recordIndex = start - 1;
 
             int end;
             for (end = start; end < sources.length(); end++) {
@@ -1522,6 +1522,25 @@ public final class TellusOsmRoadSource implements TellusCacheHandle {
       } else {
          return 0L;
       }
+   }
+
+   private static int findOsmWayDigitsStart(String sources, int cursor) {
+      while (cursor < sources.length()) {
+         int key = sources.indexOf("\"record_id\"", cursor);
+         if (key < 0) return -1;
+         int colon = sources.indexOf(':', key + 11);
+         int quote = colon < 0 ? -1 : sources.indexOf('"', colon + 1);
+         int prefix = quote + 1;
+         if (quote >= 0 && prefix < sources.length() && sources.charAt(prefix) == 'w') return prefix + 1;
+         cursor = Math.max(key + 1, prefix);
+      }
+      return -1;
+   }
+
+   private static long syntheticId(long value) {
+      if (value == Long.MIN_VALUE) return Long.MIN_VALUE + 1L;
+      long absolute = Math.abs(value);
+      return absolute == 0L ? -1L : -absolute;
    }
 
    private static long hash64(String text) {

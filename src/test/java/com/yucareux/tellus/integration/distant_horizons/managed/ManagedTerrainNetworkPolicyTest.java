@@ -9,9 +9,11 @@ class ManagedTerrainNetworkPolicyTest {
    @Test
    void cacheOnlyScopesNestAndRestoreThreadState() {
       assertFalse(ManagedTerrainNetworkPolicy.isCacheOnly());
-      try (ManagedTerrainNetworkPolicy.Scope outer = ManagedTerrainNetworkPolicy.cacheOnly()) {
+      ManagedTerrainNetworkPolicy.Scope outer = ManagedTerrainNetworkPolicy.cacheOnly();
+      try (outer) {
          assertTrue(ManagedTerrainNetworkPolicy.isCacheOnly());
-         try (ManagedTerrainNetworkPolicy.Scope inner = ManagedTerrainNetworkPolicy.cacheOnly()) {
+         ManagedTerrainNetworkPolicy.Scope inner = ManagedTerrainNetworkPolicy.cacheOnly();
+         try (inner) {
             assertTrue(ManagedTerrainNetworkPolicy.isCacheOnly());
          }
          assertTrue(ManagedTerrainNetworkPolicy.isCacheOnly());

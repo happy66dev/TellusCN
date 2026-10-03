@@ -2,12 +2,13 @@ package com.yucareux.tellus.worldgen;
 
 import com.yucareux.tellus.world.data.biome.BiomeClassification;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.Set;
 import net.minecraft.core.Holder;
 import net.minecraft.core.HolderGetter;
-import net.minecraft.core.HolderLookup;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.util.Mth;
 import net.minecraft.world.level.biome.Biome;
@@ -19,6 +20,10 @@ final class RandomBiomeMixer {
    private static final long LAND_PICK_SALT = 7910913083456271721L;
    private static final long OCEAN_PATCH_SALT = 2568302803750997685L;
    private static final long OCEAN_PICK_SALT = -5823276844928919027L;
+   private static final long RIVER_PATCH_SALT = 3937316899203929053L;
+   private static final long RIVER_PICK_SALT = -8197131963272981473L;
+   private static final long CAVE_PATCH_SALT = 6489672811367659937L;
+   private static final long CAVE_PICK_SALT = -2982849728131767649L;
    private static final long POOL_PICK_SALT = -7512562818295870179L;
    private static final double SPECIAL_LAND_CHANCE = 0.18;
    private static final double ALL_LAND_CHANCE = 0.12;
@@ -34,13 +39,16 @@ final class RandomBiomeMixer {
    private final List<Holder<Biome>> specialLand;
    private final List<Holder<Biome>> shallowOceans;
    private final List<Holder<Biome>> deepOceans;
+   private final List<Holder<Biome>> rivers;
+   private final List<Holder<Biome>> caves;
 
    RandomBiomeMixer(HolderGetter<Biome> biomeLookup, EarthGeneratorSettings settings) {
       Objects.requireNonNull(biomeLookup, "biomeLookup");
       EarthGeneratorSettings safeSettings = Objects.requireNonNull(settings, "settings");
       this.density = Mth.clamp(safeSettings.randomBiomeDensity(), 0.0, 0.4);
       this.seed = safeSettings.randomBiomeSeed();
-      RandomBiomeMixer.Pools pools = buildPools(biomeLookup);
+      Set<ResourceKey<Biome>> selectedKeys = selectedBiomeKeys(safeSettings.randomBiomeIds());
+      RandomBiomeMixer.Pools pools = filterPools(buildPools(biomeLookup, selectedKeys), selectedKeys);
       this.allLand = pools.allLand();
       this.temperateLand = pools.temperateLand();
       this.tropicalLand = pools.tropicalLand();
@@ -49,6 +57,8 @@ final class RandomBiomeMixer {
       this.specialLand = pools.specialLand();
       this.shallowOceans = pools.shallowOceans();
       this.deepOceans = pools.deepOceans();
+      this.rivers = pools.rivers();
+      this.caves = pools.caves();
    }
 
    boolean enabled() {
@@ -57,6 +67,9 @@ final class RandomBiomeMixer {
 
    static boolean isLandPatchActive(EarthGeneratorSettings settings, int blockX, int blockZ) {
       EarthGeneratorSettings safeSettings = Objects.requireNonNull(settings, "settings");
+      if (!RandomBiomeCatalog.hasLandBiomeSelection(safeSettings.randomBiomeIds())) {
+         return false;
+      }
       double density = Mth.clamp(safeSettings.randomBiomeDensity(), 0.0, 0.4);
       return isPatchActive(density, safeSettings.randomBiomeSeed(), blockX, blockZ, LAND_PATCH_SALT);
    }
@@ -90,11 +103,29 @@ final class RandomBiomeMixer {
       return this.pick(pool, blockX, blockZ, OCEAN_PICK_SALT, safeBase);
    }
 
+   Holder<Biome> mixRiver(Holder<Biome> base, int blockX, int blockZ) {
+      Holder<Biome> safeBase = Objects.requireNonNull(base, "baseBiome");
+      if (!this.enabled() || !this.isPatchActive(blockX, blockZ, RIVER_PATCH_SALT)) {
+         return safeBase;
+      }
+      return this.pick(this.rivers, blockX, blockZ, RIVER_PICK_SALT, safeBase);
+   }
+
+   Holder<Biome> mixCave(Holder<Biome> base, int blockX, int blockY, int blockZ) {
+      Holder<Biome> safeBase = Objects.requireNonNull(base, "baseBiome");
+      if (!this.enabled() || !this.isPatchActive(blockX, blockZ, CAVE_PATCH_SALT)) {
+         return safeBase;
+      }
+      return this.pick(this.caves, blockX, blockZ, CAVE_PICK_SALT ^ Math.floorDiv(blockY, 64), safeBase);
+   }
+
    List<Holder<Biome>> possibleBiomes() {
       List<Holder<Biome>> holders = new ArrayList<>();
       addUnique(holders, this.allLand);
       addUnique(holders, this.shallowOceans);
       addUnique(holders, this.deepOceans);
+      addUnique(holders, this.rivers);
+      addUnique(holders, this.caves);
       return List.copyOf(holders);
    }
 
@@ -134,7 +165,7 @@ final class RandomBiomeMixer {
       return pool.get(index);
    }
 
-   private static RandomBiomeMixer.Pools buildPools(HolderGetter<Biome> biomeLookup) {
+   private static RandomBiomeMixer.Pools buildPools(HolderGetter<Biome> biomeLookup, Set<ResourceKey<Biome>> selectedKeys) {
       List<Holder<Biome>> allLand = new ArrayList<>();
       List<Holder<Biome>> temperate = new ArrayList<>();
       List<Holder<Biome>> tropical = new ArrayList<>();
@@ -143,6 +174,8 @@ final class RandomBiomeMixer {
       List<Holder<Biome>> special = new ArrayList<>();
       List<Holder<Biome>> shallowOceans = new ArrayList<>();
       List<Holder<Biome>> deepOceans = new ArrayList<>();
+      List<Holder<Biome>> rivers = new ArrayList<>();
+      List<Holder<Biome>> caves = new ArrayList<>();
 
       addLand(biomeLookup, Biomes.PLAINS, allLand, temperate, tropical, dry);
       addLand(biomeLookup, Biomes.SUNFLOWER_PLAINS, allLand, temperate, dry);
@@ -153,7 +186,7 @@ final class RandomBiomeMixer {
       addLand(biomeLookup, Biomes.OLD_GROWTH_BIRCH_FOREST, allLand, temperate);
       addLand(biomeLookup, Biomes.DARK_FOREST, allLand, temperate, special);
       addLand(biomeLookup, Biomes.CHERRY_GROVE, allLand, temperate, tropical, special);
-      addLandById(biomeLookup, "pale_garden", allLand, temperate, special);
+      addLandByIdIfSelected(biomeLookup, "pale_garden", selectedKeys, allLand, temperate, special);
       addLand(biomeLookup, Biomes.SWAMP, allLand, temperate, tropical, special);
       addLand(biomeLookup, Biomes.MANGROVE_SWAMP, allLand, tropical, special);
       addLand(biomeLookup, Biomes.JUNGLE, allLand, tropical, special);
@@ -195,6 +228,14 @@ final class RandomBiomeMixer {
       addOcean(biomeLookup, Biomes.DEEP_COLD_OCEAN, deepOceans);
       addOcean(biomeLookup, Biomes.DEEP_FROZEN_OCEAN, deepOceans);
 
+      addOcean(biomeLookup, Biomes.RIVER, rivers);
+      addOcean(biomeLookup, Biomes.FROZEN_RIVER, rivers);
+
+      addOcean(biomeLookup, Biomes.LUSH_CAVES, caves);
+      addOcean(biomeLookup, Biomes.DRIPSTONE_CAVES, caves);
+      addOcean(biomeLookup, Biomes.DEEP_DARK, caves);
+      addOceanByIdIfSelected(biomeLookup, "sulfur_caves", selectedKeys, caves);
+
       return new RandomBiomeMixer.Pools(
          List.copyOf(allLand),
          List.copyOf(temperate),
@@ -203,8 +244,47 @@ final class RandomBiomeMixer {
          List.copyOf(cold),
          List.copyOf(special),
          List.copyOf(shallowOceans),
-         List.copyOf(deepOceans)
+         List.copyOf(deepOceans),
+         List.copyOf(rivers),
+         List.copyOf(caves)
       );
+   }
+
+   private static Set<ResourceKey<Biome>> selectedBiomeKeys(List<String> biomeIds) {
+      Set<ResourceKey<Biome>> keys = new HashSet<>();
+      for (String biomeId : RandomBiomeCatalog.normalizeSelection(biomeIds)) {
+         keys.add(BiomeClassification.toBiomeKey(biomeId));
+      }
+      return Set.copyOf(keys);
+   }
+
+   private static RandomBiomeMixer.Pools filterPools(RandomBiomeMixer.Pools pools, Set<ResourceKey<Biome>> selectedKeys) {
+      return new RandomBiomeMixer.Pools(
+         filterSelected(pools.allLand(), selectedKeys),
+         filterSelected(pools.temperateLand(), selectedKeys),
+         filterSelected(pools.tropicalLand(), selectedKeys),
+         filterSelected(pools.dryLand(), selectedKeys),
+         filterSelected(pools.coldLand(), selectedKeys),
+         filterSelected(pools.specialLand(), selectedKeys),
+         filterSelected(pools.shallowOceans(), selectedKeys),
+         filterSelected(pools.deepOceans(), selectedKeys),
+         filterSelected(pools.rivers(), selectedKeys),
+         filterSelected(pools.caves(), selectedKeys)
+      );
+   }
+
+   private static List<Holder<Biome>> filterSelected(List<Holder<Biome>> biomes, Set<ResourceKey<Biome>> selectedKeys) {
+      if (selectedKeys.isEmpty()) {
+         return List.of();
+      }
+
+      List<Holder<Biome>> result = new ArrayList<>();
+      for (Holder<Biome> biome : biomes) {
+         if (selectedKeys.stream().anyMatch(biome::is)) {
+            result.add(biome);
+         }
+      }
+      return List.copyOf(result);
    }
 
    @SafeVarargs
@@ -218,9 +298,15 @@ final class RandomBiomeMixer {
    }
 
    @SafeVarargs
-   private static void addLandById(HolderGetter<Biome> lookup, String id, List<Holder<Biome>> all, List<Holder<Biome>>... pools) {
+   private static void addLandByIdIfSelected(
+      HolderGetter<Biome> lookup,
+      String id,
+      Set<ResourceKey<Biome>> selectedKeys,
+      List<Holder<Biome>> all,
+      List<Holder<Biome>>... pools
+   ) {
       ResourceKey<Biome> key = BiomeClassification.toBiomeKey(id);
-      if (containsBiome(lookup, key)) {
+      if (selectedKeys.contains(key)) {
          addLand(lookup, key, all, pools);
       }
    }
@@ -229,8 +315,13 @@ final class RandomBiomeMixer {
       resolveOptional(lookup, key).ifPresent(biome -> addUnique(pool, biome));
    }
 
-   private static boolean containsBiome(HolderGetter<Biome> lookup, ResourceKey<Biome> key) {
-      return lookup instanceof HolderLookup<?> holderLookup && holderLookup.listElementIds().anyMatch(key::equals);
+   static void addOceanByIdIfSelected(
+      HolderGetter<Biome> lookup, String id, Set<ResourceKey<Biome>> selectedKeys, List<Holder<Biome>> pool
+   ) {
+      ResourceKey<Biome> key = BiomeClassification.toBiomeKey(id);
+      if (selectedKeys.contains(key)) {
+         addOcean(lookup, key, pool);
+      }
    }
 
    private static java.util.Optional<Holder<Biome>> resolveOptional(HolderGetter<Biome> lookup, ResourceKey<Biome> key) {
@@ -327,7 +418,9 @@ final class RandomBiomeMixer {
       List<Holder<Biome>> coldLand,
       List<Holder<Biome>> specialLand,
       List<Holder<Biome>> shallowOceans,
-      List<Holder<Biome>> deepOceans
+      List<Holder<Biome>> deepOceans,
+      List<Holder<Biome>> rivers,
+      List<Holder<Biome>> caves
    ) {
    }
 }

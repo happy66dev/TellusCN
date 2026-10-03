@@ -8,6 +8,7 @@ import com.mojang.blaze3d.vertex.Tesselator;
 import com.mojang.blaze3d.vertex.VertexBuffer;
 import com.mojang.blaze3d.vertex.VertexFormat;
 import com.yucareux.tellus.Tellus;
+import com.yucareux.tellus.world.data.biome.BiomeClassification;
 import com.yucareux.tellus.world.data.cover.TellusLandCoverSource;
 import com.yucareux.tellus.world.data.elevation.ElevationGridRepair;
 import com.yucareux.tellus.world.data.elevation.TellusElevationSource;
@@ -32,9 +33,13 @@ import com.yucareux.tellus.worldgen.building.BuildingProfile;
 import com.yucareux.tellus.worldgen.building.TellusBuildingBlueprints;
 import com.yucareux.tellus.worldgen.building.TellusBuildingProfiles;
 import com.yucareux.tellus.worldgen.building.TellusBuildingStyles;
+import com.yucareux.tellus.worldgen.BadlandsTerrainPolicy;
 import com.yucareux.tellus.worldgen.EarthGeneratorSettings;
 import com.yucareux.tellus.worldgen.MountainSurfaceRules;
 import com.yucareux.tellus.worldgen.EarthProjection;
+import com.yucareux.tellus.worldgen.DeepslateSlopePolicy;
+import com.yucareux.tellus.worldgen.SnowSlopePolicy;
+import com.yucareux.tellus.worldgen.TerrainSlopePolicy;
 import com.yucareux.tellus.worldgen.OceanCoverageUnavailableException;
 import com.yucareux.tellus.worldgen.TellusWorldgenSources;
 import com.yucareux.tellus.worldgen.WaterSurfaceResolver;
@@ -65,6 +70,7 @@ import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.util.Mth;
+import net.minecraft.world.level.biome.Biomes;
 import org.joml.Matrix4f;
 import org.joml.Vector3f;
 import org.lwjgl.opengl.GL11;
@@ -86,21 +92,21 @@ public final class TerrainPreview implements AutoCloseable {
    private static final long PREVIEW_WATER_OVERLAY_UNITS = 24576L;
    private static final long PREVIEW_ROAD_OVERLAY_UNITS = 32768L;
    private static final long PREVIEW_BUILDING_OVERLAY_UNITS = 24576L;
-   private static final String ACTIVITY_DOWNLOAD_ELEVATION = "Sampling elevation data";
-   private static final String ACTIVITY_DOWNLOAD_LAND_COVER = "Sampling land cover";
-   private static final String ACTIVITY_DOWNLOAD_CLIMATE = "Sampling climate data";
-   private static final String ACTIVITY_BUILD_HEIGHTS = "Normalizing terrain heights";
-   private static final String ACTIVITY_BUILD_CENTER = "Centering terrain";
-   private static final String ACTIVITY_BUILD_COLORS = "Coloring terrain";
-   private static final String ACTIVITY_BUILD_TREES = "Placing preview trees";
-   private static final String ACTIVITY_BUILD_HEIGHT_OFFSETS = "Applying feature heights";
-   private static final String ACTIVITY_BUILD_INFO = "Summarizing DEM coverage";
-   private static final String ACTIVITY_OSM_WATER_FETCH = "Loading Overture water";
-   private static final String ACTIVITY_OSM_WATER_RASTER = "Rasterizing Overture water";
-   private static final String ACTIVITY_OSM_ROADS_FETCH = "Loading OSM roads";
-   private static final String ACTIVITY_OSM_ROADS_RASTER = "Rasterizing OSM roads";
-   private static final String ACTIVITY_OSM_BUILDINGS_FETCH = "Loading OSM buildings";
-   private static final String ACTIVITY_OSM_BUILDINGS_RASTER = "Rasterizing OSM buildings";
+   private static final String ACTIVITY_DOWNLOAD_ELEVATION = "tellus.preview.loading.sample_elevation";
+   private static final String ACTIVITY_DOWNLOAD_LAND_COVER = "tellus.preview.loading.sample_land_cover";
+   private static final String ACTIVITY_DOWNLOAD_CLIMATE = "tellus.preview.loading.sample_climate";
+   private static final String ACTIVITY_BUILD_HEIGHTS = "tellus.preview.loading.normalize_heights";
+   private static final String ACTIVITY_BUILD_CENTER = "tellus.preview.loading.center_terrain";
+   private static final String ACTIVITY_BUILD_COLORS = "tellus.preview.loading.color_terrain";
+   private static final String ACTIVITY_BUILD_TREES = "tellus.preview.loading.place_trees";
+   private static final String ACTIVITY_BUILD_HEIGHT_OFFSETS = "tellus.preview.loading.apply_feature_heights";
+   private static final String ACTIVITY_BUILD_INFO = "tellus.preview.loading.summarize_dem";
+   private static final String ACTIVITY_OSM_WATER_FETCH = "tellus.preview.loading.fetch_water";
+   private static final String ACTIVITY_OSM_WATER_RASTER = "tellus.preview.loading.rasterize_water";
+   private static final String ACTIVITY_OSM_ROADS_FETCH = "tellus.preview.loading.fetch_roads";
+   private static final String ACTIVITY_OSM_ROADS_RASTER = "tellus.preview.loading.rasterize_roads";
+   private static final String ACTIVITY_OSM_BUILDINGS_FETCH = "tellus.preview.loading.fetch_buildings";
+   private static final String ACTIVITY_OSM_BUILDINGS_RASTER = "tellus.preview.loading.rasterize_buildings";
    private static final int ESA_NO_DATA = 0;
    private static final int ESA_WATER = 80;
    private static final double PREVIEW_INLAND_WATER_DEPTH_BLOCKS = 6.0;
@@ -128,6 +134,8 @@ public final class TerrainPreview implements AutoCloseable {
    private static final int PREVIEW_FOG_COLOR = 0xC5D3C2;
    private static final int PREVIEW_TREE_TRUNK_COLOR = 0x6B4A2D;
    private static final int PREVIEW_TREE_LEAF_COLOR = 0x4C9141;
+   private static final int PREVIEW_DEEPSLATE_COLOR = 0x505456;
+   private static final int PREVIEW_BADLANDS_MAX_WALL_BANDS = 96;
    private static final int PREVIEW_STONE_FILL_COLOR = 0x73787B;
    private static final int PREVIEW_STONE_BOTTOM_COLOR = 0x4B5053;
    private static final int PREVIEW_DEEP_WATER_VOLUME_COLOR = 0x0A416B;
@@ -472,6 +480,7 @@ public final class TerrainPreview implements AutoCloseable {
       int[] visualCoverClasses = new int[coverSize * coverSize];
       byte[] climateGroups = new byte[climateSize * climateSize];
       byte[] climateBasedBuiltUpCoverClasses = new byte[climateSize * climateSize];
+      String[] climateCodes = new String[climateSize * climateSize];
       double minElevation = Double.POSITIVE_INFINITY;
       double maxElevation = Double.NEGATIVE_INFINITY;
       int minSurfaceY = Integer.MAX_VALUE;
@@ -648,6 +657,17 @@ public final class TerrainPreview implements AutoCloseable {
                   return null;
                }
 
+               int coverX = Math.min(coverSize - 1, sampleX / coverStride);
+               int coverZ = Math.min(coverSize - 1, sampleZ / coverStride);
+               int visualCoverClass = visualCoverClasses[coverX + coverZ * coverSize];
+               if (BadlandsTerrainPolicy.isDryCanyonCover(visualCoverClass)) {
+                  String coherentKoppen = this.koppenSource.sampleSmoothedCode(blockX, blockZ, worldScale);
+                  if (BadlandsTerrainPolicy.shouldUseCoherentAridClimate(visualCoverClass, coherentKoppen)) {
+                     koppen = coherentKoppen;
+                  }
+               }
+
+               climateCodes[idx] = koppen;
                climateGroups[idx] = climateGroup(koppen);
                climateBasedBuiltUpCoverClasses[idx] = (byte)climateBasedBuiltUpPreviewCoverClass(koppen);
                if ((++downloadDone & 255L) == 0L) {
@@ -717,6 +737,7 @@ public final class TerrainPreview implements AutoCloseable {
       float[] detailHeights = heights.clone();
       int[] terrainColors = new int[size * size];
       int[] detailColors = new int[size * size];
+      boolean[] badlandsMask = new boolean[size * size];
       float[] detailHeightOffsets = new float[size * size];
       int[] waterColors = new int[size * size];
       Arrays.fill(waterColors, -1);
@@ -752,6 +773,13 @@ public final class TerrainPreview implements AutoCloseable {
             int slopeDiff = previewSlopeDiff(previewBlockHeights, size, idx, step);
             int convexity = previewConvexity(previewBlockHeights, size, idx, step);
             double slope = computeSlope(previewBlockHeights, size, idx, step);
+            double demSlopeDegrees = previewDemSlopeDegrees(elevations, size, idx, step, blockZ, settings.worldScale());
+            boolean badlands = isPreviewBadlands(
+               rawCoverClass,
+               visualCoverClass,
+               climateCodes[climateIdx],
+               previewRegionalReliefMeters(elevations, size, idx, step, settings.worldScale())
+            );
             int color = colorForPreview(
                rawCoverClass,
                visualCoverClass,
@@ -761,12 +789,14 @@ public final class TerrainPreview implements AutoCloseable {
                slopeDiff,
                convexity,
                slope,
+               demSlopeDegrees,
                seaLevel,
                esaWaterMask[idx],
                oceanFallbackMask[idx],
                !waterPreviewEnabled,
                settings.enableWater(),
                false,
+               badlands,
                (int)Math.round(blockX),
                (int)Math.round(blockZ)
             );
@@ -786,6 +816,8 @@ public final class TerrainPreview implements AutoCloseable {
                if (oceanFallbackMask[idx]) {
                   waterSurfaceHeights[idx] = previewSeaSurfaceHeight;
                }
+            } else {
+               badlandsMask[idx] = badlands;
             }
          }
 
@@ -795,7 +827,17 @@ public final class TerrainPreview implements AutoCloseable {
 
       TerrainPreview.PreviewInfo placeholderInfo = previewInfoPlaceholder(minElevation, maxElevation, minSurfaceY, maxSurfaceY);
       this.publishInterimMesh(
-         id, size, terrainHeights, terrainColors, detailHeights, detailColors, waterColors, waterSurfaceHeights, xCoords, placeholderInfo
+         id,
+         size,
+         terrainHeights,
+         terrainColors,
+         detailHeights,
+         detailColors,
+         waterColors,
+         waterSurfaceHeights,
+         previewBadlandsData(badlandsMask, minWorldX, minWorldZ, step, radius, center, settings.heightOffset()),
+         xCoords,
+         placeholderInfo
       );
 
       if (!this.buildPreviewTrees(
@@ -911,6 +953,7 @@ public final class TerrainPreview implements AutoCloseable {
          visualCoverClasses,
          climateGroups,
          climateBasedBuiltUpCoverClasses,
+         badlandsMask,
          heights,
          center,
          xCoords,
@@ -926,6 +969,7 @@ public final class TerrainPreview implements AutoCloseable {
          detailColors,
          waterColors,
          waterSurfaceHeights,
+         previewBadlandsData(badlandsMask, minWorldX, minWorldZ, step, radius, center, settings.heightOffset()),
          xCoords,
          filterPreviewTrees(previewTrees, detailColors),
          previewInfo
@@ -1004,6 +1048,9 @@ public final class TerrainPreview implements AutoCloseable {
             int slopeDiff = previewSlopeDiff(previewBlockHeights, size, idx, snapshot.step());
             int convexity = previewConvexity(previewBlockHeights, size, idx, snapshot.step());
             double slope = computeSlope(previewBlockHeights, size, idx, snapshot.step());
+            double demSlopeDegrees = previewDemSlopeDegrees(
+               snapshot.elevations(), size, idx, snapshot.step(), blockZ, settings.worldScale()
+            );
             int color = colorForPreview(
                rawCoverClass,
                visualCoverClass,
@@ -1013,12 +1060,14 @@ public final class TerrainPreview implements AutoCloseable {
                slopeDiff,
                convexity,
                slope,
+               demSlopeDegrees,
                seaLevel,
                snapshot.esaWaterMask()[idx],
                snapshot.oceanFallbackMask()[idx],
                !waterPreviewEnabled,
                settings.enableWater(),
                false,
+               snapshot.badlandsMask()[idx],
                (int)Math.round(blockX),
                (int)Math.round(blockZ)
             );
@@ -1054,6 +1103,15 @@ public final class TerrainPreview implements AutoCloseable {
          detailColors,
          waterColors,
          waterSurfaceHeights,
+         previewBadlandsData(
+            snapshot.badlandsMask(),
+            snapshot.minWorldX(),
+            snapshot.minWorldZ(),
+            snapshot.step(),
+            snapshot.radius(),
+            previewHeightData.center(),
+            settings.heightOffset()
+         ),
          snapshot.xCoords(),
          snapshot.info()
       );
@@ -1166,6 +1224,15 @@ public final class TerrainPreview implements AutoCloseable {
          detailColors,
          waterColors,
          waterSurfaceHeights,
+         previewBadlandsData(
+            snapshot.badlandsMask(),
+            snapshot.minWorldX(),
+            snapshot.minWorldZ(),
+            snapshot.step(),
+            snapshot.radius(),
+            previewHeightData.center(),
+            settings.heightOffset()
+         ),
          snapshot.xCoords(),
          filterPreviewTrees(previewTrees, detailColors),
          snapshot.info()
@@ -1256,6 +1323,7 @@ public final class TerrainPreview implements AutoCloseable {
       int[] detailColors,
       int[] waterColors,
       float[] waterSurfaceHeights,
+      TerrainPreview.PreviewBadlandsData badlands,
       float[] xCoords,
       TerrainPreview.PreviewInfo info
    ) {
@@ -1269,6 +1337,7 @@ public final class TerrainPreview implements AutoCloseable {
             detailColors.clone(),
             waterColors.clone(),
             waterSurfaceHeights.clone(),
+            badlands.copy(),
             xCoords,
             new TerrainPreview.PreviewTree[0],
             info
@@ -1285,6 +1354,26 @@ public final class TerrainPreview implements AutoCloseable {
       }
 
       return xCoords;
+   }
+
+   private static TerrainPreview.PreviewBadlandsData previewBadlandsData(
+      boolean[] mask,
+      double minWorldX,
+      double minWorldZ,
+      double step,
+      double radius,
+      float heightCenter,
+      int heightOffset
+   ) {
+      double blocksPerHeightUnit = radius / 0.7;
+      return new TerrainPreview.PreviewBadlandsData(
+         mask,
+         minWorldX,
+         minWorldZ,
+         step,
+         blocksPerHeightUnit,
+         heightOffset + heightCenter * blocksPerHeightUnit
+      );
    }
 
    private static TerrainPreview.PreviewInfo previewInfoPlaceholder(
@@ -1469,6 +1558,24 @@ public final class TerrainPreview implements AutoCloseable {
       double dz = Math.abs(heights[idxDown] - heights[idx]);
       double diff = Math.max(dx, dz);
       return step <= 0.0 ? diff : diff / step;
+   }
+
+   private static double previewDemSlopeDegrees(
+      double[] elevations, int size, int idx, double stepBlocks, double blockZ, double worldScale
+   ) {
+      if (size < 2) {
+         return Double.NaN;
+      }
+      int x = idx % size;
+      int z = idx / size;
+      double center = elevations[idx];
+      double east = x + 1 < size ? elevations[idx + 1] : Double.NaN;
+      double west = x > 0 ? elevations[idx - 1] : Double.NaN;
+      double north = z > 0 ? elevations[idx - size] : Double.NaN;
+      double south = z + 1 < size ? elevations[idx + size] : Double.NaN;
+      double runX = stepBlocks * EarthProjection.groundMetersPerBlockX(blockZ, worldScale);
+      double runZ = stepBlocks * EarthProjection.groundMetersPerBlockZ(blockZ, worldScale);
+      return TerrainSlopePolicy.localSlopeDegrees(center, east, west, north, south, runX, runZ);
    }
 
    private static int previewSlopeDiff(double[] heights, int size, int idx, double step) {
@@ -1967,11 +2074,14 @@ public final class TerrainPreview implements AutoCloseable {
             int idx = row + x;
             byte kind = waterKind[idx];
             if (kind != 0 && !(kind == 2 && mapterhornLandOverride[idx])) {
-               int terrainSurface = Math.min(Mth.floor(blockHeights[idx]), seaLevel - 1);
+               int resolvedWaterSurface = kind == 2
+                  ? waterResolver.resolveOceanWaterSurface(Mth.floor(sampleWorldX[x]), Mth.floor(sampleWorldZ[z]))
+                  : seaLevel;
+               int terrainSurface = Math.min(Mth.floor(blockHeights[idx]), resolvedWaterSurface - 1);
                if (kind == 2 && oceanProfileAvailable) {
                   try {
                      terrainSurface = waterResolver.resolveOceanTerrainSurface(
-                        Mth.floor(sampleWorldX[x]), Mth.floor(sampleWorldZ[z]), seaLevel, previewResolutionMeters
+                        Mth.floor(sampleWorldX[x]), Mth.floor(sampleWorldZ[z]), resolvedWaterSurface, previewResolutionMeters
                      );
                   } catch (OceanCoverageUnavailableException error) {
                      oceanProfileAvailable = false;
@@ -1980,7 +2090,7 @@ public final class TerrainPreview implements AutoCloseable {
                }
 
                int color = kind == 2
-                  ? waterColorForDepth(Math.max(PREVIEW_INLAND_WATER_DEPTH_BLOCKS, seaLevel - terrainSurface))
+                  ? waterColorForDepth(Math.max(1.0, resolvedWaterSurface - terrainSurface))
                   : PREVIEW_FLAT_WATER_COLOR;
                terrainColors[idx] = color;
                detailColors[idx] = color;
@@ -1988,11 +2098,13 @@ public final class TerrainPreview implements AutoCloseable {
                waterColors[idx] = color;
                if (kind == 2) {
                   blockHeights[idx] = terrainSurface;
-                  float profiledHeight = previewSeaSurfaceHeight
-                     - (float)((seaLevel - terrainSurface) / PREVIEW_RADIUS_BLOCKS * PREVIEW_VERTICAL_CELL_RATIO);
+                  float previewWaterSurfaceHeight = previewSeaSurfaceHeight
+                     + (float)((resolvedWaterSurface - seaLevel) / PREVIEW_RADIUS_BLOCKS * PREVIEW_VERTICAL_CELL_RATIO);
+                  float profiledHeight = previewWaterSurfaceHeight
+                     - (float)((resolvedWaterSurface - terrainSurface) / PREVIEW_RADIUS_BLOCKS * PREVIEW_VERTICAL_CELL_RATIO);
                   terrainHeights[idx] = profiledHeight;
                   detailHeights[idx] = profiledHeight;
-                  waterSurfaceHeights[idx] = previewSeaSurfaceHeight;
+                  waterSurfaceHeights[idx] = previewWaterSurfaceHeight;
                }
             }
          }
@@ -2901,12 +3013,14 @@ public final class TerrainPreview implements AutoCloseable {
       int slopeDiff,
       int convexity,
       double slope,
+      double demSlopeDegrees,
       int seaLevel,
       boolean esaWater,
       boolean oceanWater,
       boolean fallbackInlandWaterEnabled,
       boolean flattenWaterColor,
       boolean remaSnowTerrain,
+      boolean badlands,
       int worldX,
       int worldZ
    ) {
@@ -2915,6 +3029,20 @@ public final class TerrainPreview implements AutoCloseable {
       if (waterDepth >= 0.0) {
          return flattenWaterColor ? PREVIEW_FLAT_WATER_COLOR : waterColorForDepth(waterDepth);
       } else {
+         boolean snowSource = MountainSurfaceRules.hasSnowSource(surfaceCoverClass, remaSnowTerrain);
+         if (snowSource && SnowSlopePolicy.shouldCover(worldX, worldZ, demSlopeDegrees)) {
+            return 16119285;
+         }
+         if (badlands) {
+            return badlandsPlateauPreviewColor(worldX, worldZ);
+         }
+         if (DeepslateSlopePolicy.shouldCover(worldX, worldZ, demSlopeDegrees)) {
+            return PREVIEW_DEEPSLATE_COLOR;
+         }
+         if (snowSource) {
+            return mountainPreviewColor(MountainSurfaceRules.ApproximatePalette.STONE);
+         }
+
          int heightAboveSea = (int)Math.round(terrainHeight) - seaLevel;
          float vegetationTransitionWeight = MountainSurfaceRules.vegetationTransitionWeightForSurfaceCoverClass(surfaceCoverClass, heightAboveSea);
          MountainSurfaceRules.ApproximateSurface mountainSurface = MountainSurfaceRules.classifyApproximateSurface(
@@ -2938,6 +3066,62 @@ public final class TerrainPreview implements AutoCloseable {
             return applyRockTint(tinted, slope);
          }
       }
+   }
+
+   private static boolean isPreviewBadlands(int terrainCoverClass, int visualCoverClass, String koppen, double regionalReliefMeters) {
+      int surfaceCoverClass = MountainSurfaceRules.resolveSurfaceCoverClass(terrainCoverClass, visualCoverClass);
+      var biomeKey = BiomeClassification.findBiomeKey(surfaceCoverClass, koppen);
+      if (biomeKey == null) {
+         biomeKey = BiomeClassification.findFallbackKey(surfaceCoverClass);
+      }
+
+      return Biomes.BADLANDS.equals(biomeKey)
+         || BadlandsTerrainPolicy.shouldPromoteToBadlands(surfaceCoverClass, koppen, regionalReliefMeters);
+   }
+
+   private static double previewRegionalReliefMeters(
+      double[] elevations, int size, int index, double step, double worldScale
+   ) {
+      if (!(worldScale > 0.0) || !(step > 0.0)) {
+         return Double.NaN;
+      }
+
+      int x = index % size;
+      int z = index / size;
+      int sampleRadius = Math.max(1, (int)Math.ceil(BadlandsTerrainPolicy.CANYON_RELIEF_SAMPLE_METERS / worldScale / step));
+      int west = Math.max(0, x - sampleRadius);
+      int east = Math.min(size - 1, x + sampleRadius);
+      int north = Math.max(0, z - sampleRadius);
+      int south = Math.min(size - 1, z + sampleRadius);
+      double center = elevations[index];
+      double westElevation = elevations[west + z * size];
+      double eastElevation = elevations[east + z * size];
+      double northElevation = elevations[x + north * size];
+      double southElevation = elevations[x + south * size];
+      double min = Math.min(center, Math.min(Math.min(westElevation, eastElevation), Math.min(northElevation, southElevation)));
+      double max = Math.max(center, Math.max(Math.max(westElevation, eastElevation), Math.max(northElevation, southElevation)));
+      return max - min;
+   }
+
+   private static int badlandsPlateauPreviewColor(int worldX, int worldZ) {
+      return switch (BadlandsTerrainPolicy.plateauMaterialIndex(worldX, worldZ)) {
+         case BadlandsTerrainPolicy.PLATEAU_COARSE_DIRT -> 0x76543A;
+         case BadlandsTerrainPolicy.PLATEAU_TERRACOTTA -> 0x985E44;
+         case BadlandsTerrainPolicy.PLATEAU_BROWN_TERRACOTTA -> 0x4D3323;
+         default -> 0xBE6621;
+      };
+   }
+
+   private static int badlandsBandPreviewColor(int worldX, int worldZ, int y) {
+      return switch (BadlandsTerrainPolicy.bandMaterialIndex(worldX, worldZ, y)) {
+         case BadlandsTerrainPolicy.ORANGE_TERRACOTTA -> 0xA9541A;
+         case BadlandsTerrainPolicy.YELLOW_TERRACOTTA -> 0xBA8524;
+         case BadlandsTerrainPolicy.BROWN_TERRACOTTA -> 0x4D3323;
+         case BadlandsTerrainPolicy.RED_TERRACOTTA -> 0x8E3C2E;
+         case BadlandsTerrainPolicy.LIGHT_GRAY_TERRACOTTA -> 0x876B62;
+         case BadlandsTerrainPolicy.WHITE_TERRACOTTA -> 0xD1B1A1;
+         default -> 0x985E44;
+      };
    }
 
    private static int mountainPreviewColor(MountainSurfaceRules.ApproximatePalette palette) {
@@ -3308,6 +3492,7 @@ public final class TerrainPreview implements AutoCloseable {
       int[] visualCoverClasses,
       byte[] climateGroups,
       byte[] climateBasedBuiltUpCoverClasses,
+      boolean[] badlandsMask,
       float[] heights,
       float heightCenter,
       float[] xCoords,
@@ -3329,6 +3514,42 @@ public final class TerrainPreview implements AutoCloseable {
    ) {
    }
 
+   private record PreviewBadlandsData(
+      boolean[] mask,
+      double minWorldX,
+      double minWorldZ,
+      double step,
+      double blocksPerHeightUnit,
+      double worldYAtPreviewZero
+   ) {
+      private PreviewBadlandsData {
+         mask = Objects.requireNonNull(mask, "mask");
+      }
+
+      private TerrainPreview.PreviewBadlandsData copy() {
+         return new TerrainPreview.PreviewBadlandsData(
+            this.mask.clone(),
+            this.minWorldX,
+            this.minWorldZ,
+            this.step,
+            this.blocksPerHeightUnit,
+            this.worldYAtPreviewZero
+         );
+      }
+
+      private int worldX(int gridX) {
+         return (int)Math.round(this.minWorldX + gridX * this.step);
+      }
+
+      private int worldZ(int gridZ) {
+         return (int)Math.round(this.minWorldZ + gridZ * this.step);
+      }
+
+      private double worldY(float previewY) {
+         return this.worldYAtPreviewZero + previewY * this.blocksPerHeightUnit;
+      }
+   }
+
    @Environment(EnvType.CLIENT)
    private static final class PreviewMesh {
       private final int size;
@@ -3339,6 +3560,7 @@ public final class TerrainPreview implements AutoCloseable {
       private final int[] detailColors;
       private final int[] waterColors;
       private final float[] waterSurfaceHeights;
+      private final TerrainPreview.PreviewBadlandsData badlands;
       private final float[] axis;
       private final TerrainPreview.PreviewTree[] trees;
       private final TerrainPreview.PreviewInfo info;
@@ -3354,6 +3576,7 @@ public final class TerrainPreview implements AutoCloseable {
          int[] detailColors,
          int[] waterColors,
          float[] waterSurfaceHeights,
+         TerrainPreview.PreviewBadlandsData badlands,
          float[] axis,
          TerrainPreview.PreviewTree[] trees,
          TerrainPreview.PreviewInfo info
@@ -3366,6 +3589,7 @@ public final class TerrainPreview implements AutoCloseable {
          this.detailColors = detailColors;
          this.waterColors = waterColors;
          this.waterSurfaceHeights = waterSurfaceHeights;
+         this.badlands = Objects.requireNonNull(badlands, "badlands");
          this.axis = axis;
          this.trees = trees.clone();
          this.info = Objects.requireNonNull(info, "info");
@@ -3621,6 +3845,7 @@ public final class TerrainPreview implements AutoCloseable {
       float[] surfaceHeights = new float[cellCount * cellCount];
       int[] cellColors = new int[cellCount * cellCount];
       boolean[] waterCells = new boolean[cellCount * cellCount];
+      boolean[] badlandsCells = new boolean[cellCount * cellCount];
 
       for (int cellZ = 0; cellZ < cellCount; cellZ++) {
          int z = cellZ * stride;
@@ -3644,6 +3869,7 @@ public final class TerrainPreview implements AutoCloseable {
                : floorHeight;
             cellColors[cellIndex] = previewTopMaterialColor(baseColors[index], x, z, 0x53A9);
             waterCells[cellIndex] = water;
+            badlandsCells[cellIndex] = mesh.badlands.mask()[index] && isBadlandsPlateauPreviewColor(baseColors[index]) && !water;
          }
       }
 
@@ -3736,56 +3962,48 @@ public final class TerrainPreview implements AutoCloseable {
                   int sideColor = previewSideMaterialColor(topColor, x, z, 0x19D3);
                   float bottomShade = shadowShade * 0.68F;
                   float upperShade = shadowShade * 0.94F;
-                  addLitPreviewQuad(
+                  addPreviewTerrainWall(
                      builder,
+                     mesh,
+                     badlandsCells[cellIndex],
+                     x,
+                     z,
                      sideColor,
+                     0x19D3,
                      1.0F,
                      0.0F,
-                     0.0F,
                      x1,
-                     eastTop,
                      z0,
                      x1,
-                     top,
-                     z0,
-                     x1,
-                     top,
                      z1,
-                     x1,
                      eastTop,
-                     z1,
+                     top,
                      bottomShade,
-                     upperShade,
-                     upperShade,
-                     bottomShade
+                     upperShade
                   );
                } else if (eastTop > top + sideThreshold) {
                   int sideColor = previewSideMaterialColor(cellColors[eastIndex], x + stride, z, 0x27B1);
                   float eastShadow = 1.0F - bakedShadows[eastIndex] * 0.48F;
                   float bottomShade = eastShadow * 0.68F;
                   float upperShade = eastShadow * 0.94F;
-                  addLitPreviewQuad(
+                  addPreviewTerrainWall(
                      builder,
+                     mesh,
+                     badlandsCells[eastIndex],
+                     x + stride,
+                     z,
                      sideColor,
+                     0x27B1,
                      -1.0F,
                      0.0F,
-                     0.0F,
                      x1,
-                     top,
                      z1,
                      x1,
-                     eastTop,
-                     z1,
-                     x1,
-                     eastTop,
                      z0,
-                     x1,
                      top,
-                     z0,
+                     eastTop,
                      bottomShade,
-                     upperShade,
-                     upperShade,
-                     bottomShade
+                     upperShade
                   );
                }
             }
@@ -3797,56 +4015,48 @@ public final class TerrainPreview implements AutoCloseable {
                   int sideColor = previewSideMaterialColor(topColor, x, z, 0x3157);
                   float bottomShade = shadowShade * 0.68F;
                   float upperShade = shadowShade * 0.94F;
-                  addLitPreviewQuad(
+                  addPreviewTerrainWall(
                      builder,
+                     mesh,
+                     badlandsCells[cellIndex],
+                     x,
+                     z,
                      sideColor,
-                     0.0F,
+                     0x3157,
                      0.0F,
                      1.0F,
                      x1,
-                     southTop,
-                     z1,
-                     x1,
-                     top,
                      z1,
                      x0,
-                     top,
                      z1,
-                     x0,
                      southTop,
-                     z1,
+                     top,
                      bottomShade,
-                     upperShade,
-                     upperShade,
-                     bottomShade
+                     upperShade
                   );
                } else if (southTop > top + sideThreshold) {
                   int sideColor = previewSideMaterialColor(cellColors[southIndex], x, z + stride, 0x4A6D);
                   float southShadow = 1.0F - bakedShadows[southIndex] * 0.48F;
                   float bottomShade = southShadow * 0.68F;
                   float upperShade = southShadow * 0.94F;
-                  addLitPreviewQuad(
+                  addPreviewTerrainWall(
                      builder,
+                     mesh,
+                     badlandsCells[southIndex],
+                     x,
+                     z + stride,
                      sideColor,
-                     0.0F,
+                     0x4A6D,
                      0.0F,
                      -1.0F,
                      x0,
-                     top,
-                     z1,
-                     x0,
-                     southTop,
                      z1,
                      x1,
-                     southTop,
                      z1,
-                     x1,
                      top,
-                     z1,
+                     southTop,
                      bottomShade,
-                     upperShade,
-                     upperShade,
-                     bottomShade
+                     upperShade
                   );
                }
             }
@@ -3863,6 +4073,98 @@ public final class TerrainPreview implements AutoCloseable {
       }
 
       return builder.build();
+   }
+
+   private static boolean isBadlandsPlateauPreviewColor(int color) {
+      return color == 0x76543A || color == 0x985E44 || color == 0x4D3323 || color == 0xBE6621;
+   }
+
+   private static void addPreviewTerrainWall(
+      TerrainPreview.PreviewGeometryBuilder builder,
+      TerrainPreview.PreviewMesh mesh,
+      boolean badlands,
+      int gridX,
+      int gridZ,
+      int fallbackColor,
+      long salt,
+      float normalX,
+      float normalZ,
+      float firstX,
+      float firstZ,
+      float secondX,
+      float secondZ,
+      float bottom,
+      float top,
+      float bottomShade,
+      float topShade
+   ) {
+      if (!badlands) {
+         addLitPreviewQuad(
+            builder,
+            fallbackColor,
+            normalX,
+            0.0F,
+            normalZ,
+            firstX,
+            bottom,
+            firstZ,
+            firstX,
+            top,
+            firstZ,
+            secondX,
+            top,
+            secondZ,
+            secondX,
+            bottom,
+            secondZ,
+            bottomShade,
+            topShade,
+            topShade,
+            bottomShade
+         );
+         return;
+      }
+
+      double worldBottom = mesh.badlands.worldY(bottom);
+      double worldTop = mesh.badlands.worldY(top);
+      int segmentCount = Mth.clamp((int)Math.ceil(Math.abs(worldTop - worldBottom)), 1, PREVIEW_BADLANDS_MAX_WALL_BANDS);
+      int worldX = mesh.badlands.worldX(gridX);
+      int worldZ = mesh.badlands.worldZ(gridZ);
+      for (int segment = 0; segment < segmentCount; segment++) {
+         float lowFraction = segment / (float)segmentCount;
+         float highFraction = (segment + 1) / (float)segmentCount;
+         float low = bottom + (top - bottom) * lowFraction;
+         float high = bottom + (top - bottom) * highFraction;
+         int worldY = (int)Math.floor(mesh.badlands.worldY((low + high) * 0.5F));
+         int bandColor = previewTopMaterialColor(
+            badlandsBandPreviewColor(worldX, worldZ, worldY), worldX, worldZ, salt ^ worldY * 0x9E3779B9L
+         );
+         float lowShade = bottomShade + (topShade - bottomShade) * lowFraction;
+         float highShade = bottomShade + (topShade - bottomShade) * highFraction;
+         addLitPreviewQuad(
+            builder,
+            bandColor,
+            normalX,
+            0.0F,
+            normalZ,
+            firstX,
+            low,
+            firstZ,
+            firstX,
+            high,
+            firstZ,
+            secondX,
+            high,
+            secondZ,
+            secondX,
+            low,
+            secondZ,
+            lowShade,
+            highShade,
+            highShade,
+            lowShade
+         );
+      }
    }
 
    private static float previewCloudBaseHeight(TerrainPreview.PreviewMesh mesh, float verticalUnit) {

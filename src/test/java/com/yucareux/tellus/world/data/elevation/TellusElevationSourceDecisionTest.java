@@ -119,6 +119,7 @@ class TellusElevationSourceDecisionTest {
    @Test
    void previewZoomUsesWorldScaleForFullResolutionAndHonorsProviderLimit() {
       assertEquals(14, TellusElevationSource.selectPreviewZoom(4.0, Double.NaN, 18));
+      assertEquals(6, TellusElevationSource.selectPreviewZoom(1000.0, Double.NaN, 18));
       assertEquals(12, TellusElevationSource.selectPreviewZoom(1.0, 1.0, 12));
    }
 

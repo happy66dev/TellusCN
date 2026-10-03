@@ -9,6 +9,7 @@
 		"ChunkSerializerHighYMixin",
 		"DistantHorizonsChunkUpdateMixin",
 		"DimensionTypeHighYMixin",
+		"HeightRangePlacementMixin",
 		"LevelHighYPackedCoordinateMixin",
 		"MinecraftServerInitialSpawnMixin",
 		"OceanMonumentBuildingMixin",

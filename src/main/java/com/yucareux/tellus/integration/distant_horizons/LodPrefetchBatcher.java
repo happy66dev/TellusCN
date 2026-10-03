@@ -112,6 +112,22 @@ final class LodPrefetchBatcher implements AutoCloseable {
             clusters.add(target);
          }
          target.add(pending);
+
+         boolean merged;
+         do {
+            merged = false;
+            for (int i = clusters.size() - 1; i >= 0; i--) {
+               Cluster other = clusters.get(i);
+               if (other != target
+                  && target.requests.size() + other.requests.size() <= this.maxRequestsPerBatch
+                  && touchesOrOverlaps(target.range, other.range)) {
+                  target.absorb(other);
+                  clusters.remove(i);
+                  merged = true;
+                  break;
+               }
+            }
+         } while (merged);
       }
 
       for (Cluster cluster : clusters) {
@@ -298,6 +314,11 @@ final class LodPrefetchBatcher implements AutoCloseable {
       private void add(PendingRequest request) {
          this.requests.add(request);
          this.range = union(this.range, request.request.range());
+      }
+
+      private void absorb(Cluster other) {
+         this.requests.addAll(other.requests);
+         this.range = union(this.range, other.range);
       }
    }
 }
