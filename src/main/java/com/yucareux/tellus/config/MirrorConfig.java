@@ -106,29 +106,25 @@ public final class MirrorConfig {
    }
    
    /**
-    * 获取所有数据源的端点配置（用于 JVM 参数格式）
+    * 生成一组可直接写进启动器的 JVM 参数（-D形式）。
+    *
+    * 用途：不方便使用游戏内镜像设置界面时，可以把这组参数贴进 HMCL / PCL2 等启动器。
+    * 说明：只列出当前版本真正会读取的端点键；上游 0.8.x 已把高程源换成
+    * Mapterhorn(陆地)/OpenWaters(海面)、地表覆盖换成 Overture 与 ESA WorldCover COG，
+    * 旧的 elevation / copernicus / usgs / japangsi / arcticdem / rema / s3proxy 键已不再生效，故不再输出。
     */
    public static String[] getAllEndpointArgs() {
       String domain = getActiveDomain();
       if (domain.isBlank()) {
          return new String[0];
       }
-      
+
       return new String[] {
-         "-Dtellus.elevation.endpoint=" + domain + "/elevation",
-         "-Dtellus.copernicus30.endpoint=" + domain + "/copernicus30",
-         "-Dtellus.copernicus90.endpoint=" + domain + "/copernicus90",
-         "-Dtellus.usgs.endpoint=" + domain + "/usgs",
-         "-Dtellus.japangsi.endpoint=" + domain + "/japangsi",
-         "-Dtellus.arcticdem.endpoint=" + domain + "/arcticdem",
-         "-Dtellus.rema.endpoint=" + domain + "/rema",
-         "-Dtellus.landcover.endpoint=" + domain + "/landcover",
          "-Dtellus.weather.endpoint=" + domain + "/weather",
          "-Dtellus.geocoding.endpoint=" + domain + "/geocoding",
          "-Dtellus.osm.overpass.endpoints=" + domain + "/overpass",
          "-Dtellus.landmask.baseUrl=" + domain + "/landmask/",
-         "-Dtellus.s3proxy.endpoint=" + domain + "/s3",
-         "-Dtellus.tiles.endpoint=" + domain + "/tiles",
+         "-Dtellus.map.tiles.endpoint=" + domain + "/tiles",
          "-Dtellus.overture.roads.endpoint=" + domain + "/overture/roads",
          "-Dtellus.overture.buildings.endpoint=" + domain + "/overture/buildings",
          "-Dtellus.overture.water.endpoint=" + domain + "/overture/water",

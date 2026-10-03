@@ -132,21 +132,15 @@ public final class TellusEndpointConfig {
          return "";
       }
       
-      // 根据系统属性 key 映射到对应的路由
+      // 根据系统属性 key 映射到对应的路由。
+      // 说明：上游 0.8.x 删除了 4 个国别高程源，并把地表覆盖换成 Overture base 主题 PMTiles，
+      // 因此 elevation / copernicus / usgs / japangsi / arcticdem / rema / landcover / s3proxy
+      // 这些旧路由已经没有任何调用点，一并移除，避免文档与代码对不上。
       return switch (systemPropertyKey) {
-         case "tellus.elevation.endpoint" -> domain + "/elevation";
-         case "tellus.copernicus30.endpoint" -> domain + "/copernicus30";
-         case "tellus.copernicus90.endpoint" -> domain + "/copernicus90";
-         case "tellus.usgs.endpoint" -> domain + "/usgs";
-         case "tellus.japangsi.endpoint" -> domain + "/japangsi";
-         case "tellus.arcticdem.endpoint" -> domain + "/arcticdem";
-         case "tellus.rema.endpoint" -> domain + "/rema";
-         case "tellus.landcover.endpoint" -> domain + "/landcover";
          case "tellus.weather.endpoint" -> domain + "/weather";
          case "tellus.geocoding.endpoint" -> domain + "/geocoding";
          case "tellus.osm.overpass.endpoints" -> domain + "/overpass";
          case "tellus.landmask.baseUrl" -> domain + "/landmask/";
-         case "tellus.s3proxy.endpoint" -> domain + "/s3";
          case "tellus.map.tiles.endpoint" -> domain + "/tiles";
          case "tellus.overture.roads.endpoint" -> domain + "/overture/roads";
          case "tellus.overture.buildings.endpoint" -> domain + "/overture/buildings";
@@ -155,63 +149,7 @@ public final class TellusEndpointConfig {
          default -> "";
       };
    }
-   
-   /**
-    * 获取 Terrarium 高程端点
-    */
-   public static String getElevationEndpoint(String defaultValue) {
-      return getEndpoint("tellus.elevation.endpoint", defaultValue);
-   }
-   
-   /**
-    * 获取 Copernicus 30m 端点
-    */
-   public static String getCopernicus30Endpoint(String defaultValue) {
-      return getEndpoint("tellus.copernicus30.endpoint", defaultValue);
-   }
-   
-   /**
-    * 获取 Copernicus 90m 端点
-    */
-   public static String getCopernicus90Endpoint(String defaultValue) {
-      return getEndpoint("tellus.copernicus90.endpoint", defaultValue);
-   }
-   
-   /**
-    * 获取 USGS 端点
-    */
-   public static String getUsgsEndpoint(String defaultValue) {
-      return getEndpoint("tellus.usgs.endpoint", defaultValue);
-   }
-   
-   /**
-    * 获取 Japan GSI 端点
-    */
-   public static String getJapanGsiEndpoint(String defaultValue) {
-      return getEndpoint("tellus.japangsi.endpoint", defaultValue);
-   }
-   
-   /**
-    * 获取 ArcticDEM 端点
-    */
-   public static String getArcticDemEndpoint(String defaultValue) {
-      return getEndpoint("tellus.arcticdem.endpoint", defaultValue);
-   }
-   
-   /**
-    * 获取 REMA 端点
-    */
-   public static String getRemaEndpoint(String defaultValue) {
-      return getEndpoint("tellus.rema.endpoint", defaultValue);
-   }
-   
-   /**
-    * 获取地表覆盖端点
-    */
-   public static String getLandCoverEndpoint(String defaultValue) {
-      return getEndpoint("tellus.landcover.endpoint", defaultValue);
-   }
-   
+
    /**
     * 获取天气端点
     */
@@ -238,13 +176,6 @@ public final class TellusEndpointConfig {
     */
    public static String getLandMaskBaseUrl(String defaultValue) {
       return getEndpoint("tellus.landmask.baseUrl", defaultValue);
-   }
-   
-   /**
-    * 获取 S3 代理端点
-    */
-   public static String getS3ProxyEndpoint(String defaultValue) {
-      return getEndpoint("tellus.s3proxy.endpoint", defaultValue);
    }
    
    /**
