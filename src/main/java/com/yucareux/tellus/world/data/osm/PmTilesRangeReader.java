@@ -3,7 +3,8 @@ package com.yucareux.tellus.world.data.osm;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
-import com.yucareux.tellus.Tellus;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import com.yucareux.tellus.integration.distant_horizons.managed.ManagedTerrainNetworkPolicy;
 import com.yucareux.tellus.world.data.source.DownloadProgressReporter;
 import java.io.ByteArrayInputStream;
@@ -22,6 +23,9 @@ import java.util.concurrent.ExecutionException;
 import java.util.zip.GZIPInputStream;
 
 public final class PmTilesRangeReader {
+   // 独立日志器：与 Tellus.LOGGER 同一个日志分类，但不会连带触发 Tellus 类的静态初始化
+   // （Tellus 的静态初始化会访问 Minecraft 注册表，在未引导游戏的单元测试环境里会直接抛错）
+   private static final Logger LOGGER = LoggerFactory.getLogger("tellus");
    private static final int HEADER_SIZE = 127;
    private static final int MAX_DIRECTORY_DEPTH = 6;
    private static final int COMPRESSION_NONE = 1;
@@ -235,7 +239,7 @@ public final class PmTilesRangeReader {
             // 记录本次失败原因，供全部失败时抛出
             lastError = error;
             // 打日志说明这个候选不可用，方便主人从日志区分是镜像坏了还是官方源也坏了
-            Tellus.LOGGER.warn("PMTiles source unavailable, trying next candidate: {}", candidateUri, error);
+            LOGGER.warn("PMTiles source unavailable, trying next candidate: {}", candidateUri, error);
          }
       }
       // 喵~防御：所有候选都失败时抛出最后一次的错误，绝不让调用方拿到一个空文件头
