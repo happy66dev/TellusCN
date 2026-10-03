@@ -6,12 +6,15 @@ import com.google.common.cache.LoadingCache;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import com.mojang.blaze3d.platform.NativeImage;
 import com.yucareux.tellus.Tellus;
+import com.yucareux.tellus.cache.TellusCacheDomain;
+import com.yucareux.tellus.cache.TellusCacheFiles;
+import com.yucareux.tellus.cache.TellusCacheHandle;
+import com.yucareux.tellus.cache.TellusCacheRegistry;
 import com.yucareux.tellus.config.TellusEndpointConfig;
 import java.io.BufferedInputStream;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URL;
@@ -28,7 +31,7 @@ import net.fabricmc.api.Environment;
 import net.minecraft.client.Minecraft;
 
 @Environment(EnvType.CLIENT)
-public class SlippyMapTileCache {
+public class SlippyMapTileCache implements TellusCacheHandle {
    private static final int CACHE_SIZE = 1024;
    private final ExecutorService loadingService = Executors.newFixedThreadPool(
       4, new ThreadFactoryBuilder().setDaemon(true).setNameFormat("tellus-map-load-%d").build()
@@ -44,10 +47,15 @@ public class SlippyMapTileCache {
    }).build(new CacheLoader<SlippyMapTilePos, SlippyMapTile>() {
       public SlippyMapTile load(SlippyMapTilePos key) {
          SlippyMapTile tile = new SlippyMapTile(key);
+         long generation = TellusCacheRegistry.generation(TellusCacheDomain.OSM);
          try {
             SlippyMapTileCache.this.loadingService.submit(() -> {
-               NativeImage image = SlippyMapTileCache.this.downloadImage(key);
-               if (SlippyMapTileCache.this.shuttingDown) {
+               NativeImage image = SlippyMapTileCache.this.downloadImage(key, generation);
+               if (image == null) {
+                  return;
+               }
+
+               if (SlippyMapTileCache.this.shuttingDown || !TellusCacheRegistry.isCurrent(TellusCacheDomain.OSM, generation)) {
                   image.close();
                } else {
                   tile.supplyImage(image);
@@ -60,6 +68,10 @@ public class SlippyMapTileCache {
          return tile;
       }
    });
+
+   public SlippyMapTileCache() {
+      TellusCacheRegistry.register(this);
+   }
 
    public SlippyMapTile getTile(SlippyMapTilePos pos) {
       try {
@@ -74,6 +86,16 @@ public class SlippyMapTileCache {
    public void shutdown() {
       this.shuttingDown = true;
       this.loadingService.shutdownNow();
+      this.clearCache();
+   }
+
+   @Override
+   public TellusCacheDomain cacheDomain() {
+      return TellusCacheDomain.OSM;
+   }
+
+   @Override
+   public void clearCache() {
       this.tileCache.invalidateAll();
       this.tileCache.cleanUp();
 
@@ -89,10 +111,14 @@ public class SlippyMapTileCache {
       }
    }
 
-   private NativeImage downloadImage(SlippyMapTilePos pos) {
+   private NativeImage downloadImage(SlippyMapTilePos pos, long generation) {
       try {
          NativeImage var3;
-         try (InputStream input = Objects.requireNonNull(this.getStream(pos), "tileStream")) {
+         try (InputStream input = this.getStream(pos, generation)) {
+            if (input == null) {
+               return null;
+            }
+
             var3 = NativeImage.read(input);
          }
 
@@ -104,7 +130,7 @@ public class SlippyMapTileCache {
    }
 
    
-   private InputStream getStream(SlippyMapTilePos pos) throws IOException {
+   private InputStream getStream(SlippyMapTilePos pos, long generation) throws IOException {
       Path cachePath = this.cacheRoot.resolve(pos.getCacheName());
       if (Files.exists(cachePath)) {
          return new BufferedInputStream(Files.newInputStream(cachePath));
@@ -131,7 +157,9 @@ public class SlippyMapTileCache {
             try (InputStream input = new BufferedInputStream(stream)) {
                byte[] data = input.readAllBytes();
                Tellus.LOGGER.info("[TellusCN] Downloaded map tile: {} ({} bytes)", pos, data.length);
-               this.cacheData(cachePath, data);
+               if (!this.shuttingDown && !Thread.currentThread().isInterrupted() && TellusCacheRegistry.isCurrent(TellusCacheDomain.OSM, generation)) {
+                  this.cacheData(cachePath, data, generation);
+               }
                return new ByteArrayInputStream(data);
             } finally {
                this.loadingStreams.remove(stream);
@@ -163,15 +191,9 @@ public class SlippyMapTileCache {
       return String.format("https://tile.openstreetmap.org/%s/%s/%s.png", pos.getZoom(), pos.getX(), pos.getY());
    }
 
-   private void cacheData(Path cachePath, byte[] data) {
+   private void cacheData(Path cachePath, byte[] data, long generation) {
       try {
-         Files.createDirectories(Objects.requireNonNull(cachePath.getParent(), "cachePathParent"));
-      } catch (IOException var7) {
-         Tellus.LOGGER.error("Failed to create cache root", var7);
-      }
-
-      try (OutputStream output = Files.newOutputStream(cachePath)) {
-         output.write(data);
+         TellusCacheFiles.writeBytesIfCurrent(TellusCacheDomain.OSM, generation, cachePath, data);
       } catch (IOException var9) {
          Tellus.LOGGER.error("Failed to cache map tile", var9);
       }

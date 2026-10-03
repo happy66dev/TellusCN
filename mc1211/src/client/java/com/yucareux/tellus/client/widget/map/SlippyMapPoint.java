@@ -6,11 +6,14 @@ import net.minecraft.util.Mth;
 
 @Environment(EnvType.CLIENT)
 public class SlippyMapPoint {
+   private static final double MIN_LATITUDE = -85.05112878;
+   private static final double MAX_LATITUDE = 85.05112878;
+
    private final double latitude;
    private final double longitude;
 
    public SlippyMapPoint(double latitude, double longitude) {
-      this.latitude = latitude;
+      this.latitude = Mth.clamp(latitude, MIN_LATITUDE, MAX_LATITUDE);
       this.longitude = longitude;
    }
 

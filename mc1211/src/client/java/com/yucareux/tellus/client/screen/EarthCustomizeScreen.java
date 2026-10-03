@@ -115,6 +115,7 @@ public class EarthCustomizeScreen extends Screen {
    private long previewDirtyAt = -1L;
    private double spawnLatitude = 27.9881;
    private double spawnLongitude = 86.925;
+   private long randomBiomeSeed = EarthGeneratorSettings.DEFAULT.randomBiomeSeed();
 
    public EarthCustomizeScreen(CreateWorldScreen parent, WorldCreationContext worldCreationContext) {
       super(TITLE);
@@ -414,17 +415,19 @@ public class EarthCustomizeScreen extends Screen {
       int seaLevel = this.resolveSeaLevelSetting("sea_level", -64.0);
       int maxAltitude = this.resolveAltitudeSetting("max_altitude", -1.0);
       int minAltitude = this.resolveAltitudeSetting("min_altitude", -2048.0);
-      int riverLakeShorelineBlend = (int)Math.round(
-         this.findSliderValue("river_lake_shoreline_blend", EarthGeneratorSettings.DEFAULT.riverLakeShorelineBlend())
-      );
-      int oceanShorelineBlend = (int)Math.round(this.findSliderValue("ocean_shoreline_blend", EarthGeneratorSettings.DEFAULT.oceanShorelineBlend()));
-      boolean shorelineBlendCliffLimit = this.findToggleValue("shoreline_blend_cliff_limit", EarthGeneratorSettings.DEFAULT.shorelineBlendCliffLimit());
+      int riverLakeShorelineBlend = EarthGeneratorSettings.DEFAULT.riverLakeShorelineBlend();
+      int oceanShorelineBlend = EarthGeneratorSettings.DEFAULT.oceanShorelineBlend();
+      boolean shorelineBlendCliffLimit = EarthGeneratorSettings.DEFAULT.shorelineBlendCliffLimit();
       boolean caveGeneration = this.findToggleValue("cave_generation", EarthGeneratorSettings.DEFAULT.caveGeneration());
       boolean oreDistribution = this.findToggleValue("ore_distribution", EarthGeneratorSettings.DEFAULT.oreDistribution());
       boolean lavaPools = this.findToggleValue("lava_pools", EarthGeneratorSettings.DEFAULT.lavaPools());
       boolean enableRoads = this.findToggleValue("enable_roads", EarthGeneratorSettings.DEFAULT.enableRoads());
       boolean enableBuildings = this.findToggleValue("enable_buildings", EarthGeneratorSettings.DEFAULT.enableBuildings());
       boolean enableWater = this.findToggleValue("enable_water", EarthGeneratorSettings.DEFAULT.enableWater());
+      boolean climateBasedBuiltUpTerrain = this.findToggleValue("climate_based_built_up_terrain", EarthGeneratorSettings.DEFAULT.climateBasedBuiltUpTerrain());
+      boolean randomBiomes = this.findToggleValue("random_biomes", EarthGeneratorSettings.DEFAULT.randomBiomes());
+      double randomBiomeDensity = this.findSliderValue("random_biome_density", EarthGeneratorSettings.DEFAULT.randomBiomeDensity() * 100.0) / 100.0;
+      boolean thinShellTerrain = this.findToggleValue("thin_shell_terrain", EarthGeneratorSettings.DEFAULT.thinShellTerrain());
       boolean deepDark = this.findToggleValue("deep_dark", EarthGeneratorSettings.DEFAULT.deepDark());
       boolean geodes = this.findToggleValue("geodes", EarthGeneratorSettings.DEFAULT.geodes());
       boolean addStrongholds = this.findToggleValue("add_strongholds", EarthGeneratorSettings.DEFAULT.addStrongholds());
@@ -523,7 +526,12 @@ public class EarthCustomizeScreen extends Screen {
          demSelection,
          enableRoads,
          enableBuildings,
-         enableWater
+         enableWater,
+         thinShellTerrain,
+         climateBasedBuiltUpTerrain,
+         randomBiomes,
+         randomBiomeDensity,
+         this.randomBiomeSeed
       );
    }
 
@@ -562,15 +570,17 @@ public class EarthCustomizeScreen extends Screen {
       this.setSliderValue("sea_level", initialSettings.seaLevel() == -2147483647 ? -64.0 : initialSettings.seaLevel());
       this.setSliderValue("max_altitude", initialSettings.maxAltitude() == Integer.MIN_VALUE ? -1.0 : initialSettings.maxAltitude());
       this.setSliderValue("min_altitude", initialSettings.minAltitude() == Integer.MIN_VALUE ? -2048.0 : initialSettings.minAltitude());
-      this.setSliderValue("river_lake_shoreline_blend", initialSettings.riverLakeShorelineBlend());
-      this.setSliderValue("ocean_shoreline_blend", initialSettings.oceanShorelineBlend());
-      this.setToggleValue("shoreline_blend_cliff_limit", initialSettings.shorelineBlendCliffLimit());
       this.setToggleValue("cave_generation", initialSettings.caveGeneration());
       this.setToggleValue("ore_distribution", initialSettings.oreDistribution());
       this.setToggleValue("lava_pools", initialSettings.lavaPools());
       this.setToggleValue("enable_roads", initialSettings.enableRoads());
       this.setToggleValue("enable_buildings", initialSettings.enableBuildings());
       this.setToggleValue("enable_water", initialSettings.enableWater());
+      this.setToggleValue("thin_shell_terrain", initialSettings.thinShellTerrain());
+      this.setToggleValue("climate_based_built_up_terrain", initialSettings.climateBasedBuiltUpTerrain());
+      this.setToggleValue("random_biomes", initialSettings.randomBiomes());
+      this.setSliderValue("random_biome_density", initialSettings.randomBiomeDensity() * 100.0);
+      this.randomBiomeSeed = initialSettings.randomBiomeSeed();
       this.setToggleValue("deep_dark", initialSettings.deepDark());
       this.setToggleValue("geodes", initialSettings.geodes());
       this.setToggleValue("add_strongholds", initialSettings.addStrongholds());
@@ -737,6 +747,10 @@ public class EarthCustomizeScreen extends Screen {
                EarthGeneratorSettings.DemProvider.TERRARIUM, EarthGeneratorSettings.DEFAULT.demSelection().isEnabled(EarthGeneratorSettings.DemProvider.TERRARIUM)
             ),
             demProviderToggle(
+               EarthGeneratorSettings.DemProvider.GEBCO2026,
+               EarthGeneratorSettings.DEFAULT.demSelection().isEnabled(EarthGeneratorSettings.DemProvider.GEBCO2026)
+            ),
+            demProviderToggle(
                EarthGeneratorSettings.DemProvider.SWISSALTI3D,
                EarthGeneratorSettings.DEFAULT.demSelection().isEnabled(EarthGeneratorSettings.DemProvider.SWISSALTI3D)
             ),
@@ -771,6 +785,7 @@ public class EarthCustomizeScreen extends Screen {
             slider("world_scale", 30.0, 1.0, 500.0, 5.0)
                .withDisplay(EarthCustomizeScreen::formatWorldScale)
                .withScale(EarthCustomizeScreen.SliderScale.power(3.0)),
+            toggle("thin_shell_terrain", EarthGeneratorSettings.DEFAULT.thinShellTerrain()),
             this.categoryLink(demProvidersCategory)
                .withLabel(Component.translatable("property.tellus.dem_provider.name"))
                .withTooltip(Component.translatable("property.tellus.dem_provider.tooltip").withStyle(ChatFormatting.GRAY))
@@ -793,12 +808,7 @@ public class EarthCustomizeScreen extends Screen {
                .withDisplay(EarthCustomizeScreen::formatHeightOffset),
             slider("sea_level", -64.0, -64.0, 256.0, 1.0).withDisplay(EarthCustomizeScreen::formatSeaLevel),
             slider("max_altitude", -1.0, -1.0, 2031.0, 16.0).withDisplay(EarthCustomizeScreen::formatMaxAltitude),
-            slider("min_altitude", EarthGeneratorSettings.DEFAULT.minAltitude(), -2048.0, 2031.0, 16.0).withDisplay(EarthCustomizeScreen::formatMinAltitude),
-            slider("river_lake_shoreline_blend", EarthGeneratorSettings.DEFAULT.riverLakeShorelineBlend(), 0.0, 10.0, 1.0)
-               .withDisplay(EarthCustomizeScreen::formatHeightOffset),
-            slider("ocean_shoreline_blend", EarthGeneratorSettings.DEFAULT.oceanShorelineBlend(), 0.0, 10.0, 1.0)
-               .withDisplay(EarthCustomizeScreen::formatHeightOffset),
-            toggle("shoreline_blend_cliff_limit", EarthGeneratorSettings.DEFAULT.shorelineBlendCliffLimit())
+            slider("min_altitude", EarthGeneratorSettings.DEFAULT.minAltitude(), -2048.0, 2031.0, 16.0).withDisplay(EarthCustomizeScreen::formatMinAltitude)
          )
       );
       categories.add(
@@ -812,7 +822,8 @@ public class EarthCustomizeScreen extends Screen {
             List.of(
                toggle("enable_roads", EarthGeneratorSettings.DEFAULT.enableRoads()),
                toggle("enable_buildings", EarthGeneratorSettings.DEFAULT.enableBuildings()),
-               toggle("enable_water", EarthGeneratorSettings.DEFAULT.enableWater())
+               toggle("enable_water", EarthGeneratorSettings.DEFAULT.enableWater()),
+               toggle("climate_based_built_up_terrain", EarthGeneratorSettings.DEFAULT.climateBasedBuiltUpTerrain())
             )
          )
       );
@@ -821,6 +832,8 @@ public class EarthCustomizeScreen extends Screen {
             "ecological",
             List.of(
                toggle("land_vegetation", true).locked(true),
+               toggle("random_biomes", EarthGeneratorSettings.DEFAULT.randomBiomes()),
+               slider("random_biome_density", EarthGeneratorSettings.DEFAULT.randomBiomeDensity() * 100.0, 0.0, 40.0, 1.0).withDisplay(EarthCustomizeScreen::formatPercent),
                slider("land_vegetation_density", 100.0, 0.0, 200.0, 5.0).withDisplay(EarthCustomizeScreen::formatPercent).locked(true),
                slider("trees_density", 100.0, 0.0, 200.0, 5.0).withDisplay(EarthCustomizeScreen::formatPercent).locked(true),
                toggle("aquatic_vegetation", true).locked(true),
@@ -942,6 +955,8 @@ public class EarthCustomizeScreen extends Screen {
                cacheEntry(EarthCustomizeScreen.CacheMetric.ARCTICDEM, true),
                cacheEntry(EarthCustomizeScreen.CacheMetric.USGS, true),
                cacheEntry(EarthCustomizeScreen.CacheMetric.COPERNICUS, true),
+               cacheEntry(EarthCustomizeScreen.CacheMetric.GEBCO2026, true),
+               cacheEntry(EarthCustomizeScreen.CacheMetric.OISST, true),
                cacheEntry(EarthCustomizeScreen.CacheMetric.TOTAL, false),
                cacheActionButton(Component.translatable("tellus.cache.delete_all"), EarthCustomizeScreen.CacheManager::deleteAll)
             )
@@ -1316,6 +1331,13 @@ public class EarthCustomizeScreen extends Screen {
       return Objects.requireNonNull(Component.translatable("property.tellus." + key + ".tooltip").withStyle(ChatFormatting.GRAY), "settingTooltip");
    }
 
+   private static Component gebcoOutageTooltip() {
+      return Objects.requireNonNull(
+         Component.translatable("tellus.dem_provider.force_disabled.gebco_outage").withStyle(ChatFormatting.RED),
+         "gebcoOutageTooltip"
+      );
+   }
+
    
    private static Component requiresModTooltip( String modId) {
       return Objects.requireNonNull(
@@ -1616,16 +1638,24 @@ public class EarthCustomizeScreen extends Screen {
          }
 
          Component automaticTooltip = Component.translatable("tellus.dem_provider.force_disabled.automatic").withStyle(ChatFormatting.GRAY);
+         Component outageTooltip = gebcoOutageTooltip();
          if (automatic != null && automatic.value) {
             for (EarthCustomizeScreen.DemProviderToggleDefinition providerToggle : providerToggles.values()) {
-               providerToggle.value = true;
-               providerToggle.forceDisabled(true, automaticTooltip);
+               boolean gebco = providerToggle.provider == EarthGeneratorSettings.DemProvider.GEBCO2026;
+               providerToggle.value = !gebco;
+               providerToggle.forceDisabled(true, gebco ? outageTooltip : automaticTooltip);
             }
             return;
          }
 
          for (EarthCustomizeScreen.DemProviderToggleDefinition providerToggle : providerToggles.values()) {
             providerToggle.forceDisabled(false);
+         }
+
+         EarthCustomizeScreen.DemProviderToggleDefinition gebco = providerToggles.get(EarthGeneratorSettings.DemProvider.GEBCO2026);
+         if (gebco != null) {
+            gebco.value = false;
+            gebco.forceDisabled(true, outageTooltip);
          }
 
          EarthCustomizeScreen.DemProviderToggleDefinition terrainTiles = providerToggles.get(EarthGeneratorSettings.DemProvider.TERRARIUM);
@@ -2147,6 +2177,7 @@ public class EarthCustomizeScreen extends Screen {
       private static final ExecutorService EXECUTOR = Executors.newSingleThreadExecutor(new EarthCustomizeScreen.CacheThreadFactory());
       private static final AtomicReference<EarthCustomizeScreen.CacheSnapshot> SNAPSHOT = new AtomicReference<>(EarthCustomizeScreen.CacheSnapshot.empty());
       private static final AtomicBoolean IN_FLIGHT = new AtomicBoolean(false);
+      private static final AtomicReference<Runnable> PENDING_TASK = new AtomicReference<>();
 
       private static EarthCustomizeScreen.CacheSnapshot snapshot() {
          return SNAPSHOT.get();
@@ -2196,6 +2227,15 @@ public class EarthCustomizeScreen extends Screen {
                }
 
                IN_FLIGHT.set(false);
+               Runnable pendingTask = PENDING_TASK.getAndSet(null);
+               if (pendingTask != null) {
+                  refreshAsync(pendingTask);
+               }
+            });
+         } else if (task != null) {
+            PENDING_TASK.getAndUpdate(pendingTask -> pendingTask == null ? task : () -> {
+               pendingTask.run();
+               task.run();
             });
          }
       }
@@ -2213,6 +2253,8 @@ public class EarthCustomizeScreen extends Screen {
          long arcticDemBytes = sizeFor(EarthCustomizeScreen.CacheMetric.ARCTICDEM);
          long usgsBytes = sizeFor(EarthCustomizeScreen.CacheMetric.USGS);
          long copernicusBytes = sizeFor(EarthCustomizeScreen.CacheMetric.COPERNICUS);
+         long gebco2026Bytes = sizeFor(EarthCustomizeScreen.CacheMetric.GEBCO2026);
+         long oisstBytes = sizeFor(EarthCustomizeScreen.CacheMetric.OISST);
          return new EarthCustomizeScreen.CacheSnapshot(
             true,
             osmBytes,
@@ -2226,7 +2268,9 @@ public class EarthCustomizeScreen extends Screen {
             japanGsiBytes,
             arcticDemBytes,
             usgsBytes,
-            copernicusBytes
+            copernicusBytes,
+            gebco2026Bytes,
+            oisstBytes
          );
       }
 
@@ -2328,6 +2372,8 @@ public class EarthCustomizeScreen extends Screen {
       ),
       USGS("tellus.cache.section.usgs", "tellus/cache/elevation-usgs3dep", TellusCacheDomain.USGS),
       COPERNICUS("tellus.cache.section.copernicus", "tellus/cache/elevation-copernicus", TellusCacheDomain.COPERNICUS),
+      GEBCO2026("tellus.cache.section.gebco2026", "tellus/cache/elevation-gebco2026", TellusCacheDomain.GEBCO2026),
+      OISST("tellus.cache.section.oisst", "tellus/cache/ocean-oisst-v21", TellusCacheDomain.OISST),
       TOTAL("tellus.cache.section.total", new String[0], new TellusCacheDomain[0]);
 
       
@@ -2396,10 +2442,12 @@ public class EarthCustomizeScreen extends Screen {
       long japanGsiBytes,
       long arcticDemBytes,
       long usgsBytes,
-      long copernicusBytes
+      long copernicusBytes,
+      long gebco2026Bytes,
+      long oisstBytes
    ) {
       private static EarthCustomizeScreen.CacheSnapshot empty() {
-         return new EarthCustomizeScreen.CacheSnapshot(false, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L);
+         return new EarthCustomizeScreen.CacheSnapshot(false, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L);
       }
 
       private long bytesFor(EarthCustomizeScreen.CacheMetric metric) {
@@ -2416,6 +2464,8 @@ public class EarthCustomizeScreen extends Screen {
             case ARCTICDEM -> this.arcticDemBytes;
             case USGS -> this.usgsBytes;
             case COPERNICUS -> this.copernicusBytes;
+            case GEBCO2026 -> this.gebco2026Bytes;
+            case OISST -> this.oisstBytes;
             case TOTAL -> this.totalBytes();
          };
       }
@@ -2432,7 +2482,9 @@ public class EarthCustomizeScreen extends Screen {
             + this.japanGsiBytes
             + this.arcticDemBytes
             + this.usgsBytes
-            + this.copernicusBytes;
+            + this.copernicusBytes
+            + this.gebco2026Bytes
+            + this.oisstBytes;
       }
    }
 
@@ -2894,9 +2946,9 @@ public class EarthCustomizeScreen extends Screen {
       
       private static List<EarthGeneratorSettings.DistantHorizonsRenderMode> createModes() {
          List<EarthGeneratorSettings.DistantHorizonsRenderMode> modes = new ArrayList<>(3);
-         modes.add(EarthGeneratorSettings.DistantHorizonsRenderMode.DETAILED);
-         modes.add(EarthGeneratorSettings.DistantHorizonsRenderMode.FAST);
          modes.add(EarthGeneratorSettings.DistantHorizonsRenderMode.ULTRA_FAST);
+         modes.add(EarthGeneratorSettings.DistantHorizonsRenderMode.FAST);
+         modes.add(EarthGeneratorSettings.DistantHorizonsRenderMode.DETAILED);
          return modes;
       }
 
@@ -2923,8 +2975,8 @@ public class EarthCustomizeScreen extends Screen {
             ? this.unavailableTooltip
             : (this.locked ? EarthCustomizeScreen.workInProgressTooltip(this.key) : EarthCustomizeScreen.settingTooltip(this.key));
          Builder<EarthGeneratorSettings.DistantHorizonsRenderMode> builder = CycleButton.builder(EarthCustomizeScreen::formatRenderMode)
-            .withInitialValue(this.value)
             .withValues(MODES)
+            .withInitialValue(this.value)
             .withTooltip(value -> Tooltip.create(tooltip));
          CycleButton<EarthGeneratorSettings.DistantHorizonsRenderMode> button = builder.create(0, 0, 0, 20, name, (btn, value) -> {
             this.value = value;
@@ -3186,7 +3238,13 @@ public class EarthCustomizeScreen extends Screen {
             : (this.forceDisabled && this.forceDisabledTooltip != null
                ? this.forceDisabledTooltip
                : (this.locked ? EarthCustomizeScreen.workInProgressTooltip(this.key) : EarthCustomizeScreen.settingTooltip(this.key)));
-         Builder<Boolean> builder = CycleButton.booleanBuilder(EarthCustomizeScreen.YES, EarthCustomizeScreen.NO)
+         Component enabledLabel = "enable_water".equals(this.key)
+            ? Component.translatable("property.tellus.enable_water.value.openstreetmap")
+            : EarthCustomizeScreen.YES;
+         Component disabledLabel = "enable_water".equals(this.key)
+            ? Component.translatable("property.tellus.enable_water.value.esa")
+            : EarthCustomizeScreen.NO;
+         Builder<Boolean> builder = CycleButton.booleanBuilder(enabledLabel, disabledLabel)
             .withInitialValue(this.value)
             .withTooltip(value -> Tooltip.create(tooltip));
          CycleButton<Boolean> button = builder.create(0, 0, 0, 20, name, (btn, value) -> {

@@ -5,7 +5,9 @@ import com.yucareux.tellus.world.data.cover.TellusLandCoverSource;
 import com.yucareux.tellus.world.data.elevation.TellusElevationSource;
 import com.yucareux.tellus.world.data.koppen.TellusKoppenSource;
 import com.yucareux.tellus.world.data.mask.TellusLandMaskSource;
+import com.yucareux.tellus.world.data.ocean.OisstOceanClimateSource;
 import com.yucareux.tellus.world.data.osm.TellusOsmBuildingSource;
+import com.yucareux.tellus.world.data.osm.TellusOsmInfrastructureSource;
 import com.yucareux.tellus.world.data.osm.TellusOsmRoadSource;
 import com.yucareux.tellus.world.data.osm.TellusOsmSandSource;
 import com.yucareux.tellus.world.data.osm.TellusOsmWaterSource;
@@ -31,7 +33,9 @@ public final class TellusWorldgenSources {
    private static final TellusLandMaskSource LAND_MASK = new TellusLandMaskSource();
    private static final TellusElevationSource ELEVATION = new TellusElevationSource();
    private static final TellusKoppenSource KOPPEN = new TellusKoppenSource();
+   private static final OisstOceanClimateSource OCEAN_CLIMATE = new OisstOceanClimateSource();
    private static final TellusOsmRoadSource OSM_ROADS = new TellusOsmRoadSource();
+   private static final TellusOsmInfrastructureSource OSM_INFRASTRUCTURE = new TellusOsmInfrastructureSource();
    private static final TellusOsmBuildingSource OSM_BUILDINGS = new TellusOsmBuildingSource();
    private static final TellusOsmWaterSource OSM_WATER = new TellusOsmWaterSource();
    private static final TellusOsmSandSource OSM_SAND = new TellusOsmSandSource();
@@ -42,8 +46,9 @@ public final class TellusWorldgenSources {
    private static final boolean WATER_PREFETCH_ENABLED = Boolean.parseBoolean(System.getProperty("tellus.prefetch.water.enabled", "true"));
    private static final int WATER_PREFETCH_RADIUS = intProperty("tellus.prefetch.water.radius", 1);
    private static final int SAND_PREFETCH_RADIUS = intProperty("tellus.prefetch.sand.radius", 1);
-   private static final int CHUNK_DETAIL_PREFETCH_RADIUS = intProperty("tellus.chunkdetail.prefetchRadius", 2);
+   private static final int CHUNK_DETAIL_PREFETCH_RADIUS = intProperty("tellus.chunkdetail.prefetchRadius", 1);
    private static final int ROADS_PREFETCH_RADIUS = intProperty("tellus.prefetch.roads.radius", 1);
+   private static final int INFRASTRUCTURE_PREFETCH_RADIUS = intProperty("tellus.prefetch.infrastructure.radius", 1);
    private static final int BUILDINGS_PREFETCH_RADIUS = intProperty("tellus.prefetch.buildings.radius", 1);
    private static final ExecutorService PREFETCH_EXECUTOR = createPrefetchExecutor();
    private static final ExecutorService TERRAIN_DETAIL_EXECUTOR = createTerrainDetailExecutor();
@@ -64,12 +69,20 @@ public final class TellusWorldgenSources {
       return KOPPEN;
    }
 
+   static OisstOceanClimateSource oceanClimate() {
+      return OCEAN_CLIMATE;
+   }
+
    public static TellusLandMaskSource landMask() {
       return LAND_MASK;
    }
 
    public static TellusOsmRoadSource osmRoads() {
       return OSM_ROADS;
+   }
+
+   public static TellusOsmInfrastructureSource osmInfrastructure() {
+      return OSM_INFRASTRUCTURE;
    }
 
    public static TellusOsmBuildingSource osmBuildings() {
@@ -106,9 +119,9 @@ public final class TellusWorldgenSources {
          )
       );
       futures.add(submitCriticalWarmup(() -> LAND_MASK.prefetchTiles(centerX, centerZ, worldScale, Math.max(1, LAND_MASK_PREFETCH_RADIUS))));
-      if (SAND_PREFETCH_RADIUS > 0 && worldScale > 0.0) {
-         futures.add(submitCriticalWarmup(() -> OSM_SAND.prefetchTiles(centerX, centerZ, worldScale, SAND_PREFETCH_RADIUS)));
-      }
+         if (SAND_PREFETCH_RADIUS > 0 && worldScale > 0.0) {
+            futures.add(submitCriticalWarmup(() -> OSM_SAND.prefetchTiles(centerX, centerZ, worldScale, SAND_PREFETCH_RADIUS)));
+         }
 
       for (CompletableFuture<Void> future : futures) {
          try {
@@ -228,6 +241,10 @@ public final class TellusWorldgenSources {
          double worldScale = settings.worldScale();
          if (includeRoadsPrefetch && settings.enableRoads() && worldScale <= 15.0 && ROADS_PREFETCH_RADIUS > 0) {
             submitPrefetch(() -> OSM_ROADS.prefetchTiles(centerX, centerZ, worldScale, ROADS_PREFETCH_RADIUS), allowInlineExecution);
+         }
+
+         if (includeRoadsPrefetch && settings.enableRoads() && worldScale <= 15.0 && INFRASTRUCTURE_PREFETCH_RADIUS > 0) {
+            submitPrefetch(() -> OSM_INFRASTRUCTURE.prefetchTiles(centerX, centerZ, worldScale, INFRASTRUCTURE_PREFETCH_RADIUS), allowInlineExecution);
          }
 
          if (includeBuildingsPrefetch && settings.enableBuildings() && worldScale > 0.0 && worldScale <= 15.0 && BUILDINGS_PREFETCH_RADIUS > 0) {

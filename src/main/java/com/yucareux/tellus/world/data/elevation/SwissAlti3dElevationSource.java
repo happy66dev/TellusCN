@@ -5,6 +5,7 @@ import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
 import com.yucareux.tellus.Tellus;
 import com.yucareux.tellus.cache.TellusCacheDomain;
+import com.yucareux.tellus.cache.TellusCacheFiles;
 import com.yucareux.tellus.cache.TellusCacheHandle;
 import com.yucareux.tellus.cache.TellusCacheRegistry;
 import com.yucareux.tellus.world.data.source.DownloadProgressReporter;
@@ -20,7 +21,6 @@ import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.Map;
@@ -443,15 +443,10 @@ public final class SwissAlti3dElevationSource implements TellusCacheHandle {
                }
 
                Files.createDirectories(this.cacheDir);
+               long generation = TellusCacheRegistry.generation(TellusCacheDomain.SWISSALTI3D);
                byte[] downloaded = this.download(offset, length);
-               Path tempFile = Files.createTempFile(this.cacheDir, "range_", ".bin");
-
-               try {
-                  Files.write(tempFile, downloaded);
-                  Files.move(tempFile, cacheFile, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-               } catch (IOException error) {
-                  Files.deleteIfExists(tempFile);
-                  throw error;
+               if (!TellusCacheFiles.writeBytesIfCurrent(TellusCacheDomain.SWISSALTI3D, generation, cacheFile, downloaded)) {
+                  throw new IOException("Discarded stale swissALTI3D range cache write for " + this.assetRef.id());
                }
 
                synchronized(this.cachedFiles) {

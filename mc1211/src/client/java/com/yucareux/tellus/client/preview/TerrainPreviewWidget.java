@@ -1,5 +1,6 @@
 package com.yucareux.tellus.client.preview;
 
+import com.yucareux.tellus.world.data.elevation.Gebco2026ElevationSource;
 import com.yucareux.tellus.world.data.elevation.TellusElevationSource;
 import com.yucareux.tellus.worldgen.EarthGeneratorSettings;
 import java.util.Locale;
@@ -57,6 +58,11 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
    private static final int LOADING_BAR_BORDER = -13816531;
    private static final int LOADING_BAR_FILL = -12599473;
    private static final int LOADING_TEXT = -1;
+   private static final int GEBCO_WARNING_BG = 0xCC100000;
+   private static final int GEBCO_WARNING_BORDER = 0xFFFF5555;
+   private static final int GEBCO_WARNING_TITLE = 0xFFFF5555;
+   private static final int GEBCO_WARNING_DETAIL = 0xFFFF8888;
+   private static final long GEBCO_WARNING_DURATION_MS = 5000L;
    private final TerrainPreview preview;
    private final boolean ownsPreview;
    private final Button modeButton;
@@ -73,6 +79,8 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
    private float zoom = DEFAULT_ZOOM;
    private TerrainPreviewWidget.RenderMode renderMode = TerrainPreviewWidget.RenderMode.FULL_DETAIL;
    private long lastInteractionTime;
+   private long gebcoWarningOutageId = -1L;
+   private long gebcoWarningUntilMs;
 
    public TerrainPreviewWidget(int x, int y, int width, int height) {
       this(x, y, width, height, new TerrainPreview(), true);
@@ -151,6 +159,7 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
       int contentHeight = Math.max(1, this.height - inset * 2);
       this.preview.render(graphics, contentX, contentY, contentWidth, contentHeight, this.rotationX, this.rotationY, this.zoom, this.renderMode);
       this.renderLoadingOverlay(graphics, contentX, contentY, contentWidth, contentHeight);
+      this.renderGebcoWarning(graphics, contentX, contentY, contentWidth, contentHeight);
       this.renderModeButton(graphics, mouseX, mouseY, delta);
       this.renderInfoButton(graphics, mouseX, mouseY, delta);
       this.renderInfoPanel(graphics, mouseX, mouseY, delta);
@@ -311,6 +320,38 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
             }
          }
       }
+   }
+
+   private void renderGebcoWarning(GuiGraphics graphics, int x, int y, int width, int height) {
+      EarthGeneratorSettings settings = this.preview.getLastSettings();
+      if ((settings != null && !settings.demSelection().gebco2026Enabled()) || !Gebco2026ElevationSource.isRemoteUnavailable()) {
+         this.gebcoWarningOutageId = -1L;
+         this.gebcoWarningUntilMs = 0L;
+         return;
+      }
+
+      long outageId = Gebco2026ElevationSource.remoteOutageId();
+      long now = System.currentTimeMillis();
+      if (this.gebcoWarningOutageId != outageId) {
+         this.gebcoWarningOutageId = outageId;
+         this.gebcoWarningUntilMs = now + GEBCO_WARNING_DURATION_MS;
+      } else if (now >= this.gebcoWarningUntilMs) {
+         return;
+      }
+
+      Font font = Minecraft.getInstance().font;
+      Component title = Component.translatable("tellus.warning.gebco.preview.title");
+      Component detail = Component.translatable("tellus.warning.gebco.preview.fallback");
+      int padding = 7;
+      int panelWidth = Math.min(width - 12, Math.max(font.width(title), font.width(detail)) + padding * 2);
+      int panelHeight = 31;
+      int panelX = x + (width - panelWidth) / 2;
+      int panelY = y + (height - panelHeight) / 2;
+      graphics.fill(panelX, panelY, panelX + panelWidth, panelY + panelHeight, GEBCO_WARNING_BG);
+      graphics.renderOutline(panelX, panelY, panelWidth, panelHeight, GEBCO_WARNING_BORDER);
+      int centerX = panelX + panelWidth / 2;
+      graphics.drawCenteredString(font, title, centerX, panelY + 6, GEBCO_WARNING_TITLE);
+      graphics.drawCenteredString(font, detail, centerX, panelY + 17, GEBCO_WARNING_DETAIL);
    }
 
    private static float displayedProgress(TerrainPreview.PreviewStatus status) {

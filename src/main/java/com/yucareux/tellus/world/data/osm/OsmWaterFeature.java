@@ -8,6 +8,7 @@ public final class OsmWaterFeature {
    private final long featureId;
    private final boolean lineGeometry;
    private final boolean oceanHint;
+   private final OsmWaterKind kind;
    private final double[][] longitudes;
    private final double[][] latitudes;
    private final double minLon;
@@ -16,9 +17,16 @@ public final class OsmWaterFeature {
    private final double maxLat;
 
    public OsmWaterFeature(long featureId, boolean lineGeometry, boolean oceanHint, double[][] longitudes, double[][] latitudes) {
+      this(featureId, lineGeometry, oceanHint, OsmWaterKind.UNKNOWN, longitudes, latitudes);
+   }
+
+   public OsmWaterFeature(
+      long featureId, boolean lineGeometry, boolean oceanHint, OsmWaterKind kind, double[][] longitudes, double[][] latitudes
+   ) {
       this.featureId = featureId;
       this.lineGeometry = lineGeometry;
-      this.oceanHint = oceanHint;
+      this.kind = Objects.requireNonNullElse(kind, OsmWaterKind.UNKNOWN);
+      this.oceanHint = oceanHint || this.kind.ocean();
       this.longitudes = copyParts(Objects.requireNonNull(longitudes, "longitudes"));
       this.latitudes = copyParts(Objects.requireNonNull(latitudes, "latitudes"));
       if (this.longitudes.length != this.latitudes.length || this.longitudes.length == 0) {
@@ -64,6 +72,14 @@ public final class OsmWaterFeature {
 
    public boolean oceanHint() {
       return this.oceanHint;
+   }
+
+   public OsmWaterKind kind() {
+      return this.kind;
+   }
+
+   public boolean flowingWater() {
+      return this.lineGeometry || this.kind.flowing();
    }
 
    public int partCount() {

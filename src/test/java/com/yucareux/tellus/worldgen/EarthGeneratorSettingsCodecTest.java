@@ -19,6 +19,29 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class EarthGeneratorSettingsCodecTest {
    @Test
+   void defaultSettingsEnableWater() {
+      assertTrue(EarthGeneratorSettings.DEFAULT.enableWater());
+      assertFalse(EarthGeneratorSettings.DEFAULT.demSelection().gebco2026Enabled());
+   }
+
+   @Test
+   void gebcoIsDisabledForAutomaticManualAndSerializedSelections() {
+      EarthGeneratorSettings.DemProvider gebco = EarthGeneratorSettings.DemProvider.GEBCO2026;
+      EarthGeneratorSettings.DemSelection automatic = EarthGeneratorSettings.DemSelection.automaticSelection();
+      EarthGeneratorSettings.DemSelection manual = EarthGeneratorSettings.DemSelection.manual(
+         EarthGeneratorSettings.DemSelection.fullUserSelectableMask() | gebco.selectionBit()
+      );
+      EarthGeneratorSettings.DemSelection serialized = EarthGeneratorSettings.DemSelection.manual(
+         EarthGeneratorSettings.DemSelection.maskFromProviderIds(java.util.List.of("terrarium", "gebco2026"))
+      );
+
+      assertFalse(automatic.gebco2026Enabled());
+      assertFalse(manual.gebco2026Enabled());
+      assertFalse(serialized.gebco2026Enabled());
+      assertFalse(automatic.enabledProviderIds().contains("gebco2026"));
+   }
+
+   @Test
    void roundTripsCurrentSettingsPayload() {
       JsonElement input = JsonParser.parseString(
          """
@@ -69,7 +92,12 @@ class EarthGeneratorSettingsCodecTest {
            "voxy_chunk_pregen_chunks_per_tick": 8,
            "enable_roads": true,
            "enable_buildings": true,
-           "enable_water": true
+           "enable_water": true,
+           "thin_shell_terrain": true,
+           "climate_based_built_up_terrain": true,
+           "random_biomes": true,
+           "random_biome_density": 0.25,
+           "random_biome_seed": 987654321
          }
          """
       );
@@ -79,11 +107,28 @@ class EarthGeneratorSettingsCodecTest {
       EarthGeneratorSettings reparsed = requireSuccess(EarthGeneratorSettings.CODEC.parse(JsonOps.INSTANCE, encoded));
 
       assertEquals(decoded, reparsed);
+      assertTrue(decoded.thinShellTerrain());
+      assertTrue(decoded.climateBasedBuiltUpTerrain());
+      assertTrue(decoded.randomBiomes());
+      assertEquals(0.25, decoded.randomBiomeDensity());
+      assertEquals(987654321L, decoded.randomBiomeSeed());
+      assertTrue(reparsed.thinShellTerrain());
+      assertTrue(reparsed.climateBasedBuiltUpTerrain());
+      assertTrue(reparsed.randomBiomes());
+      assertEquals(0.25, reparsed.randomBiomeDensity());
+      assertEquals(987654321L, reparsed.randomBiomeSeed());
+      assertFalse(decoded.demSelection().gebco2026Enabled());
+      assertFalse(reparsed.demSelection().gebco2026Enabled());
       JsonObject encodedObject = encoded.getAsJsonObject();
       assertTrue(encodedObject.has("dem_automatic"));
       assertTrue(encodedObject.has("dem_enabled_providers"));
       assertFalse(encodedObject.has("dem_provider"));
       assertEquals("detailed", encodedObject.get("distant_horizons_render_mode").getAsString());
+      assertTrue(encodedObject.get("thin_shell_terrain").getAsBoolean());
+      assertTrue(encodedObject.get("climate_based_built_up_terrain").getAsBoolean());
+      assertTrue(encodedObject.get("random_biomes").getAsBoolean());
+      assertEquals(0.25, encodedObject.get("random_biome_density").getAsDouble());
+      assertEquals(987654321L, encodedObject.get("random_biome_seed").getAsLong());
    }
 
    @Test
@@ -99,12 +144,18 @@ class EarthGeneratorSettingsCodecTest {
       assertTrue(decoded.demSelection().isEnabled(EarthGeneratorSettings.DemProvider.USGS));
       assertTrue(decoded.demSelection().isEnabled(EarthGeneratorSettings.DemProvider.COPERNICUS));
       assertFalse(decoded.demSelection().isEnabled(EarthGeneratorSettings.DemProvider.TERRARIUM));
+      assertFalse(decoded.demSelection().gebco2026Enabled());
       assertTrue(decoded.realtimeTime());
       assertTrue(decoded.realtimeWeather());
       assertTrue(decoded.historicalSnow());
       assertTrue(decoded.enableRoads());
       assertTrue(decoded.enableBuildings());
       assertTrue(decoded.enableWater());
+      assertFalse(decoded.thinShellTerrain());
+      assertFalse(decoded.climateBasedBuiltUpTerrain());
+      assertFalse(decoded.randomBiomes());
+      assertEquals(EarthGeneratorSettings.DEFAULT_RANDOM_BIOME_DENSITY, decoded.randomBiomeDensity());
+      assertEquals(EarthGeneratorSettings.DEFAULT_RANDOM_BIOME_SEED, decoded.randomBiomeSeed());
       assertTrue(decoded.voxyChunkPregenEnabled());
       assertEquals(192, decoded.voxyChunkPregenMaxRadius());
       assertEquals(10, decoded.voxyChunkPregenChunksPerTick());

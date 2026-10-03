@@ -7,6 +7,7 @@ import com.yucareux.tellus.Tellus;
 import com.yucareux.tellus.config.OvertureDataConfig;
 import com.yucareux.tellus.config.TellusEndpointConfig;
 import com.yucareux.tellus.cache.TellusCacheDomain;
+import com.yucareux.tellus.cache.TellusCacheFiles;
 import com.yucareux.tellus.cache.TellusCacheHandle;
 import com.yucareux.tellus.cache.TellusCacheRegistry;
 import com.yucareux.tellus.worldgen.EarthProjection;
@@ -20,7 +21,6 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -237,7 +237,12 @@ public final class TellusOsmBuildingSource implements TellusCacheHandle {
             }
          }
 
+         long generation = TellusCacheRegistry.generation(TellusCacheDomain.OSM);
          byte[] payload = this.fetchTilePayloadWithRetry(key);
+         if (!TellusCacheRegistry.isCurrent(TellusCacheDomain.OSM, generation)) {
+            throw new RuntimeException("Discarded stale Overture building tile " + key);
+         }
+
          OsmBuildingTile parsed;
 
          try {
@@ -249,7 +254,10 @@ public final class TellusOsmBuildingSource implements TellusCacheHandle {
             throw new RuntimeException("Overture building parse failed for tile " + key, error);
          }
 
-         this.cacheTile(cachePath, payload);
+         if (!this.cacheTile(cachePath, payload, generation)) {
+            throw new RuntimeException("Discarded stale Overture building cache write for tile " + key);
+         }
+
          this.cacheParsedTile(parsedCachePath, parsed);
          this.tileLoadFailures.remove(key);
          OsmPerf.recordTileLoad(OsmPerf.TileSource.OSM_BUILDINGS, OsmPerf.TileLoadPath.NETWORK);
@@ -314,18 +322,16 @@ public final class TellusOsmBuildingSource implements TellusCacheHandle {
       }
    }
 
-   private void cacheTile(Path cachePath, byte[] payload) {
+   private boolean cacheTile(Path cachePath, byte[] payload, long generation) {
       try {
-         Files.createDirectories(cachePath.getParent());
-         Path tempPath = cachePath.resolveSibling(cachePath.getFileName() + ".tmp");
-
-         try (OutputStream output = new GZIPOutputStream(Files.newOutputStream(tempPath))) {
-            output.write(payload);
-         }
-
-         Files.move(tempPath, cachePath, StandardCopyOption.REPLACE_EXISTING);
+         return TellusCacheFiles.writeIfCurrent(TellusCacheDomain.OSM, generation, cachePath, output -> {
+            try (OutputStream gzipOutput = new GZIPOutputStream(output)) {
+               gzipOutput.write(payload);
+            }
+         });
       } catch (IOException error) {
          Tellus.LOGGER.debug("Failed to cache Overture building tile {}", cachePath, error);
+         return false;
       }
    }
 
@@ -468,7 +474,19 @@ public final class TellusOsmBuildingSource implements TellusCacheHandle {
          firstNonBlank(tags, "@name", "name"),
          floorCount,
          firstNonBlank(tags, "roof_shape", "roof:shape"),
-         firstNonBlank(tags, "roof_material", "roof:material", "roof:colour", "roof_color")
+         firstNonBlank(tags, "roof_material", "roof:material"),
+         firstNonBlank(tags, "roof:colour", "roof_color", "roof_colour"),
+         firstNonBlank(tags, "facade_material", "facade:material", "building:material", "building_material", "material"),
+         firstNonBlank(tags, "facade_color", "facade:colour", "facade_colour", "building:colour", "building_color", "building_colour"),
+         firstNonBlank(tags, "amenity"),
+         firstNonBlank(tags, "tourism"),
+         firstNonBlank(tags, "office"),
+         firstNonBlank(tags, "shop"),
+         firstNonBlank(tags, "man_made"),
+         firstNonBlank(tags, "historic"),
+         firstNonBlank(tags, "building:part", "building_part"),
+         resolveOptionalInt(tags, "roof:levels", "roof_levels"),
+         resolveOptionalInt(tags, "min_level", "building:min_level", "min_floor")
       );
    }
 
@@ -523,6 +541,17 @@ public final class TellusOsmBuildingSource implements TellusCacheHandle {
       }
 
       return Math.max(1, (int)Math.round(heightMeters / 3.2));
+   }
+
+   private static int resolveOptionalInt(Map<String, Object> tags, String... keys) {
+      for (String key : keys) {
+         Double parsed = parseDouble(tags.get(key));
+         if (parsed != null && parsed > 0.0) {
+            return Math.max(0, (int)Math.round(parsed));
+         }
+      }
+
+      return 0;
    }
 
    private static List<List<TilePoint>> decodePolygonRings(List<Integer> geometry) {

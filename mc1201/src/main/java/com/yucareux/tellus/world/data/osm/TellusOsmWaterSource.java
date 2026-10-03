@@ -6,6 +6,7 @@ import com.google.common.cache.LoadingCache;
 import com.yucareux.tellus.Tellus;
 import com.yucareux.tellus.config.TellusEndpointConfig;
 import com.yucareux.tellus.cache.TellusCacheDomain;
+import com.yucareux.tellus.cache.TellusCacheFiles;
 import com.yucareux.tellus.cache.TellusCacheHandle;
 import com.yucareux.tellus.cache.TellusCacheRegistry;
 import com.yucareux.tellus.worldgen.EarthProjection;
@@ -19,7 +20,6 @@ import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -294,7 +294,11 @@ public final class TellusOsmWaterSource implements TellusCacheHandle {
             }
          }
 
+         long generation = TellusCacheRegistry.generation(TellusCacheDomain.OSM);
          byte[] payload = this.fetchTilePayloadWithRetry(key);
+         if (!TellusCacheRegistry.isCurrent(TellusCacheDomain.OSM, generation)) {
+            throw new RuntimeException("Discarded stale Overture water tile " + key);
+         }
 
          OsmWaterTile parsed;
          try {
@@ -306,8 +310,11 @@ public final class TellusOsmWaterSource implements TellusCacheHandle {
             throw new RuntimeException("Overture water parse failed for tile " + key, error);
          }
 
-         this.cacheTile(cachePath, payload);
-         this.cacheParsedTile(parsedCachePath, parsed);
+         if (!this.cacheTile(cachePath, payload, generation)) {
+            throw new RuntimeException("Discarded stale Overture water cache write for tile " + key);
+         }
+
+         this.cacheParsedTile(parsedCachePath, parsed, generation);
          this.tileLoadFailures.remove(key);
          OsmPerf.recordTileLoad(OsmPerf.TileSource.OSM_WATER, OsmPerf.TileLoadPath.NETWORK);
          return parsed;
@@ -374,22 +381,28 @@ public final class TellusOsmWaterSource implements TellusCacheHandle {
       }
    }
 
-   private void cacheTile(Path cachePath, byte[] payload) {
+   private boolean cacheTile(Path cachePath, byte[] payload, long generation) {
       try {
-         Files.createDirectories(cachePath.getParent());
-         Path tempPath = cachePath.resolveSibling(cachePath.getFileName() + ".tmp");
-
-         try (OutputStream output = new GZIPOutputStream(Files.newOutputStream(tempPath))) {
-            output.write(payload);
-         }
-
-         Files.move(tempPath, cachePath, StandardCopyOption.REPLACE_EXISTING);
+         return TellusCacheFiles.writeIfCurrent(TellusCacheDomain.OSM, generation, cachePath, output -> {
+            try (OutputStream gzipOutput = new GZIPOutputStream(output)) {
+               gzipOutput.write(payload);
+            }
+         });
       } catch (IOException error) {
          Tellus.LOGGER.debug("Failed to cache Overture water tile {}", cachePath, error);
+         return false;
       }
    }
 
    private void cacheParsedTile(Path cachePath, OsmWaterTile tile) {
+      this.cacheParsedTile(cachePath, tile, TellusCacheRegistry.generation(TellusCacheDomain.OSM));
+   }
+
+   private void cacheParsedTile(Path cachePath, OsmWaterTile tile, long generation) {
+      if (!TellusCacheRegistry.isCurrent(TellusCacheDomain.OSM, generation)) {
+         throw new RuntimeException("Discarded stale parsed Overture water cache write");
+      }
+
       try {
          ParsedTileCodec.writeWaterTile(cachePath, tile);
       } catch (IOException error) {
@@ -442,10 +455,12 @@ public final class TellusOsmWaterSource implements TellusCacheHandle {
          return List.of();
       } else {
          boolean oceanHint = "ocean".equalsIgnoreCase(classTag) || "ocean".equalsIgnoreCase(subtype);
+         OsmWaterKind kind = OsmWaterKind.fromTags(classTag, subtype);
+         oceanHint |= kind.ocean();
          long featureId = resolveFeatureId(feature, tags);
          return switch (feature.getType()) {
-            case POLYGON -> buildPolygonFeatures(featureId, oceanHint, decodePolygonRings(feature.getGeometryList()), key.zoom(), key.x(), key.y(), extent);
-            case LINESTRING -> buildLineFeatures(featureId, oceanHint, decodeLineStrings(feature.getGeometryList()), key.zoom(), key.x(), key.y(), extent);
+            case POLYGON -> buildPolygonFeatures(featureId, oceanHint, kind, decodePolygonRings(feature.getGeometryList()), key.zoom(), key.x(), key.y(), extent);
+            case LINESTRING -> buildLineFeatures(featureId, oceanHint, kind, decodeLineStrings(feature.getGeometryList()), key.zoom(), key.x(), key.y(), extent);
             default -> List.of();
          };
       }
@@ -454,6 +469,7 @@ public final class TellusOsmWaterSource implements TellusCacheHandle {
    private static List<OsmWaterFeature> buildPolygonFeatures(
       long featureId,
       boolean oceanHint,
+      OsmWaterKind kind,
       List<List<TellusOsmWaterSource.TilePoint>> rings,
       int zoom,
       int tileX,
@@ -512,13 +528,14 @@ public final class TellusOsmWaterSource implements TellusCacheHandle {
             latitudes[part] = count == latPart.length ? latPart : Arrays.copyOf(latPart, count);
          }
 
-         return List.of(new OsmWaterFeature(featureId, false, oceanHint, longitudes, latitudes));
+         return List.of(new OsmWaterFeature(featureId, false, oceanHint, kind, longitudes, latitudes));
       }
    }
 
    private static List<OsmWaterFeature> buildLineFeatures(
       long featureId,
       boolean oceanHint,
+      OsmWaterKind kind,
       List<List<TellusOsmWaterSource.TilePoint>> lines,
       int zoom,
       int tileX,
@@ -565,7 +582,9 @@ public final class TellusOsmWaterSource implements TellusCacheHandle {
          if (longitudeParts.isEmpty()) {
             return List.of();
          } else {
-            return List.of(new OsmWaterFeature(featureId, true, oceanHint, longitudeParts.toArray(new double[0][]), latitudeParts.toArray(new double[0][])));
+            return List.of(
+               new OsmWaterFeature(featureId, true, oceanHint, kind, longitudeParts.toArray(new double[0][]), latitudeParts.toArray(new double[0][]))
+            );
          }
       }
    }

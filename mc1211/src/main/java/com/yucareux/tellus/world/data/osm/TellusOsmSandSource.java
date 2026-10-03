@@ -6,6 +6,7 @@ import com.google.common.cache.LoadingCache;
 import com.yucareux.tellus.Tellus;
 import com.yucareux.tellus.config.TellusEndpointConfig;
 import com.yucareux.tellus.cache.TellusCacheDomain;
+import com.yucareux.tellus.cache.TellusCacheFiles;
 import com.yucareux.tellus.cache.TellusCacheHandle;
 import com.yucareux.tellus.cache.TellusCacheRegistry;
 import com.yucareux.tellus.worldgen.EarthProjection;
@@ -20,7 +21,6 @@ import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -241,7 +241,11 @@ public final class TellusOsmSandSource implements TellusCacheHandle {
             }
          }
 
+         long generation = TellusCacheRegistry.generation(TellusCacheDomain.OSM);
          byte[] payload = this.fetchTilePayloadWithRetry(key);
+         if (!TellusCacheRegistry.isCurrent(TellusCacheDomain.OSM, generation)) {
+            throw new RuntimeException("Discarded stale Overture sand tile " + key);
+         }
 
          OsmSandTile parsed;
          try {
@@ -253,7 +257,10 @@ public final class TellusOsmSandSource implements TellusCacheHandle {
             throw new RuntimeException("Overture sand parse failed for tile " + key, error);
          }
 
-         this.cacheTile(cachePath, payload);
+         if (!this.cacheTile(cachePath, payload, generation)) {
+            throw new RuntimeException("Discarded stale Overture sand cache write for tile " + key);
+         }
+
          this.cacheParsedTile(parsedCachePath, parsed);
          this.tileLoadFailures.remove(key);
          OsmPerf.recordTileLoad(OsmPerf.TileSource.OSM_SAND, OsmPerf.TileLoadPath.NETWORK);
@@ -321,18 +328,16 @@ public final class TellusOsmSandSource implements TellusCacheHandle {
       }
    }
 
-   private void cacheTile(Path cachePath, byte[] payload) {
+   private boolean cacheTile(Path cachePath, byte[] payload, long generation) {
       try {
-         Files.createDirectories(cachePath.getParent());
-         Path tempPath = cachePath.resolveSibling(cachePath.getFileName() + ".tmp");
-
-         try (OutputStream output = new GZIPOutputStream(Files.newOutputStream(tempPath))) {
-            output.write(payload);
-         }
-
-         Files.move(tempPath, cachePath, StandardCopyOption.REPLACE_EXISTING);
+         return TellusCacheFiles.writeIfCurrent(TellusCacheDomain.OSM, generation, cachePath, output -> {
+            try (OutputStream gzipOutput = new GZIPOutputStream(output)) {
+               gzipOutput.write(payload);
+            }
+         });
       } catch (IOException error) {
          Tellus.LOGGER.debug("Failed to cache Overture sand tile {}", cachePath, error);
+         return false;
       }
    }
 

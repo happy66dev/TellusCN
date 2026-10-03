@@ -2,6 +2,7 @@ package com.yucareux.tellus.world.realtime;
 
 import com.yucareux.tellus.Tellus;
 import com.yucareux.tellus.network.TellusWeatherPayload;
+import com.yucareux.tellus.world.data.source.NominatimGeocoder;
 import com.yucareux.tellus.world.data.source.OpenMeteoClient;
 import com.yucareux.tellus.worldgen.EarthChunkGenerator;
 import com.yucareux.tellus.worldgen.EarthGeneratorSettings;
@@ -17,12 +18,20 @@ import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
@@ -37,6 +46,9 @@ import net.minecraft.world.level.GameRules;
 
 public final class TellusRealtimeManager {
    private static final long WEATHER_REFRESH_MS = 600000L;
+   private static final long WEATHER_RETRY_MS = 60000L;
+   private static final long REPORT_COOLDOWN_MS = 10000L;
+   private static final int REPORT_QUEUE_CAPACITY = 16;
    private static final long TIMEZONE_REFRESH_MS = 21600000L;
    private static final long TIME_APPLY_TICK_INTERVAL = 20L;
    private static final long SNOW_QUEUE_REFRESH_TICKS = 100L;
@@ -52,18 +64,24 @@ public final class TellusRealtimeManager {
    private static final long NTP_EPOCH_OFFSET_SECONDS = 2208988800L;
    private static final String[] NTP_SERVERS = new String[]{"time.google.com", "pool.ntp.org", "time.cloudflare.com"};
    private final OpenMeteoClient client = new OpenMeteoClient();
+   private final NominatimGeocoder geocoder = new NominatimGeocoder("en");
    private final ThreadFactory threadFactory;
    private volatile ExecutorService executor;
+   private volatile ExecutorService reportExecutor;
+   private final Set<UUID> reportRequestsInFlight = ConcurrentHashMap.newKeySet();
+   private final Map<UUID, Long> lastReportRequestMs = new ConcurrentHashMap<>();
    private final AtomicBoolean requestInFlight = new AtomicBoolean(false);
    private final AtomicBoolean pendingInitialSnowPass = new AtomicBoolean(false);
    private final LongArrayFIFOQueue snowQueue = new LongArrayFIFOQueue();
    private final LongOpenHashSet snowQueued = new LongOpenHashSet();
    private long lastWeatherUpdateMs;
+   private long lastWeatherAttemptMs;
    private long lastTimeZoneUpdateMs;
    private long lastTimeApplyTick;
    private long lastSnowQueueTick;
    private boolean timeZoneReady;
    private TellusRealtimeManager.GridAnchor lastAnchor;
+   private TellusRealtimeManager.GridAnchor lastWeatherAttemptAnchor;
    private TellusRealtimeManager.GridAnchor lastTimeZoneAnchor;
    private int utcOffsetSeconds;
    private volatile long ntpOffsetMillis;
@@ -94,6 +112,10 @@ public final class TellusRealtimeManager {
       if (exec != null) {
          exec.shutdownNow();
       }
+      ExecutorService reports = this.reportExecutor;
+      if (reports != null) {
+         reports.shutdownNow();
+      }
    }
 
    public void onServerStopping(MinecraftServer server) {
@@ -110,9 +132,16 @@ public final class TellusRealtimeManager {
       if (exec != null) {
          exec.shutdownNow();
       }
+      ExecutorService reports = this.reportExecutor;
+      this.reportExecutor = null;
+      if (reports != null) {
+         reports.shutdownNow();
+      }
 
       this.requestInFlight.set(false);
       this.ntpRequestInFlight.set(false);
+      this.reportRequestsInFlight.clear();
+      this.lastReportRequestMs.clear();
    }
 
    public boolean hasTimeOffset() {
@@ -142,6 +171,9 @@ public final class TellusRealtimeManager {
 
    public void setRealtimeWeatherOverride(boolean enabled) {
       this.realtimeWeatherOverride = enabled;
+      if (enabled) {
+         this.lastWeatherAttemptMs = 0L;
+      }
    }
 
    public void clearOverrides() {
@@ -191,27 +223,35 @@ public final class TellusRealtimeManager {
       EarthGeneratorSettings settings = earthGenerator.settings();
       boolean enableTime = this.isRealtimeTimeEnabled(settings);
       boolean enableWeather = this.isRealtimeWeatherEnabled(settings);
-      if (!enableTime && !enableWeather) {
-         this.clearRealtimeState(server, level, true);
-         return;
-      }
 
       if (!enableWeather) {
-         boolean weatherWasActive = this.hasWeatherStateForClients();
+         boolean weatherWasActive = this.hasRealtimeWeatherState();
          TellusRealtimeState.clearRealtimeWeather();
          if (weatherWasActive) {
             this.sendWeatherPayload(server, false, TellusRealtimeState.PrecipitationMode.CLEAR, false, SnowGrid.empty());
          }
       }
 
-      BlockPos samplePos = resolveSamplePosition(server);
-      if (samplePos != null) {
-         int spacingBlocks = computeGridSpacing(settings.worldScale());
-         TellusRealtimeManager.GridAnchor anchor = TellusRealtimeManager.GridAnchor.from(samplePos, spacingBlocks);
+      TellusRealtimeManager.GridAnchor anchor = TellusRealtimeManager.GridAnchor.resolve(server, computeGridSpacing(settings.worldScale()));
+      if (anchor != null) {
+         BlockPos samplePos = new BlockPos(anchor.centerX(), 0, anchor.centerZ());
          boolean movedAnchor = this.lastAnchor == null || !this.lastAnchor.equals(anchor);
          boolean movedTimeZoneAnchor = this.lastTimeZoneAnchor == null || !this.lastTimeZoneAnchor.equals(anchor);
-         if (enableWeather && movedAnchor) {
-            TellusRealtimeState.clearRealtimeWeather();
+         if (movedAnchor) {
+            boolean notifyPlayers = !TellusRealtimeState.temperatureGrid().isEmpty() || enableWeather && this.hasRealtimeWeatherState();
+            TellusRealtimeState.clearTemperature();
+            if (enableWeather) {
+               TellusRealtimeState.clearRealtimeWeather();
+            }
+            if (notifyPlayers) {
+               this.sendWeatherPayload(
+                  server,
+                  TellusRealtimeState.isWeatherEnabled(),
+                  TellusRealtimeState.precipitationMode(),
+                  TellusRealtimeState.isHistoricalSnowEnabled(),
+                  TellusRealtimeState.snowGrid()
+               );
+            }
          }
 
          if (enableTime) {
@@ -233,10 +273,14 @@ public final class TellusRealtimeManager {
             this.restoreWeatherRules(level, server);
          }
 
-         boolean weatherPending = enableWeather && !TellusRealtimeState.isWeatherEnabled();
-         boolean shouldUpdateWeather = enableWeather && (weatherPending || movedAnchor || now - this.lastWeatherUpdateMs >= WEATHER_REFRESH_MS);
+         boolean weatherPending = !TellusRealtimeState.hasRealWorldTemperature(samplePos)
+            || enableWeather && !TellusRealtimeState.isWeatherEnabled();
+         boolean retryReady = !anchor.equals(this.lastWeatherAttemptAnchor)
+            || this.lastWeatherAttemptMs == 0L
+            || now - this.lastWeatherAttemptMs >= WEATHER_RETRY_MS;
+         boolean shouldUpdateWeather = retryReady && (weatherPending || movedAnchor || now - this.lastWeatherUpdateMs >= WEATHER_REFRESH_MS);
          boolean shouldUpdateTimeZone = enableTime && (movedTimeZoneAnchor || now - this.lastTimeZoneUpdateMs >= TIMEZONE_REFRESH_MS);
-         if (shouldUpdateWeather || shouldUpdateTimeZone) {
+         if (shouldUpdateWeather || retryReady && shouldUpdateTimeZone) {
             this.requestUpdate(server, earthGenerator, anchor, enableWeather, false, enableTime, now);
          }
 
@@ -250,6 +294,80 @@ public final class TellusRealtimeManager {
       }
    }
 
+   public TellusRealtimeManager.WeatherReportRequestResult requestWeatherReport(
+      MinecraftServer server,
+      UUID requesterId,
+      EarthChunkGenerator generator,
+      BlockPos pos,
+      Consumer<TellusRealtimeManager.WeatherReport> callback
+   ) {
+      Objects.requireNonNull(server, "server");
+      Objects.requireNonNull(requesterId, "requesterId");
+      Objects.requireNonNull(generator, "generator");
+      Objects.requireNonNull(pos, "pos");
+      Objects.requireNonNull(callback, "callback");
+      double latitude = Mth.clamp(generator.latitudeFromBlock(pos.getZ()), -85.05112878, 85.05112878);
+      double longitude = Mth.clamp(generator.longitudeFromBlock(pos.getX()), -180.0, 180.0);
+      long now = System.currentTimeMillis();
+      Long lastRequest = this.lastReportRequestMs.get(requesterId);
+      if (this.reportRequestsInFlight.contains(requesterId) || lastRequest != null && now - lastRequest < REPORT_COOLDOWN_MS) {
+         return TellusRealtimeManager.WeatherReportRequestResult.RATE_LIMITED;
+      }
+      if (!this.reportRequestsInFlight.add(requesterId)) {
+         return TellusRealtimeManager.WeatherReportRequestResult.RATE_LIMITED;
+      }
+
+      this.lastReportRequestMs.put(requesterId, now);
+      ExecutorService exec = this.ensureReportExecutor();
+      if (exec == null) {
+         this.reportRequestsInFlight.remove(requesterId);
+         return TellusRealtimeManager.WeatherReportRequestResult.UNAVAILABLE;
+      }
+
+      try {
+         exec.execute(() -> {
+            OpenMeteoClient.WeatherPointData weather = null;
+            NominatimGeocoder.Location location = null;
+            try {
+               weather = this.client.fetch(latitude, longitude);
+            } catch (Exception error) {
+               Tellus.LOGGER.warn("Failed to fetch local weather report: {}", error.getMessage());
+               Tellus.LOGGER.debug("Local weather report fetch failure", error);
+            }
+
+            try {
+               location = this.geocoder.reverse(latitude, longitude);
+            } catch (Exception error) {
+               Tellus.LOGGER.warn("Failed to reverse geocode local weather report: {}", error.getMessage());
+               Tellus.LOGGER.debug("Local weather reverse geocoding failure", error);
+            }
+
+            OpenMeteoClient.WeatherPointData resolvedWeather = weather;
+            NominatimGeocoder.Location resolvedLocation = location;
+            server.execute(
+               () -> {
+                  this.reportRequestsInFlight.remove(requesterId);
+                  callback.accept(
+                  new TellusRealtimeManager.WeatherReport(
+                     latitude,
+                     longitude,
+                     resolvedWeather == null ? Float.NaN : resolvedWeather.temperatureC(),
+                     resolvedWeather == null ? null : resolvedWeather.timeZoneId(),
+                     resolvedLocation == null ? "" : resolvedLocation.displayName()
+                     )
+                  );
+               }
+            );
+         });
+         return TellusRealtimeManager.WeatherReportRequestResult.QUEUED;
+      } catch (RejectedExecutionException error) {
+         this.reportRequestsInFlight.remove(requesterId);
+         this.lastReportRequestMs.remove(requesterId, now);
+         Tellus.LOGGER.debug("Realtime weather executor rejected local report task.", error);
+         return TellusRealtimeManager.WeatherReportRequestResult.UNAVAILABLE;
+      }
+   }
+
    private void requestUpdate(
       MinecraftServer server,
       EarthChunkGenerator generator,
@@ -260,17 +378,15 @@ public final class TellusRealtimeManager {
       long now
    ) {
       if (this.requestInFlight.compareAndSet(false, true)) {
-         List<BlockPos> samplePoints = new ArrayList<>(includeSnow ? GRID_POINTS : 1);
-         if (includeSnow) {
-            for (int dz = -GRID_RADIUS; dz <= GRID_RADIUS; dz++) {
-               for (int dx = -GRID_RADIUS; dx <= GRID_RADIUS; dx++) {
-                  int x = anchor.centerX() + dx * anchor.spacingBlocks();
-                  int z = anchor.centerZ() + dz * anchor.spacingBlocks();
-                  samplePoints.add(new BlockPos(x, 0, z));
-               }
+         this.lastWeatherAttemptMs = now;
+         this.lastWeatherAttemptAnchor = anchor;
+         List<BlockPos> samplePoints = new ArrayList<>(GRID_POINTS);
+         for (int dz = -GRID_RADIUS; dz <= GRID_RADIUS; dz++) {
+            for (int dx = -GRID_RADIUS; dx <= GRID_RADIUS; dx++) {
+               int x = anchor.centerX() + dx * anchor.spacingBlocks();
+               int z = anchor.centerZ() + dz * anchor.spacingBlocks();
+               samplePoints.add(new BlockPos(x, 0, z));
             }
-         } else {
-            samplePoints.add(new BlockPos(anchor.centerX(), 0, anchor.centerZ()));
          }
 
          ExecutorService exec = this.ensureExecutor();
@@ -309,6 +425,22 @@ public final class TellusRealtimeManager {
       return Executors.newSingleThreadExecutor(this.threadFactory);
    }
 
+   private ExecutorService createReportExecutor() {
+      return new ThreadPoolExecutor(
+         2,
+         2,
+         0L,
+         TimeUnit.MILLISECONDS,
+         new ArrayBlockingQueue<>(REPORT_QUEUE_CAPACITY),
+         runnable -> {
+            Thread thread = new Thread(runnable, "tellus-weather-report");
+            thread.setDaemon(true);
+            return thread;
+         },
+         new ThreadPoolExecutor.AbortPolicy()
+      );
+   }
+
    private ExecutorService ensureExecutor() {
       ExecutorService exec = this.executor;
       if (exec != null && !exec.isShutdown() && !exec.isTerminated()) {
@@ -324,6 +456,22 @@ public final class TellusRealtimeManager {
 
             return exec;
          }
+      }
+   }
+
+   private ExecutorService ensureReportExecutor() {
+      ExecutorService exec = this.reportExecutor;
+      if (exec != null && !exec.isShutdown() && !exec.isTerminated()) {
+         return exec;
+      }
+
+      synchronized (this) {
+         exec = this.reportExecutor;
+         if (exec == null || exec.isShutdown() || exec.isTerminated()) {
+            exec = this.createReportExecutor();
+            this.reportExecutor = exec;
+         }
+         return exec;
       }
    }
 
@@ -506,15 +654,13 @@ public final class TellusRealtimeManager {
       long now
    ) {
       if (points.length != 0) {
-         int centerIndex = includeSnow ? GRID_POINTS / 2 : 0;
+         int centerIndex = GRID_POINTS / 2;
          OpenMeteoClient.WeatherPointData centerPoint = points[Math.min(centerIndex, points.length - 1)];
-         if (includeWeather || includeSnow) {
-            this.lastAnchor = anchor;
-            this.lastWeatherSnapshot = new TellusRealtimeManager.WeatherSnapshot(
-               centerPoint.latitude(), centerPoint.longitude(), centerPoint.utcOffsetSeconds(), centerPoint.timeZoneId(), centerPoint.temperatureC(), now
-            );
-            this.lastWeatherUpdateMs = now;
-         }
+         this.lastAnchor = anchor;
+         this.lastWeatherSnapshot = new TellusRealtimeManager.WeatherSnapshot(
+            centerPoint.latitude(), centerPoint.longitude(), centerPoint.utcOffsetSeconds(), centerPoint.timeZoneId(), centerPoint.temperatureC(), now
+         );
+         this.lastWeatherUpdateMs = now;
 
          if (includeTimeZone) {
             this.updateTimeZone(centerPoint, anchor, now);
@@ -536,8 +682,14 @@ public final class TellusRealtimeManager {
             grid = new SnowGrid(anchor.centerX(), anchor.centerZ(), anchor.spacingBlocks(), snowIndex);
          }
 
-         float temperatureC = includeWeather ? centerPoint.temperatureC() : Float.NaN;
-         TellusRealtimeState.updateWeatherState(includeWeather, mode, includeSnow, grid, temperatureC);
+         float[] temperatures = new float[GRID_POINTS];
+         for (int i = 0; i < temperatures.length && i < points.length; i++) {
+            temperatures[i] = points[i].temperatureC();
+         }
+         TemperatureGrid temperatureGrid = new TemperatureGrid(
+            anchor.centerX(), anchor.centerZ(), anchor.spacingBlocks(), temperatures, now
+         );
+         TellusRealtimeState.updateWeatherState(includeWeather, mode, includeSnow, grid, temperatureGrid);
          this.sendWeatherPayload(server, includeWeather, mode, includeSnow, grid);
          if (includeSnow && this.pendingInitialSnowPass.getAndSet(false)) {
             ServerLevel level = server.getLevel(Level.OVERWORLD);
@@ -579,13 +731,19 @@ public final class TellusRealtimeManager {
    private static TellusWeatherPayload createWeatherPayload(
       boolean weatherEnabled, TellusRealtimeState.PrecipitationMode mode, boolean historicalSnow, SnowGrid grid
    ) {
+      TemperatureGrid temperatureGrid = TellusRealtimeState.temperatureGrid();
+      int centerX = temperatureGrid.isEmpty() ? grid.centerX() : temperatureGrid.centerX();
+      int centerZ = temperatureGrid.isEmpty() ? grid.centerZ() : temperatureGrid.centerZ();
+      int spacingBlocks = temperatureGrid.isEmpty() ? grid.spacingBlocks() : temperatureGrid.spacingBlocks();
       return new TellusWeatherPayload(
          weatherEnabled,
          mode,
          historicalSnow,
-         grid.centerX(),
-         grid.centerZ(),
-         grid.spacingBlocks(),
+         centerX,
+         centerZ,
+         spacingBlocks,
+         temperatureGrid.isEmpty() ? 1200001L : Math.max(0L, System.currentTimeMillis() - temperatureGrid.updatedAtMs()),
+         temperatureGrid.samples(),
          grid.isEmpty() ? new float[GRID_POINTS] : gridSample(grid)
       );
    }
@@ -733,21 +891,27 @@ public final class TellusRealtimeManager {
       this.requestInFlight.set(false);
       this.pendingInitialSnowPass.set(false);
       this.lastWeatherUpdateMs = 0L;
+      this.lastWeatherAttemptMs = 0L;
       this.lastTimeZoneUpdateMs = 0L;
       this.lastTimeApplyTick = 0L;
       this.lastSnowQueueTick = 0L;
       this.timeZoneReady = false;
       this.lastAnchor = null;
+      this.lastWeatherAttemptAnchor = null;
       this.lastTimeZoneAnchor = null;
       this.utcOffsetSeconds = 0;
       this.lastWeatherSnapshot = null;
       this.timeZone = null;
       this.timeZoneId = null;
       this.clearSnowQueue();
-      TellusRealtimeState.clearRealtimeWeather();
+      TellusRealtimeState.reset();
    }
 
    private boolean hasWeatherStateForClients() {
+      return this.hasRealtimeWeatherState() || !TellusRealtimeState.temperatureGrid().isEmpty();
+   }
+
+   private boolean hasRealtimeWeatherState() {
       return TellusRealtimeState.isWeatherEnabled()
          || TellusRealtimeState.isHistoricalSnowEnabled()
          || TellusRealtimeState.precipitationMode() != TellusRealtimeState.PrecipitationMode.CLEAR;
@@ -760,21 +924,6 @@ public final class TellusRealtimeManager {
       return Mth.clamp(spacingBlocks, 1024, 16384);
    }
 
-   private static BlockPos resolveSamplePosition(MinecraftServer server) {
-      List<ServerPlayer> players = server.getPlayerList().getPlayers();
-      if (players.isEmpty()) {
-         return null;
-      } else {
-         for (ServerPlayer player : players) {
-            if (player.level().dimension() == Level.OVERWORLD) {
-               return player.blockPosition();
-            }
-         }
-
-         return players.get(0).blockPosition();
-      }
-   }
-
    private static int approximateUtcOffsetSeconds(EarthChunkGenerator generator, BlockPos pos) {
       double longitude = Mth.clamp(generator.longitudeFromBlock(pos.getX()), -180.0, 180.0);
       double hours = longitude / 15.0;
@@ -782,13 +931,49 @@ public final class TellusRealtimeManager {
    }
 
    private record GridAnchor(int centerX, int centerZ, int spacingBlocks) {
-      private static TellusRealtimeManager.GridAnchor from(BlockPos pos, int spacingBlocks) {
-         int centerX = Math.floorDiv(pos.getX(), spacingBlocks) * spacingBlocks;
-         int centerZ = Math.floorDiv(pos.getZ(), spacingBlocks) * spacingBlocks;
+      private static TellusRealtimeManager.GridAnchor resolve(MinecraftServer server, int baseSpacingBlocks) {
+         int minX = Integer.MAX_VALUE;
+         int maxX = Integer.MIN_VALUE;
+         int minZ = Integer.MAX_VALUE;
+         int maxZ = Integer.MIN_VALUE;
+         boolean found = false;
+         for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            if (player.level().dimension() == Level.OVERWORLD) {
+               BlockPos pos = player.blockPosition();
+               minX = Math.min(minX, pos.getX());
+               maxX = Math.max(maxX, pos.getX());
+               minZ = Math.min(minZ, pos.getZ());
+               maxZ = Math.max(maxZ, pos.getZ());
+               found = true;
+            }
+         }
+         if (!found) {
+            return null;
+         }
+
+         int midpointX = (int)(((long)minX + maxX) / 2L);
+         int midpointZ = (int)(((long)minZ + maxZ) / 2L);
+         int centerX = Math.floorDiv(midpointX, baseSpacingBlocks) * baseSpacingBlocks;
+         int centerZ = Math.floorDiv(midpointZ, baseSpacingBlocks) * baseSpacingBlocks;
+         long required = Math.max(
+            Math.max(Math.abs((long)minX - centerX), Math.abs((long)maxX - centerX)),
+            Math.max(Math.abs((long)minZ - centerZ), Math.abs((long)maxZ - centerZ))
+         );
+         long spacingMultiplier = Math.max(1L, (required + baseSpacingBlocks - 1L) / baseSpacingBlocks);
+         int spacingBlocks = (int)Math.min(60000000L, spacingMultiplier * baseSpacingBlocks);
          return new TellusRealtimeManager.GridAnchor(centerX, centerZ, spacingBlocks);
       }
    }
 
    public record WeatherSnapshot(double latitude, double longitude, int utcOffsetSeconds, String timeZoneId, float temperatureC, long updatedAtMs) {
+   }
+
+   public record WeatherReport(double latitude, double longitude, float temperatureC, String timeZoneId, String locationName) {
+   }
+
+   public enum WeatherReportRequestResult {
+      QUEUED,
+      RATE_LIMITED,
+      UNAVAILABLE
    }
 }

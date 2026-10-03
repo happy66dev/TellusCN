@@ -7,6 +7,7 @@ public record BuildingBlueprint(
    String groupId,
    long blueprintSeed,
    BuildingProfile profile,
+   BuildingStyle style,
    int baseY,
    int floorY,
    int roofBaseY,
@@ -22,6 +23,7 @@ public record BuildingBlueprint(
 ) {
    public BuildingBlueprint {
       entranceWidth = Math.max(1, entranceWidth);
+      style = style == null ? TellusBuildingStyles.resolveBuildingStyle(profile, null, 0.0, maxWorldX - minWorldX + 1, maxWorldZ - minWorldZ + 1, blueprintSeed) : style;
    }
 
    public int width() {
@@ -108,11 +110,15 @@ public record BuildingBlueprint(
       int localZ = worldZ - this.minWorldZ;
       return switch (this.profile.roofProfile()) {
          case FLAT -> roofTop;
+         case FLAT_PARAPET -> roofTop;
          case FLAT_SKYLIGHT -> roofTop + (localX > 1 && localX < width - 2 && localZ > 1 && localZ < depth - 2 ? 1 : 0);
          case FLAT_CROWN -> roofTop + crownRise(boundaryDistance);
          case GABLED_X -> roofTop + gabledRise(depth, localZ);
          case GABLED_Z -> roofTop + gabledRise(width, localX);
          case HIPPED -> roofTop + Math.min(gabledRise(width, localX), gabledRise(depth, localZ));
+         case PYRAMIDAL -> roofTop + Math.min(gabledRise(width, localX), gabledRise(depth, localZ));
+         case SKILLION -> roofTop + (width >= depth ? skillionRise(width, localX) : skillionRise(depth, localZ));
+         case DOME -> roofTop + domeRise(width, depth, localX, localZ);
       };
    }
 
@@ -141,6 +147,29 @@ public record BuildingBlueprint(
       double half = (span - 1) * 0.5;
       double distance = Math.abs(position - half);
       double normalized = 1.0 - distance / Math.max(1.0, half);
+      return Math.max(0, (int)Math.round(this.profile.roofRise() * normalized));
+   }
+
+   private int skillionRise(int span, int position) {
+      if (this.profile.roofRise() <= 0 || span <= 2) {
+         return 0;
+      }
+
+      double normalized = Mth.clamp((double)position / Math.max(1, span - 1), 0.0, 1.0);
+      return Math.max(0, (int)Math.round(this.profile.roofRise() * normalized));
+   }
+
+   private int domeRise(int width, int depth, int localX, int localZ) {
+      if (this.profile.roofRise() <= 0 || width <= 2 || depth <= 2) {
+         return 0;
+      }
+
+      double halfWidth = Math.max(1.0, (width - 1) * 0.5);
+      double halfDepth = Math.max(1.0, (depth - 1) * 0.5);
+      double dx = (localX - halfWidth) / halfWidth;
+      double dz = (localZ - halfDepth) / halfDepth;
+      double radius = Math.sqrt(dx * dx + dz * dz);
+      double normalized = Math.max(0.0, 1.0 - radius);
       return Math.max(0, (int)Math.round(this.profile.roofRise() * normalized));
    }
 }

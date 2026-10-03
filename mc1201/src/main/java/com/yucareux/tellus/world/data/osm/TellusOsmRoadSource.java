@@ -4,6 +4,7 @@ import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
 import com.yucareux.tellus.cache.TellusCacheDomain;
+import com.yucareux.tellus.cache.TellusCacheFiles;
 import com.yucareux.tellus.cache.TellusCacheHandle;
 import com.yucareux.tellus.cache.TellusCacheRegistry;
 import com.google.gson.JsonArray;
@@ -25,7 +26,6 @@ import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -131,6 +131,45 @@ public final class TellusOsmRoadSource implements TellusCacheHandle {
          }
       } else {
          return new TellusOsmRoadSource.RoadQueryResult(List.of(), false);
+      }
+   }
+
+   public List<RoadAreaFeature> roadAreasForArea(
+      int minBlockX, int minBlockZ, int maxBlockX, int maxBlockZ, double worldScale, int marginBlocks, OsmQueryMode mode
+   ) {
+      return this.roadAreasForAreaWithStatus(minBlockX, minBlockZ, maxBlockX, maxBlockZ, worldScale, marginBlocks, mode).features();
+   }
+
+   public TellusOsmRoadSource.RoadAreaQueryResult roadAreasForAreaWithStatus(
+      int minBlockX, int minBlockZ, int maxBlockX, int maxBlockZ, double worldScale, int marginBlocks, OsmQueryMode mode
+   ) {
+      this.ensureInitialized();
+      if (this.available && !(worldScale <= 0.0)) {
+         TellusOsmRoadSource.GeoBounds bounds = geoBoundsForBlockArea(minBlockX, minBlockZ, maxBlockX, maxBlockZ, marginBlocks, worldScale);
+         if (bounds == null) {
+            return new TellusOsmRoadSource.RoadAreaQueryResult(List.of(), false);
+         } else {
+            List<TellusOsmRoadSource.TileKey> keys = tileKeysForBounds(bounds, this.queryZoom);
+            if (keys.isEmpty()) {
+               return new TellusOsmRoadSource.RoadAreaQueryResult(List.of(), false);
+            } else {
+               List<RoadAreaFeature> areas = new ArrayList<>();
+               boolean hadCacheMiss = false;
+
+               for (TellusOsmRoadSource.TileKey key : keys) {
+                  TellusOsmRoadSource.TileLookup lookup = this.getTileLookup(key, mode);
+                  hadCacheMiss |= lookup.cacheMiss();
+                  OverpassRoadTile tile = lookup.tile();
+                  if (!tile.isEmpty()) {
+                     areas.addAll(tile.areaFeaturesInBounds(bounds.south(), bounds.west(), bounds.north(), bounds.east()));
+                  }
+               }
+
+               return new TellusOsmRoadSource.RoadAreaQueryResult(areas, hadCacheMiss);
+            }
+         }
+      } else {
+         return new TellusOsmRoadSource.RoadAreaQueryResult(List.of(), false);
       }
    }
 
@@ -247,7 +286,11 @@ public final class TellusOsmRoadSource implements TellusCacheHandle {
             }
          }
 
+         long generation = TellusCacheRegistry.generation(TellusCacheDomain.OSM);
          byte[] payload = this.fetchTilePayloadWithRetry(key);
+         if (!TellusCacheRegistry.isCurrent(TellusCacheDomain.OSM, generation)) {
+            throw new RuntimeException("Discarded stale Overture road tile " + key);
+         }
 
          OverpassRoadTile parsed;
          try {
@@ -259,7 +302,10 @@ public final class TellusOsmRoadSource implements TellusCacheHandle {
             throw new RuntimeException("Overture road parse failed for tile " + key, var8);
          }
 
-         this.cacheTile(cachePath, payload);
+         if (!this.cacheTile(cachePath, payload, generation)) {
+            throw new RuntimeException("Discarded stale Overture road cache write for tile " + key);
+         }
+
          this.cacheParsedTile(parsedCachePath, parsed);
          this.tileLoadFailures.remove(key);
          OsmPerf.recordTileLoad(OsmPerf.TileSource.OSM_ROADS, OsmPerf.TileLoadPath.NETWORK);
@@ -324,18 +370,16 @@ public final class TellusOsmRoadSource implements TellusCacheHandle {
       }
    }
 
-   private void cacheTile(Path cachePath, byte[] payload) {
+   private boolean cacheTile(Path cachePath, byte[] payload, long generation) {
       try {
-         Files.createDirectories(cachePath.getParent());
-         Path tempPath = cachePath.resolveSibling(cachePath.getFileName() + ".tmp");
-
-         try (OutputStream output = new GZIPOutputStream(Files.newOutputStream(tempPath))) {
-            output.write(payload);
-         }
-
-         Files.move(tempPath, cachePath, StandardCopyOption.REPLACE_EXISTING);
+         return TellusCacheFiles.writeIfCurrent(TellusCacheDomain.OSM, generation, cachePath, output -> {
+            try (OutputStream gzipOutput = new GZIPOutputStream(output)) {
+               gzipOutput.write(payload);
+            }
+         });
       } catch (IOException var9) {
          Tellus.LOGGER.debug("Failed to cache Overture road tile {}", cachePath, var9);
+         return false;
       }
    }
 
@@ -371,6 +415,7 @@ public final class TellusOsmRoadSource implements TellusCacheHandle {
             return OverpassRoadTile.empty();
          } else {
             List<RoadFeature> features = new ArrayList<>();
+            List<RoadAreaFeature> areaFeatures = new ArrayList<>();
 
             for (Layer layer : tile.getLayersList()) {
                if (SEGMENT_LAYER_NAME.equals(layer.getName())) {
@@ -379,12 +424,19 @@ public final class TellusOsmRoadSource implements TellusCacheHandle {
                   for (Feature feature : layer.getFeaturesList()) {
                      if (feature.getType() == GeomType.LINESTRING) {
                         features.addAll(this.parseFeature(feature, layer, key, extent));
+                     } else if (feature.getType() == GeomType.POLYGON) {
+                        RoadAreaFeature areaFeature = this.parseAreaFeature(feature, layer, key, extent);
+                        if (areaFeature != null) {
+                           areaFeatures.add(areaFeature);
+                        }
                      }
                   }
                }
             }
 
-            return features.isEmpty() ? OverpassRoadTile.empty() : new OverpassRoadTile(features, bounds.south(), bounds.west(), bounds.north(), bounds.east());
+            return features.isEmpty() && areaFeatures.isEmpty()
+               ? OverpassRoadTile.empty()
+               : new OverpassRoadTile(features, areaFeatures, bounds.south(), bounds.west(), bounds.north(), bounds.east());
          }
       }
    }
@@ -413,6 +465,83 @@ public final class TellusOsmRoadSource implements TellusCacheHandle {
       } else {
          return List.of();
       }
+   }
+
+   private RoadAreaFeature parseAreaFeature(Feature feature, Layer layer, TellusOsmRoadSource.TileKey key, int extent) {
+      Map<String, Object> tags = decodeTags(feature, layer);
+      String subtype = asString(tags.get("subtype"));
+      if (subtype == null || !"road".equalsIgnoreCase(subtype)) {
+         return null;
+      }
+
+      String classTag = resolveClassTag(tags);
+      RoadClass roadClass = RoadClass.fromHighwayTag(classTag);
+      if (classTag == null || roadClass == null || !isRoadAreaFeature(tags, classTag)) {
+         return null;
+      }
+
+      List<List<TellusOsmRoadSource.TilePoint>> rings = decodePolygonRings(feature.getGeometryList());
+      if (rings.isEmpty()) {
+         return null;
+      }
+
+      double[][] longitudes = new double[rings.size()][];
+      double[][] latitudes = new double[rings.size()][];
+      for (int part = 0; part < rings.size(); part++) {
+         List<TellusOsmRoadSource.TilePoint> ring = rings.get(part);
+         int points = ring.size();
+         double[] lonPart = new double[points];
+         double[] latPart = new double[points];
+         int count = 0;
+         double previousLon = Double.NaN;
+         double previousLat = Double.NaN;
+
+         for (TellusOsmRoadSource.TilePoint point : ring) {
+            double lon = tilePointToLon(key.zoom(), key.x(), (double)point.x / extent);
+            double lat = tilePointToLat(key.zoom(), key.y(), (double)point.y / extent);
+            if (Double.isFinite(lat)
+               && Double.isFinite(lon)
+               && !(lat < MIN_LAT)
+               && !(lat > MAX_LAT)
+               && !(lon < MIN_LON)
+               && !(lon > MAX_LON)
+               && (count <= 0 || !(Math.abs(lon - previousLon) < POINT_EPSILON) || !(Math.abs(lat - previousLat) < POINT_EPSILON))) {
+               lonPart[count] = lon;
+               latPart[count] = lat;
+               previousLon = lon;
+               previousLat = lat;
+               count++;
+            }
+         }
+
+         if (count < 4) {
+            return null;
+         }
+
+         if (lonPart[0] != lonPart[count - 1] || latPart[0] != latPart[count - 1]) {
+            if (count + 1 > lonPart.length) {
+               lonPart = Arrays.copyOf(lonPart, count + 1);
+               latPart = Arrays.copyOf(latPart, count + 1);
+            }
+
+            lonPart[count] = lonPart[0];
+            latPart[count] = latPart[0];
+            count++;
+         }
+
+         longitudes[part] = count == lonPart.length ? lonPart : Arrays.copyOf(lonPart, count);
+         latitudes[part] = count == latPart.length ? latPart : Arrays.copyOf(latPart, count);
+      }
+
+      String roadSurface = resolveStringAt(tags, "road_surface", 0.5);
+      if (roadSurface == null) {
+         roadSurface = asString(tags.get("surface"));
+      }
+      String subclass = resolveStringAt(tags, "subclass_rules", 0.5);
+      if (subclass == null) {
+         subclass = asString(tags.get("subclass"));
+      }
+      return new RoadAreaFeature(resolveFeatureId(feature, tags), roadClass, classTag, roadSurface, subclass, longitudes, latitudes);
    }
 
    private static List<RoadFeature> buildFeaturesFromLine(
@@ -509,7 +638,7 @@ public final class TellusOsmRoadSource implements TellusCacheHandle {
       double end
    ) {
       if (descriptor != null) {
-         RoadFeature feature = buildFeatureFromRange(wayId, roadClass, descriptor.mode(), descriptor.bridgeLevel(), highwayTag, geometry, start, end);
+         RoadFeature feature = buildFeatureFromRange(wayId, roadClass, descriptor, highwayTag, geometry, start, end);
          if (feature != null) {
             features.add(feature);
          }
@@ -519,8 +648,7 @@ public final class TellusOsmRoadSource implements TellusCacheHandle {
    private static RoadFeature buildFeatureFromRange(
       long wayId,
       RoadClass roadClass,
-      RoadMode mode,
-      int bridgeLevel,
+      TellusOsmRoadSource.RoadDescriptor descriptor,
       String highwayTag,
       TellusOsmRoadSource.LineGeometry geometry,
       double start,
@@ -556,7 +684,20 @@ public final class TellusOsmRoadSource implements TellusCacheHandle {
                featureLat[i] = sliceLat.get(i);
             }
 
-            return new RoadFeature(wayId, roadClass, mode, bridgeLevel, highwayTag, featureLon, featureLat);
+            return new RoadFeature(
+               wayId,
+               roadClass,
+               descriptor.mode(),
+               descriptor.bridgeLevel(),
+               highwayTag,
+               descriptor.roadSurface(),
+               descriptor.subclass(),
+               descriptor.widthMeters(),
+               descriptor.lanes(),
+               descriptor.laneMarkings(),
+               featureLon,
+               featureLat
+            );
          }
       } else {
          return null;
@@ -613,6 +754,11 @@ public final class TellusOsmRoadSource implements TellusCacheHandle {
       breakpoints.add(1.0);
       collectScopedBreakpoints(tags.get("road_flags"), breakpoints);
       collectScopedBreakpoints(tags.get("level_rules"), breakpoints);
+      collectScopedBreakpoints(tags.get("road_surface"), breakpoints);
+      collectScopedBreakpoints(tags.get("width_rules"), breakpoints);
+      collectScopedBreakpoints(tags.get("lanes_rules"), breakpoints);
+      collectScopedBreakpoints(tags.get("lane_markings_rules"), breakpoints);
+      collectScopedBreakpoints(tags.get("subclass_rules"), breakpoints);
       breakpoints.sort(Double::compare);
       List<Double> normalized = new ArrayList<>(breakpoints.size());
 
@@ -643,16 +789,116 @@ public final class TellusOsmRoadSource implements TellusCacheHandle {
 
    private static TellusOsmRoadSource.RoadDescriptor resolveRoadDescriptorAt(Map<String, Object> tags, RoadClass roadClass, double position) {
       int signedLevel = resolveSignedLevelAt(tags, position);
+      String roadSurface = resolveStringAt(tags, "road_surface", position);
+      if (roadSurface == null) {
+         roadSurface = asString(tags.get("surface"));
+      }
+      String subclass = resolveStringAt(tags, "subclass_rules", position);
+      if (subclass == null) {
+         subclass = asString(tags.get("subclass"));
+      }
+      double widthMeters = resolveWidthMetersAt(tags, position);
+      int lanes = resolveLanesAt(tags, position);
+      boolean laneMarkings = resolveLaneMarkingsAt(tags, position);
       boolean explicitBridge = isTruthy(asString(tags.get("bridge"))) || containsFlagAt(tags.get("road_flags"), "is_bridge", position);
       if (explicitBridge) {
          int bridgeLevel = signedLevel > 0 && roadClass != RoadClass.DIRT ? Mth.clamp(signedLevel, 1, MAX_BRIDGE_LEVEL) : 1;
-         return new TellusOsmRoadSource.RoadDescriptor(RoadMode.BRIDGE, bridgeLevel);
+         return new TellusOsmRoadSource.RoadDescriptor(RoadMode.BRIDGE, bridgeLevel, roadSurface, subclass, widthMeters, lanes, laneMarkings);
       } else {
          boolean tunnel = containsFlagAt(tags.get("road_flags"), "is_tunnel", position)
             || isTruthy(asString(tags.get("tunnel")))
             || signedLevel < 0;
-         return tunnel ? new TellusOsmRoadSource.RoadDescriptor(RoadMode.TUNNEL, 0) : new TellusOsmRoadSource.RoadDescriptor(RoadMode.NORMAL, 0);
+         return tunnel
+            ? new TellusOsmRoadSource.RoadDescriptor(RoadMode.TUNNEL, 0, roadSurface, subclass, widthMeters, lanes, laneMarkings)
+            : new TellusOsmRoadSource.RoadDescriptor(RoadMode.NORMAL, 0, roadSurface, subclass, widthMeters, lanes, laneMarkings);
       }
+   }
+
+   private static String resolveStringAt(Map<String, Object> tags, String key, double position) {
+      Object value = tags.get(key);
+      JsonArray rules = parseRuleArray(value);
+      if (rules != null) {
+         for (JsonElement ruleElement : rules) {
+            String directValue = asString(ruleElement);
+            if (directValue != null && !directValue.isBlank()) {
+               return directValue;
+            }
+
+            if (ruleElement.isJsonObject()) {
+               JsonObject rule = ruleElement.getAsJsonObject();
+               if (ruleAppliesAt(rule, position)) {
+                  String ruleValue = asString(rule.get("value"));
+                  if (ruleValue != null && !ruleValue.isBlank()) {
+                     return ruleValue;
+                  }
+               }
+            }
+         }
+      }
+
+      String direct = asString(value);
+      return direct == null || direct.isBlank() || direct.trim().startsWith("[") ? null : direct;
+   }
+
+   private static double resolveWidthMetersAt(Map<String, Object> tags, double position) {
+      Double width = resolveDoubleAt(tags.get("width_rules"), position);
+      if (width == null) {
+         width = parseDouble(tags.get("width"));
+      }
+
+      return width == null ? 0.0 : RoadSurfaceStyle.normalizeWidthMeters(width);
+   }
+
+   private static int resolveLanesAt(Map<String, Object> tags, double position) {
+      Integer lanes = resolveIntegerAt(tags.get("lanes_rules"), position);
+      if (lanes == null) {
+         lanes = parseInteger(tags.get("lanes"));
+      }
+      if (lanes == null) {
+         Integer forward = parseInteger(tags.get("lanes:forward"));
+         Integer backward = parseInteger(tags.get("lanes:backward"));
+         if (forward != null || backward != null) {
+            lanes = Math.max(0, forward == null ? 0 : forward) + Math.max(0, backward == null ? 0 : backward);
+         }
+      }
+      return lanes == null ? 0 : RoadSurfaceStyle.normalizeLaneCount(lanes);
+   }
+
+   private static boolean resolveLaneMarkingsAt(Map<String, Object> tags, double position) {
+      String scoped = resolveStringAt(tags, "lane_markings_rules", position);
+      if (scoped != null) {
+         return RoadSurfaceStyle.normalizeLaneMarkings(scoped);
+      }
+      return RoadSurfaceStyle.normalizeLaneMarkings(asString(tags.get("lane_markings")));
+   }
+
+   private static Integer resolveIntegerAt(Object value, double position) {
+      Double resolved = resolveDoubleAt(value, position);
+      return resolved == null ? null : (int)Math.round(resolved);
+   }
+
+   private static Double resolveDoubleAt(Object value, double position) {
+      JsonArray rules = parseRuleArray(value);
+      if (rules != null) {
+         for (JsonElement ruleElement : rules) {
+            Double directValue = parseDouble(ruleElement);
+            if (directValue != null) {
+               return directValue;
+            }
+
+            if (ruleElement.isJsonObject()) {
+               JsonObject rule = ruleElement.getAsJsonObject();
+               if (ruleAppliesAt(rule, position)) {
+                  Double ruleValue = parseDouble(rule.get("value"));
+                  if (ruleValue != null) {
+                     return ruleValue;
+                  }
+               }
+            }
+         }
+      }
+
+      return parseDouble(value);
    }
 
    private static int resolveSignedLevelAt(Map<String, Object> tags, double position) {
@@ -848,6 +1094,32 @@ public final class TellusOsmRoadSource implements TellusCacheHandle {
       }
    }
 
+   private static Double parseDouble(Object value) {
+      if (value == null) {
+         return null;
+      } else if (value instanceof Number number) {
+         return number.doubleValue();
+      } else if (value instanceof JsonElement element) {
+         return parseDouble(element);
+      } else {
+         String text = String.valueOf(value).trim();
+         if (text.isEmpty()) {
+            return null;
+         } else {
+            int separator = text.indexOf(32);
+            if (separator > 0) {
+               text = text.substring(0, separator);
+            }
+
+            try {
+               return Double.parseDouble(text);
+            } catch (NumberFormatException error) {
+               return null;
+            }
+         }
+      }
+   }
+
    private static boolean isTruthy(String value) {
       if (value == null) {
          return false;
@@ -855,6 +1127,18 @@ public final class TellusOsmRoadSource implements TellusCacheHandle {
          String normalized = value.trim().toLowerCase(Locale.ROOT);
          return !normalized.isEmpty() && !"no".equals(normalized) && !"false".equals(normalized) && !"0".equals(normalized);
       }
+   }
+
+   private static boolean isRoadAreaFeature(Map<String, Object> tags, String classTag) {
+      if (isTruthy(asString(tags.get("area")))) {
+         return true;
+      }
+
+      String normalizedClass = classTag == null ? "" : classTag.trim().toLowerCase(Locale.ROOT).replace('-', '_');
+      return switch (normalizedClass) {
+         case "pedestrian", "footway", "path", "living_street", "service" -> true;
+         default -> false;
+      };
    }
 
    
@@ -939,6 +1223,83 @@ public final class TellusOsmRoadSource implements TellusCacheHandle {
          return lines;
       } else {
          return List.of();
+      }
+   }
+
+   private static List<List<TellusOsmRoadSource.TilePoint>> decodePolygonRings(List<Integer> geometry) {
+      if (geometry == null || geometry.isEmpty()) {
+         return List.of();
+      }
+
+      List<List<TellusOsmRoadSource.TilePoint>> rings = new ArrayList<>();
+      List<TellusOsmRoadSource.TilePoint> current = null;
+      int cursorX = 0;
+      int cursorY = 0;
+      int cursor = 0;
+      while (cursor < geometry.size()) {
+         int commandAndCount = geometry.get(cursor++);
+         int command = commandAndCount & 7;
+         int count = commandAndCount >>> 3;
+         if (count <= 0) {
+            continue;
+         }
+
+         switch (command) {
+            case 1:
+               for (int i = 0; i < count; i++) {
+                  if (cursor + 1 >= geometry.size()) {
+                     return rings;
+                  }
+
+                  if (current != null && current.size() >= 3) {
+                     closeRing(current);
+                     rings.add(List.copyOf(current));
+                  }
+
+                  cursorX += zigZagDecode(geometry.get(cursor++));
+                  cursorY += zigZagDecode(geometry.get(cursor++));
+                  current = new ArrayList<>();
+                  current.add(new TellusOsmRoadSource.TilePoint(cursorX, cursorY));
+               }
+               break;
+            case 2:
+               if (current == null) {
+                  current = new ArrayList<>();
+               }
+
+               for (int i = 0; i < count; i++) {
+                  if (cursor + 1 >= geometry.size()) {
+                     return rings;
+                  }
+
+                  cursorX += zigZagDecode(geometry.get(cursor++));
+                  cursorY += zigZagDecode(geometry.get(cursor++));
+                  current.add(new TellusOsmRoadSource.TilePoint(cursorX, cursorY));
+               }
+               break;
+            case 7:
+               if (current != null && current.size() >= 3) {
+                  closeRing(current);
+                  rings.add(List.copyOf(current));
+               }
+               current = null;
+               break;
+            default:
+               return rings;
+         }
+      }
+
+      if (current != null && current.size() >= 3) {
+         closeRing(current);
+         rings.add(List.copyOf(current));
+      }
+
+      return rings;
+   }
+
+   private static void closeRing(List<TellusOsmRoadSource.TilePoint> ring) {
+      if (!ring.isEmpty() && !samePoint(ring.get(0), ring.get(ring.size() - 1))) {
+         ring.add(ring.get(0));
       }
    }
 
@@ -1286,7 +1647,7 @@ public final class TellusOsmRoadSource implements TellusCacheHandle {
    private record ScopeRange(double start, double end) {
    }
 
-   private record RoadDescriptor(RoadMode mode, int bridgeLevel) {
+   private record RoadDescriptor(RoadMode mode, int bridgeLevel, String roadSurface, String subclass, double widthMeters, int lanes, boolean laneMarkings) {
    }
 
    private record LineGeometry(double[] longitudes, double[] latitudes, double[] distances, double totalLength) {
@@ -1339,6 +1700,14 @@ public final class TellusOsmRoadSource implements TellusCacheHandle {
 
    public record RoadQueryResult(List<RoadFeature> features, boolean hadCacheMiss) {
       public RoadQueryResult(List<RoadFeature> features, boolean hadCacheMiss) {
+         features = features == null ? List.of() : List.copyOf(features);
+         this.features = features;
+         this.hadCacheMiss = hadCacheMiss;
+      }
+   }
+
+   public record RoadAreaQueryResult(List<RoadAreaFeature> features, boolean hadCacheMiss) {
+      public RoadAreaQueryResult(List<RoadAreaFeature> features, boolean hadCacheMiss) {
          features = features == null ? List.of() : List.copyOf(features);
          this.features = features;
          this.hadCacheMiss = hadCacheMiss;

@@ -25,6 +25,7 @@ public class EarthTeleportScreen extends Screen {
    private SlippyMapWidget mapWidget;
    private MarkerMapComponent markerComponent;
    private PlaceSearchWidget searchWidget;
+   private boolean suppressMapRelease;
 
    public EarthTeleportScreen( Screen parent, double latitude, double longitude) {
       super(Component.translatable("gui.earth.teleport_map"));
@@ -46,7 +47,7 @@ public class EarthTeleportScreen extends Screen {
       this.markerComponent = new MarkerMapComponent(new SlippyMapPoint(this.initialLatitude, this.initialLongitude)).allowMovement();
       this.mapWidget.addComponent(this.markerComponent);
       this.mapWidget.getMap().focus(this.initialLatitude, this.initialLongitude, DEFAULT_ZOOM);
-      Geocoder geocoder = new NominatimGeocoder();
+      Geocoder geocoder = new NominatimGeocoder(() -> this.minecraft == null ? null : this.minecraft.getLanguageManager().getSelected());
       this.searchWidget = new PlaceSearchWidget(mapX + 5, mapY + 5, 200, 20, geocoder, this::handleSearch);
       this.addRenderableOnly(this.mapWidget);
       this.addRenderableWidget(this.searchWidget);
@@ -89,6 +90,32 @@ public class EarthTeleportScreen extends Screen {
       }
    }
 
+   @Override
+   public boolean mouseClicked(double mouseX, double mouseY, int button) {
+      if (this.isSearchOverlayMouseOver(mouseX, mouseY)) {
+         this.suppressMapRelease = true;
+         this.cancelMapInteraction();
+         this.setFocused(this.searchWidget);
+         this.searchWidget.setFocused(true);
+         this.searchWidget.mouseClicked(mouseX, mouseY, button);
+         return true;
+      }
+
+      this.suppressMapRelease = false;
+      return super.mouseClicked(mouseX, mouseY, button);
+   }
+
+   @Override
+   public boolean mouseReleased(double mouseX, double mouseY, int button) {
+      if (this.suppressMapRelease || this.isSearchOverlayMouseOver(mouseX, mouseY)) {
+         this.suppressMapRelease = false;
+         this.cancelMapInteraction();
+         return true;
+      }
+
+      return super.mouseReleased(mouseX, mouseY, button);
+   }
+
    private void closeScreen() {
       if (this.minecraft != null) {
          this.minecraft.setScreen(this.parent);
@@ -119,6 +146,16 @@ public class EarthTeleportScreen extends Screen {
 
       if (this.searchWidget != null) {
          this.searchWidget.close();
+      }
+   }
+
+   private boolean isSearchOverlayMouseOver(double mouseX, double mouseY) {
+      return this.searchWidget != null && this.searchWidget.isMouseOver(mouseX, mouseY);
+   }
+
+   private void cancelMapInteraction() {
+      if (this.mapWidget != null) {
+         this.mapWidget.cancelInteraction();
       }
    }
 }

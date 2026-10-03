@@ -14,5 +14,7 @@ public enum TellusCacheDomain {
    USGS,
    ARCTICDEM,
    REMA,
-   COPERNICUS
+   COPERNICUS,
+   GEBCO2026,
+   OISST
 }

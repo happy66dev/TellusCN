@@ -42,6 +42,7 @@ public class PlaceSearchWidget extends EditBox {
    private long suggestionRequestId;
    private PlaceSearchWidget.State state = PlaceSearchWidget.State.OK;
    private boolean pause;
+   private volatile boolean closed;
    private String lastInputText = "";
 
    public PlaceSearchWidget(int x, int y, int width, int height, Geocoder geocoder, PlaceSearchWidget.SearchHandler searchHandler) {
@@ -54,6 +55,10 @@ public class PlaceSearchWidget extends EditBox {
    }
 
    public void tick() {
+      if (this.closed) {
+         return;
+      }
+
       String text = this.getValue().trim();
       if (!text.equals(this.lastInputText)) {
          this.lastInputText = text;
@@ -138,26 +143,40 @@ public class PlaceSearchWidget extends EditBox {
    }
 
    public void close() {
+      this.closed = true;
+      this.suggestionRequestId++;
       this.cancelPendingSuggest();
+      this.clearSuggestions();
       this.executor.shutdownNow();
    }
 
    private void handleAccept() {
+      if (this.closed) {
+         return;
+      }
+
       String text = this.getValue().trim();
       if (!text.isEmpty()) {
          this.pause = true;
          this.cancelPendingSuggest();
          this.clearSuggestions();
+         long requestId = ++this.suggestionRequestId;
          CompletableFuture.runAsync(() -> {
             try {
                double[] coordinate = this.geocoder.get(text);
                if (coordinate != null) {
                   Minecraft.getInstance().execute(() -> {
-                     this.searchHandler.handle(coordinate[0], coordinate[1]);
-                     this.state = PlaceSearchWidget.State.FOUND;
+                     if (this.isActiveRequest(requestId)) {
+                        this.searchHandler.handle(coordinate[0], coordinate[1]);
+                        this.state = PlaceSearchWidget.State.FOUND;
+                     }
                   });
                } else {
-                  Minecraft.getInstance().execute(() -> this.state = PlaceSearchWidget.State.NOT_FOUND);
+                  Minecraft.getInstance().execute(() -> {
+                     if (this.isActiveRequest(requestId)) {
+                        this.state = PlaceSearchWidget.State.NOT_FOUND;
+                     }
+                  });
                }
             } catch (IOException var3) {
                Tellus.LOGGER.error("Failed to find searched place {}", text, var3);
@@ -167,6 +186,10 @@ public class PlaceSearchWidget extends EditBox {
    }
 
    private void scheduleSuggestions(String text) {
+      if (this.closed) {
+         return;
+      }
+
       this.cancelPendingSuggest();
       this.clearSuggestions();
       long requestId = ++this.suggestionRequestId;
@@ -177,7 +200,7 @@ public class PlaceSearchWidget extends EditBox {
    }
 
    private void applySuggestions(long requestId, String text, Geocoder.Suggestion[] result) {
-      if (requestId == this.suggestionRequestId) {
+      if (this.isActiveRequest(requestId)) {
          if (!this.pause && text.equals(this.getValue().trim())) {
             this.suggestions.clear();
             if (result != null) {
@@ -207,13 +230,22 @@ public class PlaceSearchWidget extends EditBox {
    }
 
    private void acceptSuggestion(Geocoder.Suggestion suggestion) {
+      if (this.closed) {
+         return;
+      }
+
       this.pause = true;
       this.cancelPendingSuggest();
+      this.suggestionRequestId++;
       this.clearSuggestions();
       String displayName = Objects.requireNonNull(suggestion.displayName(), "suggestionDisplayName");
       this.setValue(displayName);
       this.state = PlaceSearchWidget.State.FOUND;
       this.searchHandler.handle(suggestion.latitude(), suggestion.longitude());
+   }
+
+   private boolean isActiveRequest(long requestId) {
+      return !this.closed && requestId == this.suggestionRequestId;
    }
 
    private void rebuildSuggestionButtons() {

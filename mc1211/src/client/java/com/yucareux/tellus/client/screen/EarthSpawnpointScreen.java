@@ -42,7 +42,7 @@ public class EarthSpawnpointScreen extends Screen {
       this.markerComponent = new MarkerMapComponent(new SlippyMapPoint(latitude, longitude)).allowMovement();
       this.mapWidget.addComponent(this.markerComponent);
       this.mapWidget.getMap().focus(latitude, longitude, 4);
-      Geocoder geocoder = new NominatimGeocoder();
+      Geocoder geocoder = new NominatimGeocoder(() -> this.minecraft == null ? null : this.minecraft.getLanguageManager().getSelected());
       this.searchWidget = new PlaceSearchWidget(mapX + 12, mapY + 12, 220, 20, geocoder, this::handleSearch);
       this.addRenderableOnly(this.mapWidget);
       this.addRenderableWidget(this.searchWidget);

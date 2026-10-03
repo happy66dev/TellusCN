@@ -1,6 +1,7 @@
 package com.yucareux.tellus.world.realtime;
 
 import java.util.Objects;
+import net.minecraft.core.BlockPos;
 import net.minecraft.util.Mth;
 import net.minecraft.world.level.biome.Biome.Precipitation;
 
@@ -12,7 +13,7 @@ public final class TellusRealtimeState {
    private static volatile boolean historicalSnowEnabled;
    private static volatile TellusRealtimeState.PrecipitationMode precipitationMode = TellusRealtimeState.PrecipitationMode.CLEAR;
    private static volatile SnowGrid snowGrid = SnowGrid.empty();
-   private static volatile float weatherTemperatureC = Float.NaN;
+   private static volatile TemperatureGrid temperatureGrid = TemperatureGrid.empty();
 
    private TellusRealtimeState() {
    }
@@ -20,7 +21,7 @@ public final class TellusRealtimeState {
    public static void updateWeatherState(
       boolean weatherEnabled, TellusRealtimeState.PrecipitationMode precipitationMode, boolean historicalSnowEnabled, SnowGrid snowGrid
    ) {
-      updateWeatherState(weatherEnabled, precipitationMode, historicalSnowEnabled, snowGrid, Float.NaN);
+      updateWeatherState(weatherEnabled, precipitationMode, historicalSnowEnabled, snowGrid, TellusRealtimeState.temperatureGrid);
    }
 
    public static void updateWeatherState(
@@ -28,13 +29,13 @@ public final class TellusRealtimeState {
       TellusRealtimeState.PrecipitationMode precipitationMode,
       boolean historicalSnowEnabled,
       SnowGrid snowGrid,
-      float weatherTemperatureC
+      TemperatureGrid temperatureGrid
    ) {
       TellusRealtimeState.weatherEnabled = weatherEnabled;
       TellusRealtimeState.historicalSnowEnabled = historicalSnowEnabled;
       TellusRealtimeState.precipitationMode = Objects.requireNonNull(precipitationMode, "precipitationMode");
       TellusRealtimeState.snowGrid = snowGrid == null ? SnowGrid.empty() : snowGrid;
-      TellusRealtimeState.weatherTemperatureC = weatherTemperatureC;
+      TellusRealtimeState.temperatureGrid = temperatureGrid == null ? TemperatureGrid.empty() : temperatureGrid;
    }
 
    public static void clearRealtimeWeather() {
@@ -42,11 +43,11 @@ public final class TellusRealtimeState {
       TellusRealtimeState.historicalSnowEnabled = false;
       TellusRealtimeState.precipitationMode = TellusRealtimeState.PrecipitationMode.CLEAR;
       TellusRealtimeState.snowGrid = SnowGrid.empty();
-      TellusRealtimeState.weatherTemperatureC = Float.NaN;
    }
 
    public static void reset() {
       clearRealtimeWeather();
+      clearTemperature();
    }
 
    public static boolean isWeatherEnabled() {
@@ -65,17 +66,51 @@ public final class TellusRealtimeState {
       return snowGrid;
    }
 
-   public static boolean shouldAllowWaterFreeze() {
-      return weatherEnabled && !Float.isNaN(weatherTemperatureC) && weatherTemperatureC <= FREEZING_TEMPERATURE_C;
+   public static TemperatureGrid temperatureGrid() {
+      return temperatureGrid;
    }
 
-   public static Precipitation precipitationOverride() {
+   public static void clearTemperature() {
+      TellusRealtimeState.temperatureGrid = TemperatureGrid.empty();
+   }
+
+   public static float realWorldTemperatureC(BlockPos pos) {
+      return pos == null ? Float.NaN : temperatureGrid.sample(pos.getX(), pos.getZ());
+   }
+
+   public static boolean hasRealWorldTemperature(BlockPos pos) {
+      return WeatherTemperaturePolicy.hasTemperature(realWorldTemperatureC(pos));
+   }
+
+   public static Boolean waterFreezeOverride(BlockPos pos) {
+      float temperatureC = realWorldTemperatureC(pos);
+      return WeatherTemperaturePolicy.hasTemperature(temperatureC) ? temperatureC <= FREEZING_TEMPERATURE_C : null;
+   }
+
+   public static Precipitation precipitationOverride(boolean biomeHasPrecipitation, BlockPos pos) {
       TellusRealtimeState.PrecipitationMode mode = precipitationMode;
       if (weatherEnabled && mode != TellusRealtimeState.PrecipitationMode.CLEAR) {
          return mode == TellusRealtimeState.PrecipitationMode.SNOW ? Precipitation.SNOW : Precipitation.RAIN;
-      } else {
+      }
+
+      float temperatureC = realWorldTemperatureC(pos);
+      if (!biomeHasPrecipitation || !WeatherTemperaturePolicy.hasTemperature(temperatureC)) {
          return null;
       }
+
+      return WeatherTemperaturePolicy.shouldSnow(temperatureC) ? Precipitation.SNOW : Precipitation.RAIN;
+   }
+
+   public static Boolean snowTemperatureOverride(boolean biomeHasPrecipitation, BlockPos pos) {
+      TellusRealtimeState.PrecipitationMode mode = precipitationMode;
+      if (weatherEnabled && mode != TellusRealtimeState.PrecipitationMode.CLEAR) {
+         return mode == TellusRealtimeState.PrecipitationMode.SNOW;
+      }
+
+      float temperatureC = realWorldTemperatureC(pos);
+      return WeatherTemperaturePolicy.hasTemperature(temperatureC)
+         ? biomeHasPrecipitation && WeatherTemperaturePolicy.shouldSnow(temperatureC)
+         : null;
    }
 
    public static float sampleSnowCoverage(int blockX, int blockZ) {

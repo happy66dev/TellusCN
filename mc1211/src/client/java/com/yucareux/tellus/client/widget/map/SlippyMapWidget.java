@@ -131,19 +131,21 @@ public class SlippyMapWidget extends AbstractWidget {
    }
 
    public boolean mouseReleased(double mouseX, double mouseY, int button) {
+      boolean handled = false;
       if (button == 0 && this.mouseDown && !this.mouseDragged && this.isMouseOver(mouseX, mouseY)) {
          SlippyMapPoint mouse = this.getPointUnderMouse(mouseX, mouseY);
 
          for (MapComponent component : this.components) {
             if (component.onMouseReleased(this.map, mouse, button)) {
-               return true;
+               handled = true;
+               break;
             }
          }
       }
 
       this.mouseDown = false;
       this.mouseDragged = false;
-      return false;
+      return handled;
    }
 
    public boolean mouseScrolled(double mouseX, double mouseY, double scrollX, double scrollY) {

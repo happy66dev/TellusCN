@@ -31,8 +31,11 @@ public final class TellusBuildingBlueprints {
       int minWorldZ = Mth.floor(feature.minBlockZ(worldScale));
       int maxWorldZ = Mth.ceil(feature.maxBlockZ(worldScale));
       long seed = mixSeed(worldSeed, feature.featureId(), groupId.hashCode());
-      EntrancePlacement entrance = resolveEntrance(feature, nearbyRoads, worldScale, minWorldX, maxWorldX, minWorldZ, maxWorldZ, seed);
-      return new BuildingBlueprint(groupId, seed, profile, baseY, floorY, roofBaseY, topY, minWorldX, maxWorldX, minWorldZ, maxWorldZ, entrance.worldX(), entrance.worldZ(), entrance.facing(), entrance.width());
+      BuildingStyle style = TellusBuildingStyles.resolveBuildingStyle(
+         profile, feature.metadata(), feature.areaSquareMeters(), maxWorldX - minWorldX + 1, maxWorldZ - minWorldZ + 1, seed
+      );
+      EntrancePlacement entrance = resolveEntrance(feature, nearbyRoads, worldScale, minWorldX, maxWorldX, minWorldZ, maxWorldZ, style, seed);
+      return new BuildingBlueprint(groupId, seed, profile, style, baseY, floorY, roofBaseY, topY, minWorldX, maxWorldX, minWorldZ, maxWorldZ, entrance.worldX(), entrance.worldZ(), entrance.facing(), entrance.width());
    }
 
    private static EntrancePlacement resolveEntrance(
@@ -43,8 +46,10 @@ public final class TellusBuildingBlueprints {
       int maxWorldX,
       int minWorldZ,
       int maxWorldZ,
+      BuildingStyle style,
       long seed
    ) {
+      int entranceWidth = entranceWidth(style);
       double[] centroid = feature.centroidWorld(worldScale);
       int fallbackX = Mth.clamp((int)Math.round(centroid[0]), minWorldX, maxWorldX);
       int fallbackZ = Mth.clamp((int)Math.round(centroid[1]), minWorldZ, maxWorldZ);
@@ -70,17 +75,17 @@ public final class TellusBuildingBlueprints {
          }
       }
 
-      EntrancePlacement snapped = snapEntranceToFootprint(feature, worldScale, minWorldX, maxWorldX, minWorldZ, maxWorldZ, bestFacing, fallbackX, fallbackZ);
+      EntrancePlacement snapped = snapEntranceToFootprint(feature, worldScale, minWorldX, maxWorldX, minWorldZ, maxWorldZ, bestFacing, fallbackX, fallbackZ, entranceWidth);
       if (snapped != null) {
          return snapped;
       }
 
       return switch (bestFacing) {
-         case NORTH -> new EntrancePlacement(Mth.clamp(fallbackX, minWorldX + 1, maxWorldX - 1), minWorldZ, bestFacing, 1);
-         case SOUTH -> new EntrancePlacement(Mth.clamp(fallbackX, minWorldX + 1, maxWorldX - 1), maxWorldZ, bestFacing, 1);
-         case EAST -> new EntrancePlacement(maxWorldX, Mth.clamp(fallbackZ, minWorldZ + 1, maxWorldZ - 1), bestFacing, 1);
-         case WEST -> new EntrancePlacement(minWorldX, Mth.clamp(fallbackZ, minWorldZ + 1, maxWorldZ - 1), bestFacing, 1);
-         default -> new EntrancePlacement(fallbackX, minWorldZ, Direction.NORTH, 1);
+         case NORTH -> new EntrancePlacement(Mth.clamp(fallbackX, minWorldX + 1, maxWorldX - 1), minWorldZ, bestFacing, entranceWidth);
+         case SOUTH -> new EntrancePlacement(Mth.clamp(fallbackX, minWorldX + 1, maxWorldX - 1), maxWorldZ, bestFacing, entranceWidth);
+         case EAST -> new EntrancePlacement(maxWorldX, Mth.clamp(fallbackZ, minWorldZ + 1, maxWorldZ - 1), bestFacing, entranceWidth);
+         case WEST -> new EntrancePlacement(minWorldX, Mth.clamp(fallbackZ, minWorldZ + 1, maxWorldZ - 1), bestFacing, entranceWidth);
+         default -> new EntrancePlacement(fallbackX, minWorldZ, Direction.NORTH, entranceWidth);
       };
    }
 
@@ -93,13 +98,14 @@ public final class TellusBuildingBlueprints {
       int maxWorldZ,
       Direction preferredFacing,
       int preferredWorldX,
-      int preferredWorldZ
+      int preferredWorldZ,
+      int entranceWidth
    ) {
       EntranceCandidate preferred = findBoundaryCandidate(
          feature, worldScale, minWorldX, maxWorldX, minWorldZ, maxWorldZ, preferredFacing, preferredWorldX, preferredWorldZ
       );
       if (preferred != null) {
-         return new EntrancePlacement(preferred.worldX(), preferred.worldZ(), preferred.facing(), 1);
+         return new EntrancePlacement(preferred.worldX(), preferred.worldZ(), preferred.facing(), entranceWidth);
       }
 
       EntranceCandidate best = null;
@@ -112,7 +118,14 @@ public final class TellusBuildingBlueprints {
          }
       }
 
-      return best == null ? null : new EntrancePlacement(best.worldX(), best.worldZ(), best.facing(), 1);
+      return best == null ? null : new EntrancePlacement(best.worldX(), best.worldZ(), best.facing(), entranceWidth);
+   }
+
+   private static int entranceWidth(BuildingStyle style) {
+      if (style.garageDoor()) {
+         return 3;
+      }
+      return style.singleDoor() ? 1 : 1;
    }
 
    private static EntranceCandidate findBoundaryCandidate(

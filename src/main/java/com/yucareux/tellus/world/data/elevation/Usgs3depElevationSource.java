@@ -6,6 +6,7 @@ import com.google.common.cache.LoadingCache;
 import com.yucareux.tellus.Tellus;
 import com.yucareux.tellus.config.TellusEndpointConfig;
 import com.yucareux.tellus.cache.TellusCacheDomain;
+import com.yucareux.tellus.cache.TellusCacheFiles;
 import com.yucareux.tellus.cache.TellusCacheHandle;
 import com.yucareux.tellus.cache.TellusCacheRegistry;
 import com.yucareux.tellus.world.data.source.DownloadProgressReporter;
@@ -19,7 +20,6 @@ import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.concurrent.ExecutionException;
@@ -206,8 +206,12 @@ public final class Usgs3depElevationSource implements TellusCacheHandle {
          }
       }
 
+      long generation = TellusCacheRegistry.generation(TellusCacheDomain.USGS);
       data = this.downloadTile(key);
-      this.writeCacheFile(cachePath, data);
+      if (!this.writeCacheFile(cachePath, data, generation)) {
+         throw new IOException("Discarded stale USGS 3DEP cache write for " + key);
+      }
+
       return readTiffRaster(data);
    }
 
@@ -246,16 +250,8 @@ public final class Usgs3depElevationSource implements TellusCacheHandle {
       }
    }
 
-   private void writeCacheFile(Path cachePath, byte[] data) throws IOException {
-      Files.createDirectories(cachePath.getParent());
-      Path tempPath = cachePath.resolveSibling(cachePath.getFileName() + ".tmp");
-      Files.write(tempPath, data);
-
-      try {
-         Files.move(tempPath, cachePath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-      } catch (IOException error) {
-         Files.move(tempPath, cachePath, StandardCopyOption.REPLACE_EXISTING);
-      }
+   private boolean writeCacheFile(Path cachePath, byte[] data, long generation) throws IOException {
+      return TellusCacheFiles.writeBytesIfCurrent(TellusCacheDomain.USGS, generation, cachePath, data);
    }
 
    private static Usgs3depElevationSource.TileRaster readTiffRaster(byte[] data) throws IOException {

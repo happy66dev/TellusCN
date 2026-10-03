@@ -19,10 +19,11 @@ public class BiomeFreezeMixin {
       cancellable = true
    )
    private void tellus$gateWaterFreeze(LevelReader level, BlockPos pos, boolean mustBeAtEdge, CallbackInfoReturnable<Boolean> cir) {
-      if (level instanceof ServerLevel serverLevel
-         && serverLevel.getChunkSource().getGenerator() instanceof EarthChunkGenerator
-         && !TellusRealtimeState.shouldAllowWaterFreeze()) {
-         cir.setReturnValue(false);
+      if (level instanceof ServerLevel serverLevel && serverLevel.getChunkSource().getGenerator() instanceof EarthChunkGenerator) {
+         Boolean allowFreeze = TellusRealtimeState.waterFreezeOverride(pos);
+         if (Boolean.FALSE.equals(allowFreeze)) {
+            cir.setReturnValue(false);
+         }
       }
    }
 }

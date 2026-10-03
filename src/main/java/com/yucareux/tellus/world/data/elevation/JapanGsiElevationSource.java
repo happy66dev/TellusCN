@@ -6,6 +6,7 @@ import com.google.common.cache.LoadingCache;
 import com.yucareux.tellus.Tellus;
 import com.yucareux.tellus.config.TellusEndpointConfig;
 import com.yucareux.tellus.cache.TellusCacheDomain;
+import com.yucareux.tellus.cache.TellusCacheFiles;
 import com.yucareux.tellus.cache.TellusCacheHandle;
 import com.yucareux.tellus.cache.TellusCacheRegistry;
 import com.yucareux.tellus.world.data.source.DownloadProgressReporter;
@@ -16,9 +17,9 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.Objects;
 import java.util.concurrent.ExecutionException;
 import javax.imageio.ImageIO;
@@ -245,14 +246,17 @@ public final class JapanGsiElevationSource implements TellusCacheHandle {
          return MISSING_TILE;
       } else {
          byte[] data;
+         long generation = TellusCacheRegistry.generation(TellusCacheDomain.JAPANGSI);
          try {
             data = this.downloadTile(key);
          } catch (JapanGsiElevationSource.MissingTileException error) {
-            this.writeMissingMarker(missingMarker);
+            this.writeMissingMarker(missingMarker, generation);
             return MISSING_TILE;
          }
 
-         this.cacheTile(cachePath, data);
+         if (!this.cacheTile(cachePath, data, generation)) {
+            throw new IOException("Discarded stale Japan GSI cache write for " + key);
+         }
 
          try (InputStream input = new ByteArrayInputStream(data)) {
             return new JapanGsiElevationSource.TileRecord(readPngRaster(input), false);
@@ -289,23 +293,14 @@ public final class JapanGsiElevationSource implements TellusCacheHandle {
       }
    }
 
-   private void cacheTile(Path cachePath, byte[] data) throws IOException {
-      Files.createDirectories(cachePath.getParent());
-      Path tempPath = cachePath.resolveSibling(cachePath.getFileName() + ".tmp");
-      Files.write(tempPath, data);
-
-      try {
-         Files.move(tempPath, cachePath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-      } catch (IOException error) {
-         Files.move(tempPath, cachePath, StandardCopyOption.REPLACE_EXISTING);
-      }
+   private boolean cacheTile(Path cachePath, byte[] data, long generation) throws IOException {
+      return TellusCacheFiles.writeBytesIfCurrent(TellusCacheDomain.JAPANGSI, generation, cachePath, data);
    }
 
-   private void writeMissingMarker(Path missingMarker) {
+   private void writeMissingMarker(Path missingMarker, long generation) {
       try {
-         Files.createDirectories(missingMarker.getParent());
          if (!Files.exists(missingMarker)) {
-            Files.writeString(missingMarker, "missing");
+            TellusCacheFiles.writeStringIfCurrent(TellusCacheDomain.JAPANGSI, generation, missingMarker, "missing", StandardCharsets.UTF_8);
          }
       } catch (IOException error) {
          Tellus.LOGGER.debug("Failed to persist Japan GSI missing marker {}", missingMarker, error);

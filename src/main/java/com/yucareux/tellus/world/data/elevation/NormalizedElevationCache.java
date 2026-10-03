@@ -210,8 +210,8 @@ final class NormalizedElevationCache implements TellusCacheHandle {
       Path provenancePath = this.provenancePath(key);
       Files.createDirectories(heightPath.getParent());
       Files.createDirectories(provenancePath.getParent());
-      Path tempHeight = heightPath.resolveSibling(heightPath.getFileName() + ".tmp");
-      Path tempProvenance = provenancePath.resolveSibling(provenancePath.getFileName() + ".tmp");
+      Path tempHeight = Files.createTempFile(heightPath.getParent(), heightPath.getFileName().toString() + "-", ".tmp");
+      Path tempProvenance = Files.createTempFile(provenancePath.getParent(), provenancePath.getFileName().toString() + "-", ".tmp");
 
       try {
          try (OutputStream heightOut = Files.newOutputStream(tempHeight)) {

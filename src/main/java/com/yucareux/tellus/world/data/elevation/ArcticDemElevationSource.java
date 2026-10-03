@@ -4,6 +4,7 @@ import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
 import com.yucareux.tellus.cache.TellusCacheDomain;
+import com.yucareux.tellus.cache.TellusCacheFiles;
 import com.yucareux.tellus.cache.TellusCacheHandle;
 import com.yucareux.tellus.cache.TellusCacheRegistry;
 import com.yucareux.tellus.Tellus;
@@ -77,7 +78,7 @@ public class ArcticDemElevationSource implements TellusCacheHandle {
          .maximumSize(ArcticDemElevationSource.Tier.values().length)
          .build(new CacheLoader<ArcticDemElevationSource.Tier, ArcticDemElevationSource.TileIndex>() {
             public ArcticDemElevationSource.TileIndex load(ArcticDemElevationSource.Tier tier) throws Exception {
-               return ArcticDemElevationSource.TileIndex.load(tier, ArcticDemElevationSource.this.cacheRoot, dataset.baseUrl());
+               return ArcticDemElevationSource.TileIndex.load(tier, ArcticDemElevationSource.this.cacheRoot, dataset.baseUrl(), dataset.cacheDomain());
             }
          });
       this.fileCache = CacheBuilder.newBuilder().maximumSize(maxFileCache).build(new CacheLoader<String, ArcticDemElevationSource.TileFile>() {
@@ -1325,13 +1326,15 @@ public class ArcticDemElevationSource implements TellusCacheHandle {
          }
       }
 
-      private static ArcticDemElevationSource.TileIndex load(ArcticDemElevationSource.Tier tier, Path cacheRoot, String baseUrl) throws IOException {
+      private static ArcticDemElevationSource.TileIndex load(
+         ArcticDemElevationSource.Tier tier, Path cacheRoot, String baseUrl, TellusCacheDomain cacheDomain
+      ) throws IOException {
          Path cachePath = cacheRoot.resolve(tier.id + "_dem_tiles.vrt");
          String vrtText;
          if (Files.exists(cachePath)) {
             vrtText = new String(Files.readAllBytes(cachePath), StandardCharsets.UTF_8);
          } else {
-            vrtText = downloadVrt(tier, cachePath, baseUrl);
+            vrtText = downloadVrt(tier, cachePath, baseUrl, cacheDomain);
          }
 
          Matcher geoMatcher = GEO_TRANSFORM_PATTERN.matcher(vrtText);
@@ -1427,9 +1430,12 @@ public class ArcticDemElevationSource implements TellusCacheHandle {
          }
       }
 
-      private static String downloadVrt(ArcticDemElevationSource.Tier tier, Path cachePath, String baseUrl) throws IOException {
+      private static String downloadVrt(
+         ArcticDemElevationSource.Tier tier, Path cachePath, String baseUrl, TellusCacheDomain cacheDomain
+      ) throws IOException {
          URI uri = URI.create(String.format("%s/%s_dem_tiles.vrt", baseUrl, tier.id));
          HttpURLConnection connection = ArcticDemElevationSource.openConnection(uri);
+         long generation = TellusCacheRegistry.generation(cacheDomain);
 
          byte[] data;
          try {
@@ -1442,8 +1448,10 @@ public class ArcticDemElevationSource implements TellusCacheHandle {
             connection.disconnect();
          }
 
-         Files.createDirectories(cachePath.getParent());
-         Files.write(cachePath, data);
+         if (!TellusCacheFiles.writeBytesIfCurrent(cacheDomain, generation, cachePath, data)) {
+            throw new IOException("Discarded stale " + tier.id + " VRT cache write");
+         }
+
          return new String(data, StandardCharsets.UTF_8);
       }
 

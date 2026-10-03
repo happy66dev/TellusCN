@@ -16,7 +16,7 @@ plugins {
 rootProject.name = 'Tellus'
 
 include('mc1211')
-include('mc261')
+include('mc262')
 include('mc1201')
 
 dependencyResolutionManagement {

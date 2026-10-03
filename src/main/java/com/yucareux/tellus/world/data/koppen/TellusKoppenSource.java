@@ -1,6 +1,7 @@
 package com.yucareux.tellus.world.data.koppen;
 
 import com.yucareux.tellus.cache.TellusCacheDomain;
+import com.yucareux.tellus.cache.TellusCacheFiles;
 import com.yucareux.tellus.cache.TellusCacheHandle;
 import com.yucareux.tellus.cache.TellusCacheRegistry;
 import com.yucareux.tellus.Tellus;
@@ -16,7 +17,6 @@ import java.nio.channels.ClosedChannelException;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -207,10 +207,8 @@ public final class TellusKoppenSource implements TellusCacheHandle {
       try {
          try (InputStream input = TellusKoppenSource.class.getClassLoader().getResourceAsStream(RESOURCE_PATH)) {
             if (input != null) {
-               Files.createDirectories(this.cachePath.getParent());
-               Path temp = this.cachePath.resolveSibling(this.cachePath.getFileName() + ".tmp");
-               Files.copy(input, temp, StandardCopyOption.REPLACE_EXISTING);
-               Files.move(temp, this.cachePath, StandardCopyOption.REPLACE_EXISTING);
+               long generation = TellusCacheRegistry.generation(TellusCacheDomain.KOPPEN);
+               TellusCacheFiles.writeIfCurrent(TellusCacheDomain.KOPPEN, generation, this.cachePath, input::transferTo);
                return;
             }
 

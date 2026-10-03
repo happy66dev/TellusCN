@@ -5,6 +5,7 @@ import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
 import com.yucareux.tellus.Tellus;
 import com.yucareux.tellus.cache.TellusCacheDomain;
+import com.yucareux.tellus.cache.TellusCacheFiles;
 import com.yucareux.tellus.cache.TellusCacheHandle;
 import com.yucareux.tellus.cache.TellusCacheRegistry;
 import com.yucareux.tellus.world.data.source.DownloadProgressReporter;
@@ -20,7 +21,6 @@ import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -416,8 +416,9 @@ public final class NorwayDtm1ElevationSource implements TellusCacheHandle {
                   throw new EOFException("Norway DTM1 range not cached for " + this.tileRef.id());
                }
 
+               long generation = TellusCacheRegistry.generation(TellusCacheDomain.NORWAYDTM1);
                byte[] data = this.readRemoteRange(offset, length);
-               this.writeCachedRange(cachePath, data);
+               this.writeCachedRange(cachePath, data, generation);
                return data;
             }
          }
@@ -462,12 +463,9 @@ public final class NorwayDtm1ElevationSource implements TellusCacheHandle {
          }
       }
 
-      private void writeCachedRange(Path cachePath, byte[] data) {
+      private void writeCachedRange(Path cachePath, byte[] data, long generation) {
          try {
-            Files.createDirectories(cachePath.getParent());
-            Path tempPath = cachePath.resolveSibling(cachePath.getFileName() + ".tmp");
-            Files.write(tempPath, data);
-            Files.move(tempPath, cachePath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            TellusCacheFiles.writeBytesIfCurrent(TellusCacheDomain.NORWAYDTM1, generation, cachePath, data);
          } catch (IOException error) {
             Tellus.LOGGER.debug("Failed to cache Norway DTM1 range {}", cachePath, error);
          }

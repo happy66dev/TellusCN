@@ -26,9 +26,20 @@ Server support note: Tellus must be installed on the server, but is not required
 - Highly customizable terrain generation (scale, height limits, and more)
 - Built-in terrain preview screen for visualizing settings before world creation
 - Biomes placed to match real-world climate regions
+- OSM roads, buildings, and map features generated with Arnis-derived logic
 - Real-time inspired weather and time systems (optional)
 - Distant Horizons integration for long-distance terrain rendering
 - In-game map teleport UI for choosing real-world locations
+
+## Third-Party Code
+
+Tellus includes code derived from Arnis.
+
+Copyright (c) 2022-2026 Louis Erbkamm (louis-e)
+
+Licensed under the Apache License, Version 2.0.
+
+Source: https://github.com/louis-e/arnis
 
 ## Distant Horizons Integration
 
@@ -63,9 +74,7 @@ These options are available in the "Customize World Generation" screen when crea
 - **Sea Level**: Sets the waterline in blocks without shifting the terrain. Set to Automatic to track the height offset.
 - **Max Altitude**: Upper world limit in blocks. Set to Automatic to let Tellus compute a safe cap based on your scale settings.
 - **Min Altitude**: Lower world limit in blocks. Set to Automatic to let Tellus compute a safe floor based on your scale settings.
-- **River/Lake Shoreline Blend**: Distance in blocks used to smooth river and lake edges into nearby terrain.
-- **Ocean Shoreline Blend**: Distance in blocks used to smooth ocean coastlines into land.
-- **Limit Shoreline Blend on Cliffs**: Prevents shoreline smoothing on steep slopes to preserve sharp cliffs.
+- **Water**: Adds inland water from ESA WorldCover and OSM water data, with automatic terrain-aware shoreline shaping.
 
 ### Ecological Settings (work in progress)
 These options are currently locked and not adjustable yet. They describe what will be configurable in a future update.
@@ -91,7 +100,7 @@ This section lets you toggle vanilla structures and world features on or off, su
 
 ### Compatibility Settings
 - **Distant Horizons Render Mode**: Fast uses Tellus's LOD generator to build simplified distant terrain quickly with lower cost. Detailed asks Distant Horizons to use full chunk generation for far terrain, which is more accurate but significantly slower and heavier. For most setups, keeping Fast LOD generation is recommended.
-- **LOD Water Resolver**: Adds detailed water depth sampling to Distant Horizons fast LODs, improving coastlines, lakes, and ocean floors at distance but with extra cost. If you plan to play around water-heavy regions, it is suggested to keep this enabled; otherwise you can disable it for better performance.
+- **LOD Water Resolver**: Adds water depth and smoother water surfaces to Distant Horizons fast LODs. It uses cached OSM water where available and falls back to ESA/ocean data without blocking LOD generation on missing OSM tiles.
 - **Coming Soon**: Additional compatibility options are work in progress and currently unavailable.
 
 ### Cache

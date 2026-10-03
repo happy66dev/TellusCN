@@ -1,9 +1,11 @@
 package com.yucareux.tellus.world.data.cover;
 
+import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
 import com.yucareux.tellus.cache.TellusCacheDomain;
+import com.yucareux.tellus.cache.TellusCacheFiles;
 import com.yucareux.tellus.cache.TellusCacheHandle;
 import com.yucareux.tellus.cache.TellusCacheRegistry;
 import com.yucareux.tellus.Tellus;
@@ -24,12 +26,12 @@ import java.nio.channels.ClosedChannelException;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.function.IntBinaryOperator;
 import java.util.zip.InflaterInputStream;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.util.Mth;
@@ -48,6 +50,11 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
    private static final int MAX_CACHE_TILES = intProperty("tellus.landcover.cacheTiles", 64);
    private static final double RESOLUTION_METERS = 10.0;
    private static final int TILE_CACHE_ENTRIES = intProperty("tellus.landcover.tileCacheEntries", 32);
+   private static final int NEAREST_LAND_RADIUS_PIXELS = intProperty("tellus.landcover.nearestLandRadiusPixels", 64);
+   private static final int NEAREST_LAND_EXACT_RADIUS_PIXELS = Math.min(8, NEAREST_LAND_RADIUS_PIXELS);
+   private static final int NEAREST_LAND_COARSE_CELL_PIXELS = 8;
+   private static final int NEAREST_LAND_NOT_FOUND = -1;
+   private static final int NEAREST_LAND_CACHE_ENTRIES = intProperty("tellus.landcover.nearestLandCacheEntries", 131072);
    private static final int SMOOTH_RADIUS_PIXELS = 1;
    private static final ThreadLocal<TellusLandCoverSource.CoverSmoothScratch> COVER_SMOOTH_SCRATCH = ThreadLocal.withInitial(
       TellusLandCoverSource.CoverSmoothScratch::new
@@ -75,6 +82,12 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
             return TellusLandCoverSource.this.loadTile(key);
          }
       });
+   private final Cache<TellusLandCoverSource.NearestLandKey, Integer> nearestLandCache = CacheBuilder.newBuilder()
+      .maximumSize(NEAREST_LAND_CACHE_ENTRIES)
+      .build();
+   private final Cache<TellusLandCoverSource.NearestLandKey, Integer> distantNearestLandCache = CacheBuilder.newBuilder()
+      .maximumSize(Math.max(1024, NEAREST_LAND_CACHE_ENTRIES / NEAREST_LAND_COARSE_CELL_PIXELS))
+      .build();
 
    public TellusLandCoverSource() {
       TellusCacheRegistry.register(this);
@@ -111,6 +124,188 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
          double lat = EarthProjection.blockZToLat(blockZ, worldScale);
          return this.sampleCoverClassAtLonLatMemoryOnly(lon, lat);
       }
+   }
+
+   public int sampleNearestLandCoverClass(double blockX, double blockZ, double worldScale, int fallbackCoverClass) {
+      return this.sampleNearestLandCoverClass(
+         blockX, blockZ, worldScale, fallbackCoverClass, TellusLandCoverSource.NearestLandLookupMode.BLOCKING
+      );
+   }
+
+   public int sampleNearestLandCoverClassLocalOnly(double blockX, double blockZ, double worldScale, int fallbackCoverClass) {
+      return this.sampleNearestLandCoverClass(
+         blockX, blockZ, worldScale, fallbackCoverClass, TellusLandCoverSource.NearestLandLookupMode.LOCAL_ONLY
+      );
+   }
+
+   public int sampleNearestLandCoverClassMemoryOnly(double blockX, double blockZ, double worldScale, int fallbackCoverClass) {
+      return this.sampleNearestLandCoverClass(
+         blockX, blockZ, worldScale, fallbackCoverClass, TellusLandCoverSource.NearestLandLookupMode.MEMORY_ONLY
+      );
+   }
+
+   private int sampleNearestLandCoverClass(
+      double blockX,
+      double blockZ,
+      double worldScale,
+      int fallbackCoverClass,
+      TellusLandCoverSource.NearestLandLookupMode lookupMode
+   ) {
+      if (!(worldScale > 0.0)) {
+         return fallbackCoverClass;
+      }
+
+      double blocksPerDegree = EarthProjection.blocksPerDegree(worldScale);
+      double lon = blockX / blocksPerDegree;
+      double lat = EarthProjection.blockZToLat(blockZ, worldScale);
+      TellusLandCoverSource.TileKey tileKey = tileKeyForLonLat(lon, lat);
+      if (tileKey == null) {
+         return fallbackCoverClass;
+      }
+
+      TellusLandCoverSource.GeoTiffTile tile = switch (lookupMode) {
+         case BLOCKING -> this.getTile(tileKey);
+         case LOCAL_ONLY -> this.getTileLocalOnly(tileKey);
+         case MEMORY_ONLY -> this.getTileMemoryOnly(tileKey);
+      };
+      if (tile == null || tile == TellusLandCoverSource.GeoTiffTile.MISSING) {
+         return lookupMode == TellusLandCoverSource.NearestLandLookupMode.MEMORY_ONLY ? Integer.MIN_VALUE : fallbackCoverClass;
+      }
+
+      TellusLandCoverSource.Pixel center = tile.toPixel(lon, lat);
+      if (center == null) {
+         return fallbackCoverClass;
+      }
+
+      TellusLandCoverSource.NearestLandKey cacheKey = new TellusLandCoverSource.NearestLandKey(
+         tileKey.lat(), tileKey.lon(), center.x(), center.y()
+      );
+      Integer cached = this.nearestLandCache.getIfPresent(cacheKey);
+      if (cached != null) {
+         return cached;
+      }
+
+      boolean completeExactLookup = tile.isNeighborhoodInBounds(center.x(), center.y(), NEAREST_LAND_EXACT_RADIUS_PIXELS)
+         || lookupMode == TellusLandCoverSource.NearestLandLookupMode.BLOCKING;
+      IntBinaryOperator sampler = nearestLandSampler(tile, center, NEAREST_LAND_EXACT_RADIUS_PIXELS, lookupMode, this);
+      int nearest = findNearestLandCoverClass(center.x(), center.y(), NEAREST_LAND_EXACT_RADIUS_PIXELS, sampler);
+      if (nearest != Integer.MIN_VALUE) {
+         if (completeExactLookup) {
+            this.nearestLandCache.put(cacheKey, nearest);
+         }
+         return nearest;
+      }
+
+      int coarseCellX = Math.floorDiv(center.x(), NEAREST_LAND_COARSE_CELL_PIXELS);
+      int coarseCellY = Math.floorDiv(center.y(), NEAREST_LAND_COARSE_CELL_PIXELS);
+      TellusLandCoverSource.NearestLandKey distantCacheKey = new TellusLandCoverSource.NearestLandKey(
+         tileKey.lat(), tileKey.lon(), coarseCellX, coarseCellY
+      );
+      Integer distantCached = this.distantNearestLandCache.getIfPresent(distantCacheKey);
+      if (distantCached != null) {
+         return distantCached == NEAREST_LAND_NOT_FOUND ? fallbackCoverClass : distantCached;
+      }
+
+      int coarseCenterX = coarseCellX * NEAREST_LAND_COARSE_CELL_PIXELS + NEAREST_LAND_COARSE_CELL_PIXELS / 2;
+      int coarseCenterY = coarseCellY * NEAREST_LAND_COARSE_CELL_PIXELS + NEAREST_LAND_COARSE_CELL_PIXELS / 2;
+      TellusLandCoverSource.Pixel coarseCenter = new TellusLandCoverSource.Pixel(coarseCenterX, coarseCenterY);
+      boolean completeDistantLookup = tile.isNeighborhoodInBounds(coarseCenterX, coarseCenterY, NEAREST_LAND_RADIUS_PIXELS)
+         || lookupMode == TellusLandCoverSource.NearestLandLookupMode.BLOCKING;
+      IntBinaryOperator distantSampler = nearestLandSampler(tile, coarseCenter, NEAREST_LAND_RADIUS_PIXELS, lookupMode, this);
+      nearest = findNearestLandCoverClass(coarseCenterX, coarseCenterY, NEAREST_LAND_RADIUS_PIXELS, distantSampler);
+      if (completeDistantLookup) {
+         this.distantNearestLandCache.put(distantCacheKey, nearest == Integer.MIN_VALUE ? NEAREST_LAND_NOT_FOUND : nearest);
+      }
+      if (nearest != Integer.MIN_VALUE) {
+         return nearest;
+      }
+
+      return lookupMode == TellusLandCoverSource.NearestLandLookupMode.MEMORY_ONLY && !completeDistantLookup
+         ? Integer.MIN_VALUE
+         : fallbackCoverClass;
+   }
+
+   private static IntBinaryOperator nearestLandSampler(
+      TellusLandCoverSource.GeoTiffTile tile,
+      TellusLandCoverSource.Pixel center,
+      int radius,
+      TellusLandCoverSource.NearestLandLookupMode lookupMode,
+      TellusLandCoverSource source
+   ) {
+      if (tile.isNeighborhoodInBounds(center.x(), center.y(), radius)) {
+         return tile::sampleValue;
+      }
+
+      return switch (lookupMode) {
+         case BLOCKING -> (pixelX, pixelY) -> source.sampleValueAcrossTiles(tile, pixelX, pixelY);
+         case LOCAL_ONLY -> (pixelX, pixelY) -> source.sampleValueAcrossTilesLocalOnly(tile, pixelX, pixelY);
+         case MEMORY_ONLY -> (pixelX, pixelY) -> source.sampleValueAcrossTilesMemoryOnly(tile, pixelX, pixelY);
+      };
+   }
+
+   static int findNearestLandCoverClass(int centerX, int centerY, int maxRadius, IntBinaryOperator sampler) {
+      int bestClass = Integer.MIN_VALUE;
+      int bestDistanceSquared = Integer.MAX_VALUE;
+      int boundedRadius = Math.max(0, maxRadius);
+
+      for (int radius = 1; radius <= boundedRadius; radius++) {
+         int minX = centerX - radius;
+         int maxX = centerX + radius;
+         int minY = centerY - radius;
+         int maxY = centerY + radius;
+
+         for (int x = minX; x <= maxX; x++) {
+            int topClass = sampler.applyAsInt(x, minY);
+            int topDistanceSquared = squaredDistance(centerX, centerY, x, minY);
+            if (isLandCoverClass(topClass) && topDistanceSquared < bestDistanceSquared) {
+               bestClass = topClass;
+               bestDistanceSquared = topDistanceSquared;
+            }
+
+            int bottomClass = sampler.applyAsInt(x, maxY);
+            int bottomDistanceSquared = squaredDistance(centerX, centerY, x, maxY);
+            if (isLandCoverClass(bottomClass) && bottomDistanceSquared < bestDistanceSquared) {
+               bestClass = bottomClass;
+               bestDistanceSquared = bottomDistanceSquared;
+            }
+         }
+
+         for (int y = minY + 1; y < maxY; y++) {
+            int leftClass = sampler.applyAsInt(minX, y);
+            int leftDistanceSquared = squaredDistance(centerX, centerY, minX, y);
+            if (isLandCoverClass(leftClass) && leftDistanceSquared < bestDistanceSquared) {
+               bestClass = leftClass;
+               bestDistanceSquared = leftDistanceSquared;
+            }
+
+            int rightClass = sampler.applyAsInt(maxX, y);
+            int rightDistanceSquared = squaredDistance(centerX, centerY, maxX, y);
+            if (isLandCoverClass(rightClass) && rightDistanceSquared < bestDistanceSquared) {
+               bestClass = rightClass;
+               bestDistanceSquared = rightDistanceSquared;
+            }
+         }
+
+         int nextRadius = radius + 1;
+         if (bestClass != Integer.MIN_VALUE && bestDistanceSquared < nextRadius * nextRadius) {
+            break;
+         }
+      }
+
+      return bestClass;
+   }
+
+   private static boolean isLandCoverClass(int coverClass) {
+      return coverClass != Integer.MIN_VALUE
+         && coverClass != NO_DATA_CLASS
+         && coverClass != WATER_CLASS
+         && coverClass != MANGROVES_CLASS;
+   }
+
+   private static int squaredDistance(int centerX, int centerY, int x, int y) {
+      int dx = x - centerX;
+      int dy = y - centerY;
+      return dx * dx + dy * dy;
    }
 
    private int sampleCoverClass(double blockX, double blockZ, double worldScale, double previewResolutionMeters, boolean localOnly) {
@@ -654,11 +849,15 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
       if (Files.exists(cachePath)) {
          return TellusLandCoverSource.GeoTiffTile.open(cachePath);
       } else {
+         long generation = TellusCacheRegistry.generation(TellusCacheDomain.LAND_COVER);
          byte[] data = this.downloadTile(key);
          if (data == null) {
             return TellusLandCoverSource.GeoTiffTile.MISSING;
          } else {
-            this.cacheTile(cachePath, data);
+            if (!this.cacheTile(cachePath, data, generation)) {
+               throw new IOException("Discarded stale land cover cache write for " + key);
+            }
+
             return TellusLandCoverSource.GeoTiffTile.open(cachePath);
          }
       }
@@ -690,14 +889,12 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
       }
    }
 
-   private void cacheTile(Path cachePath, byte[] data) {
+   private boolean cacheTile(Path cachePath, byte[] data, long generation) {
       try {
-         Files.createDirectories(cachePath.getParent());
-         Path tempPath = cachePath.resolveSibling(cachePath.getFileName() + ".tmp");
-         Files.write(tempPath, data);
-         Files.move(tempPath, cachePath, StandardCopyOption.REPLACE_EXISTING);
+         return TellusCacheFiles.writeBytesIfCurrent(TellusCacheDomain.LAND_COVER, generation, cachePath, data);
       } catch (IOException var4) {
          Tellus.LOGGER.warn("Failed to cache land cover tile {}", cachePath, var4);
+         return false;
       }
    }
 
@@ -807,6 +1004,10 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
    public void clearCache() {
       this.cache.invalidateAll();
       this.cache.cleanUp();
+      this.nearestLandCache.invalidateAll();
+      this.nearestLandCache.cleanUp();
+      this.distantNearestLandCache.invalidateAll();
+      this.distantNearestLandCache.cleanUp();
    }
 
    private static final class GeoTiffTile {
@@ -1219,6 +1420,15 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
    }
 
    private record ContinuousPixel(double x, double y) {
+   }
+
+   private record NearestLandKey(int tileLat, int tileLon, int pixelX, int pixelY) {
+   }
+
+   private enum NearestLandLookupMode {
+      BLOCKING,
+      LOCAL_ONLY,
+      MEMORY_ONLY
    }
 
    private record TileKey(int lat, int lon) {

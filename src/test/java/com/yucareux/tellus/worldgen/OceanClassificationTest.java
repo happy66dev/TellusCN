@@ -15,9 +15,37 @@ class OceanClassificationTest {
    }
 
    @Test
+   void classifiesKnownOceanNoDataAboveSeaAsOceanFallback() {
+      boolean ocean = OceanClassification.isOcean(false, TellusLandMaskSource.LandMaskSample.known(false), 80, 0, 63);
+
+      assertTrue(ocean);
+   }
+
+   @Test
    void keepsBelowSeaInlandWaterAsInland() {
       boolean ocean = OceanClassification.isOcean(false, TellusLandMaskSource.LandMaskSample.known(true), 62, 80, 63);
 
       assertFalse(ocean);
+   }
+
+   @Test
+   void strictOvertureRejectsEsaMarineWaterWithoutOsmHint() {
+      boolean ocean = OceanClassification.isOcean(false, true, TellusLandMaskSource.LandMaskSample.known(false), 62, 80, 63);
+
+      assertFalse(ocean);
+   }
+
+   @Test
+   void strictOvertureRejectsUnhintedUnknownWater() {
+      boolean ocean = OceanClassification.isOcean(false, true, TellusLandMaskSource.LandMaskSample.unknown(), 62, 80, 63);
+
+      assertFalse(ocean);
+   }
+
+   @Test
+   void strictOvertureStillAcceptsOceanHint() {
+      boolean ocean = OceanClassification.isOcean(true, true, TellusLandMaskSource.LandMaskSample.known(true), 80, 80, 63);
+
+      assertTrue(ocean);
    }
 }

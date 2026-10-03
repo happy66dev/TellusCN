@@ -66,7 +66,12 @@ public record EarthGeneratorSettings(
    EarthGeneratorSettings.DemSelection demSelection,
    boolean enableRoads,
    boolean enableBuildings,
-   boolean enableWater
+   boolean enableWater,
+   boolean thinShellTerrain,
+   boolean climateBasedBuiltUpTerrain,
+   boolean randomBiomes,
+   double randomBiomeDensity,
+   long randomBiomeSeed
 ) {
    public static final double DEFAULT_SPAWN_LATITUDE = 27.9881;
    public static final double DEFAULT_SPAWN_LONGITUDE = 86.925;
@@ -87,6 +92,10 @@ public record EarthGeneratorSettings(
    private static final int FIXED_DH_OSM_ROAD_MAX_DETAIL = 6;
    private static final int FIXED_DH_OSM_BUILDING_MAX_DETAIL = 6;
    private static final boolean FIXED_DH_OSM_NON_BLOCKING_FETCH = true;
+   public static final double DEFAULT_RANDOM_BIOME_DENSITY = 0.12;
+   public static final long DEFAULT_RANDOM_BIOME_SEED = 0L;
+   private static final double MIN_RANDOM_BIOME_DENSITY = 0.0;
+   private static final double MAX_RANDOM_BIOME_DENSITY = 0.4;
    public static final EarthGeneratorSettings DEFAULT = new EarthGeneratorSettings(
       30.0,
       1.0,
@@ -137,7 +146,12 @@ public record EarthGeneratorSettings(
       EarthGeneratorSettings.DemSelection.automaticSelection(),
       false,
       false,
-      false
+      true,
+      false,
+      false,
+      false,
+      DEFAULT_RANDOM_BIOME_DENSITY,
+      DEFAULT_RANDOM_BIOME_SEED
    );
    private static final MapCodec<EarthGeneratorSettings.BaseToggles> BASE_TOGGLES_CODEC = RecordCodecBuilder.mapCodec(
       instance -> instance.group(
@@ -279,6 +293,15 @@ public record EarthGeneratorSettings(
    private static final MapCodec<Boolean> ENABLE_ROADS_CODEC = Codec.BOOL.fieldOf("enable_roads").orElse(DEFAULT.enableRoads());
    private static final MapCodec<Boolean> ENABLE_BUILDINGS_CODEC = Codec.BOOL.fieldOf("enable_buildings").orElse(DEFAULT.enableBuildings());
    private static final MapCodec<Boolean> ENABLE_WATER_CODEC = Codec.BOOL.fieldOf("enable_water").orElse(DEFAULT.enableWater());
+   private static final MapCodec<Boolean> THIN_SHELL_TERRAIN_CODEC = Codec.BOOL.fieldOf("thin_shell_terrain").orElse(DEFAULT.thinShellTerrain());
+   private static final MapCodec<Boolean> CLIMATE_BASED_BUILT_UP_TERRAIN_CODEC = Codec.BOOL
+      .fieldOf("climate_based_built_up_terrain")
+      .orElse(DEFAULT.climateBasedBuiltUpTerrain());
+   private static final MapCodec<Boolean> RANDOM_BIOMES_CODEC = Codec.BOOL.fieldOf("random_biomes").orElse(DEFAULT.randomBiomes());
+   private static final MapCodec<Double> RANDOM_BIOME_DENSITY_CODEC = Codec.DOUBLE
+      .fieldOf("random_biome_density")
+      .orElse(DEFAULT.randomBiomeDensity());
+   private static final MapCodec<Long> RANDOM_BIOME_SEED_CODEC = Codec.LONG.fieldOf("random_biome_seed").orElse(DEFAULT.randomBiomeSeed());
    private static final MapCodec<Boolean> VOXY_CHUNK_PREGEN_ENABLED_CODEC = Codec.BOOL
       .fieldOf("voxy_chunk_pregen_enabled")
       .orElse(DEFAULT.voxyChunkPregenEnabled());
@@ -343,6 +366,11 @@ public record EarthGeneratorSettings(
             builder = EarthGeneratorSettings.ENABLE_ROADS_CODEC.encode(input.enableRoads(), ops, builder);
             builder = EarthGeneratorSettings.ENABLE_BUILDINGS_CODEC.encode(input.enableBuildings(), ops, builder);
             builder = EarthGeneratorSettings.ENABLE_WATER_CODEC.encode(input.enableWater(), ops, builder);
+            builder = EarthGeneratorSettings.THIN_SHELL_TERRAIN_CODEC.encode(input.thinShellTerrain(), ops, builder);
+            builder = EarthGeneratorSettings.CLIMATE_BASED_BUILT_UP_TERRAIN_CODEC.encode(input.climateBasedBuiltUpTerrain(), ops, builder);
+            builder = EarthGeneratorSettings.RANDOM_BIOMES_CODEC.encode(input.randomBiomes(), ops, builder);
+            builder = EarthGeneratorSettings.RANDOM_BIOME_DENSITY_CODEC.encode(input.randomBiomeDensity(), ops, builder);
+            builder = EarthGeneratorSettings.RANDOM_BIOME_SEED_CODEC.encode(input.randomBiomeSeed(), ops, builder);
             builder = EarthGeneratorSettings.VOXY_CHUNK_PREGEN_ENABLED_CODEC.encode(input.voxyChunkPregenEnabled(), ops, builder);
             builder = EarthGeneratorSettings.VOXY_CHUNK_PREGEN_MAX_RADIUS_CODEC.encode(input.voxyChunkPregenMaxRadius(), ops, builder);
             builder = EarthGeneratorSettings.VOXY_CHUNK_PREGEN_CHUNKS_PER_TICK_CODEC.encode(input.voxyChunkPregenChunksPerTick(), ops, builder);
@@ -367,6 +395,11 @@ public record EarthGeneratorSettings(
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.ENABLE_ROADS_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.ENABLE_BUILDINGS_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.ENABLE_WATER_CODEC.keys(ops));
+            baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.THIN_SHELL_TERRAIN_CODEC.keys(ops));
+            baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.CLIMATE_BASED_BUILT_UP_TERRAIN_CODEC.keys(ops));
+            baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.RANDOM_BIOMES_CODEC.keys(ops));
+            baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.RANDOM_BIOME_DENSITY_CODEC.keys(ops));
+            baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.RANDOM_BIOME_SEED_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.VOXY_CHUNK_PREGEN_ENABLED_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.VOXY_CHUNK_PREGEN_MAX_RADIUS_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.VOXY_CHUNK_PREGEN_CHUNKS_PER_TICK_CODEC.keys(ops));
@@ -394,6 +427,11 @@ public record EarthGeneratorSettings(
             DataResult<Boolean> enableRoads = EarthGeneratorSettings.ENABLE_ROADS_CODEC.decode(ops, input);
             DataResult<Boolean> enableBuildings = EarthGeneratorSettings.ENABLE_BUILDINGS_CODEC.decode(ops, input);
             DataResult<Boolean> enableWater = EarthGeneratorSettings.ENABLE_WATER_CODEC.decode(ops, input);
+            DataResult<Boolean> thinShellTerrain = EarthGeneratorSettings.THIN_SHELL_TERRAIN_CODEC.decode(ops, input);
+            DataResult<Boolean> climateBasedBuiltUpTerrain = EarthGeneratorSettings.CLIMATE_BASED_BUILT_UP_TERRAIN_CODEC.decode(ops, input);
+            DataResult<Boolean> randomBiomes = EarthGeneratorSettings.RANDOM_BIOMES_CODEC.decode(ops, input);
+            DataResult<Double> randomBiomeDensity = EarthGeneratorSettings.RANDOM_BIOME_DENSITY_CODEC.decode(ops, input);
+            DataResult<Long> randomBiomeSeed = EarthGeneratorSettings.RANDOM_BIOME_SEED_CODEC.decode(ops, input);
             DataResult<Boolean> voxyChunkPregenEnabled = EarthGeneratorSettings.VOXY_CHUNK_PREGEN_ENABLED_CODEC.decode(ops, input);
             DataResult<Integer> voxyChunkPregenMaxRadius = EarthGeneratorSettings.VOXY_CHUNK_PREGEN_MAX_RADIUS_CODEC.decode(ops, input);
             DataResult<Integer> voxyChunkPregenChunksPerTick = EarthGeneratorSettings.VOXY_CHUNK_PREGEN_CHUNKS_PER_TICK_CODEC.decode(ops, input);
@@ -435,10 +473,15 @@ public record EarthGeneratorSettings(
             settings = settings.apply2(EarthGeneratorSettings::applyEnableRoads, enableRoads);
             settings = settings.apply2(EarthGeneratorSettings::applyEnableBuildings, enableBuildings);
             settings = settings.apply2(EarthGeneratorSettings::applyEnableWater, enableWater);
+            settings = settings.apply2(EarthGeneratorSettings::applyClimateBasedBuiltUpTerrain, climateBasedBuiltUpTerrain);
             settings = settings.apply2(EarthGeneratorSettings::applyDeepDark, deepDark);
             settings = settings.apply2(EarthGeneratorSettings::applyGeodes, geodes);
             settings = settings.apply2(EarthGeneratorSettings::withStructureSettings, structures);
-            return settings.apply2(EarthGeneratorSettings::applyTrailRuins, trailRuins);
+            settings = settings.apply2(EarthGeneratorSettings::applyTrailRuins, trailRuins);
+            settings = settings.apply2(EarthGeneratorSettings::applyThinShellTerrain, thinShellTerrain);
+            settings = settings.apply2(EarthGeneratorSettings::applyRandomBiomes, randomBiomes);
+            settings = settings.apply2(EarthGeneratorSettings::applyRandomBiomeDensity, randomBiomeDensity);
+            return settings.apply2(EarthGeneratorSettings::applyRandomBiomeSeed, randomBiomeSeed);
          }
 
          public <T> Stream<T> keys(DynamicOps<T> ops) {
@@ -456,6 +499,11 @@ public record EarthGeneratorSettings(
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.ENABLE_ROADS_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.ENABLE_BUILDINGS_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.ENABLE_WATER_CODEC.keys(ops));
+            baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.THIN_SHELL_TERRAIN_CODEC.keys(ops));
+            baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.CLIMATE_BASED_BUILT_UP_TERRAIN_CODEC.keys(ops));
+            baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.RANDOM_BIOMES_CODEC.keys(ops));
+            baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.RANDOM_BIOME_DENSITY_CODEC.keys(ops));
+            baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.RANDOM_BIOME_SEED_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.VOXY_CHUNK_PREGEN_ENABLED_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.VOXY_CHUNK_PREGEN_MAX_RADIUS_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.VOXY_CHUNK_PREGEN_CHUNKS_PER_TICK_CODEC.keys(ops));
@@ -518,9 +566,15 @@ public record EarthGeneratorSettings(
       EarthGeneratorSettings.DemSelection demSelection,
       boolean enableRoads,
       boolean enableBuildings,
-      boolean enableWater
+      boolean enableWater,
+      boolean thinShellTerrain,
+      boolean climateBasedBuiltUpTerrain,
+      boolean randomBiomes,
+      double randomBiomeDensity,
+      long randomBiomeSeed
    ) {
       worldScale = clampWorldScale(worldScale);
+      randomBiomeDensity = Mth.clamp(randomBiomeDensity, MIN_RANDOM_BIOME_DENSITY, MAX_RANDOM_BIOME_DENSITY);
       voxyChunkPregenMaxRadius = Mth.clamp(voxyChunkPregenMaxRadius, 0, MAX_VOXY_PREGEN_RADIUS);
       voxyChunkPregenChunksPerTick = Mth.clamp(voxyChunkPregenChunksPerTick, 1, MAX_VOXY_PREGEN_CHUNKS_PER_TICK);
       distantHorizonsOsmFeatures = FIXED_DH_OSM_FEATURES;
@@ -577,6 +631,11 @@ public record EarthGeneratorSettings(
       this.enableRoads = enableRoads;
       this.enableBuildings = enableBuildings;
       this.enableWater = enableWater;
+      this.thinShellTerrain = thinShellTerrain;
+      this.climateBasedBuiltUpTerrain = climateBasedBuiltUpTerrain;
+      this.randomBiomes = randomBiomes;
+      this.randomBiomeDensity = randomBiomeDensity;
+      this.randomBiomeSeed = randomBiomeSeed;
    }
 
    public boolean isSeaLevelAutomatic() {
@@ -761,6 +820,26 @@ public record EarthGeneratorSettings(
       return settings.withEnableWater(Objects.requireNonNull(enabled, "enableWater"));
    }
 
+   private static EarthGeneratorSettings applyThinShellTerrain(EarthGeneratorSettings settings, Boolean enabled) {
+      return settings.withThinShellTerrain(Objects.requireNonNull(enabled, "thinShellTerrain"));
+   }
+
+   private static EarthGeneratorSettings applyClimateBasedBuiltUpTerrain(EarthGeneratorSettings settings, Boolean enabled) {
+      return settings.withClimateBasedBuiltUpTerrain(Objects.requireNonNull(enabled, "climateBasedBuiltUpTerrain"));
+   }
+
+   private static EarthGeneratorSettings applyRandomBiomes(EarthGeneratorSettings settings, Boolean enabled) {
+      return settings.withRandomBiomes(Objects.requireNonNull(enabled, "randomBiomes"));
+   }
+
+   private static EarthGeneratorSettings applyRandomBiomeDensity(EarthGeneratorSettings settings, Double density) {
+      return settings.withRandomBiomeDensity(Objects.requireNonNull(density, "randomBiomeDensity"));
+   }
+
+   private static EarthGeneratorSettings applyRandomBiomeSeed(EarthGeneratorSettings settings, Long seed) {
+      return settings.withRandomBiomeSeed(Objects.requireNonNull(seed, "randomBiomeSeed"));
+   }
+
    private static EarthGeneratorSettings.SettingsBase applyVoxyChunkPregenEnabled(EarthGeneratorSettings.SettingsBase settings, Boolean enabled) {
       return settings.withVoxyChunkPregenEnabled(Objects.requireNonNull(enabled, "voxyChunkPregenEnabled"));
    }
@@ -824,7 +903,12 @@ public record EarthGeneratorSettings(
          this.demSelection,
          this.enableRoads,
          this.enableBuildings,
-         this.enableWater
+         this.enableWater,
+         this.thinShellTerrain,
+         this.climateBasedBuiltUpTerrain,
+         this.randomBiomes,
+         this.randomBiomeDensity,
+         this.randomBiomeSeed
       );
    }
 
@@ -891,7 +975,12 @@ public record EarthGeneratorSettings(
          this.demSelection,
          this.enableRoads,
          this.enableBuildings,
-         this.enableWater
+         this.enableWater,
+         this.thinShellTerrain,
+         this.climateBasedBuiltUpTerrain,
+         this.randomBiomes,
+         this.randomBiomeDensity,
+         this.randomBiomeSeed
       );
    }
 
@@ -946,7 +1035,12 @@ public record EarthGeneratorSettings(
          this.demSelection,
          this.enableRoads,
          this.enableBuildings,
-         this.enableWater
+         this.enableWater,
+         this.thinShellTerrain,
+         this.climateBasedBuiltUpTerrain,
+         this.randomBiomes,
+         this.randomBiomeDensity,
+         this.randomBiomeSeed
       );
    }
 
@@ -1001,7 +1095,12 @@ public record EarthGeneratorSettings(
          this.demSelection,
          this.enableRoads,
          this.enableBuildings,
-         this.enableWater
+         this.enableWater,
+         this.thinShellTerrain,
+         this.climateBasedBuiltUpTerrain,
+         this.randomBiomes,
+         this.randomBiomeDensity,
+         this.randomBiomeSeed
       );
    }
 
@@ -1056,7 +1155,12 @@ public record EarthGeneratorSettings(
          this.demSelection,
          this.enableRoads,
          this.enableBuildings,
-         this.enableWater
+         this.enableWater,
+         this.thinShellTerrain,
+         this.climateBasedBuiltUpTerrain,
+         this.randomBiomes,
+         this.randomBiomeDensity,
+         this.randomBiomeSeed
       );
    }
 
@@ -1111,7 +1215,12 @@ public record EarthGeneratorSettings(
          this.demSelection,
          this.enableRoads,
          this.enableBuildings,
-         this.enableWater
+         this.enableWater,
+         this.thinShellTerrain,
+         this.climateBasedBuiltUpTerrain,
+         this.randomBiomes,
+         this.randomBiomeDensity,
+         this.randomBiomeSeed
       );
    }
 
@@ -1166,7 +1275,12 @@ public record EarthGeneratorSettings(
          this.demSelection,
          this.enableRoads,
          this.enableBuildings,
-         this.enableWater
+         this.enableWater,
+         this.thinShellTerrain,
+         this.climateBasedBuiltUpTerrain,
+         this.randomBiomes,
+         this.randomBiomeDensity,
+         this.randomBiomeSeed
       );
    }
 
@@ -1221,7 +1335,12 @@ public record EarthGeneratorSettings(
          this.demSelection,
          enableRoads,
          this.enableBuildings,
-         this.enableWater
+         this.enableWater,
+         this.thinShellTerrain,
+         this.climateBasedBuiltUpTerrain,
+         this.randomBiomes,
+         this.randomBiomeDensity,
+         this.randomBiomeSeed
       );
    }
 
@@ -1276,7 +1395,12 @@ public record EarthGeneratorSettings(
          this.demSelection,
          this.enableRoads,
          enableBuildings,
-         this.enableWater
+         this.enableWater,
+         this.thinShellTerrain,
+         this.climateBasedBuiltUpTerrain,
+         this.randomBiomes,
+         this.randomBiomeDensity,
+         this.randomBiomeSeed
       );
    }
 
@@ -1331,7 +1455,204 @@ public record EarthGeneratorSettings(
          this.demSelection,
          this.enableRoads,
          this.enableBuildings,
-         enableWater
+         enableWater,
+         this.thinShellTerrain,
+         this.climateBasedBuiltUpTerrain,
+         this.randomBiomes,
+         this.randomBiomeDensity,
+         this.randomBiomeSeed
+      );
+   }
+
+   private EarthGeneratorSettings withThinShellTerrain(boolean thinShellTerrain) {
+      return new EarthGeneratorSettings(
+         this.worldScale,
+         this.terrestrialHeightScale,
+         this.oceanicHeightScale,
+         this.heightOffset,
+         this.seaLevel,
+         this.spawnLatitude,
+         this.spawnLongitude,
+         this.minAltitude,
+         this.maxAltitude,
+         this.riverLakeShorelineBlend,
+         this.oceanShorelineBlend,
+         this.shorelineBlendCliffLimit,
+         this.caveGeneration,
+         this.oreDistribution,
+         this.lavaPools,
+         this.addStrongholds,
+         this.addVillages,
+         this.addMineshafts,
+         this.addOceanMonuments,
+         this.addWoodlandMansions,
+         this.addDesertTemples,
+         this.addJungleTemples,
+         this.addPillagerOutposts,
+         this.addRuinedPortals,
+         this.addShipwrecks,
+         this.addOceanRuins,
+         this.addBuriedTreasure,
+         this.addIgloos,
+         this.addWitchHuts,
+         this.addAncientCities,
+         this.addTrialChambers,
+         this.addTrailRuins,
+         this.deepDark,
+         this.geodes,
+         this.distantHorizonsWaterResolver,
+         this.distantHorizonsOsmFeatures,
+         this.distantHorizonsOsmRoadMaxDetail,
+         this.distantHorizonsOsmBuildingMaxDetail,
+         this.distantHorizonsOsmNonBlockingFetch,
+         this.realtimeTime,
+         this.realtimeWeather,
+         this.historicalSnow,
+         this.voxyChunkPregenEnabled,
+         this.voxyChunkPregenMaxRadius,
+         this.voxyChunkPregenChunksPerTick,
+         this.distantHorizonsRenderMode,
+         this.demSelection,
+         this.enableRoads,
+         this.enableBuildings,
+         this.enableWater,
+         thinShellTerrain,
+         this.climateBasedBuiltUpTerrain,
+         this.randomBiomes,
+         this.randomBiomeDensity,
+         this.randomBiomeSeed
+      );
+   }
+
+   private EarthGeneratorSettings withClimateBasedBuiltUpTerrain(boolean climateBasedBuiltUpTerrain) {
+      return new EarthGeneratorSettings(
+         this.worldScale,
+         this.terrestrialHeightScale,
+         this.oceanicHeightScale,
+         this.heightOffset,
+         this.seaLevel,
+         this.spawnLatitude,
+         this.spawnLongitude,
+         this.minAltitude,
+         this.maxAltitude,
+         this.riverLakeShorelineBlend,
+         this.oceanShorelineBlend,
+         this.shorelineBlendCliffLimit,
+         this.caveGeneration,
+         this.oreDistribution,
+         this.lavaPools,
+         this.addStrongholds,
+         this.addVillages,
+         this.addMineshafts,
+         this.addOceanMonuments,
+         this.addWoodlandMansions,
+         this.addDesertTemples,
+         this.addJungleTemples,
+         this.addPillagerOutposts,
+         this.addRuinedPortals,
+         this.addShipwrecks,
+         this.addOceanRuins,
+         this.addBuriedTreasure,
+         this.addIgloos,
+         this.addWitchHuts,
+         this.addAncientCities,
+         this.addTrialChambers,
+         this.addTrailRuins,
+         this.deepDark,
+         this.geodes,
+         this.distantHorizonsWaterResolver,
+         this.distantHorizonsOsmFeatures,
+         this.distantHorizonsOsmRoadMaxDetail,
+         this.distantHorizonsOsmBuildingMaxDetail,
+         this.distantHorizonsOsmNonBlockingFetch,
+         this.realtimeTime,
+         this.realtimeWeather,
+         this.historicalSnow,
+         this.voxyChunkPregenEnabled,
+         this.voxyChunkPregenMaxRadius,
+         this.voxyChunkPregenChunksPerTick,
+         this.distantHorizonsRenderMode,
+         this.demSelection,
+         this.enableRoads,
+         this.enableBuildings,
+         this.enableWater,
+         this.thinShellTerrain,
+         climateBasedBuiltUpTerrain,
+         this.randomBiomes,
+         this.randomBiomeDensity,
+         this.randomBiomeSeed
+      );
+   }
+
+   private EarthGeneratorSettings withRandomBiomes(boolean randomBiomes) {
+      return this.withRandomBiomeSettings(randomBiomes, this.randomBiomeDensity, this.randomBiomeSeed);
+   }
+
+   private EarthGeneratorSettings withRandomBiomeDensity(double randomBiomeDensity) {
+      return this.withRandomBiomeSettings(this.randomBiomes, randomBiomeDensity, this.randomBiomeSeed);
+   }
+
+   private EarthGeneratorSettings withRandomBiomeSeed(long randomBiomeSeed) {
+      return this.withRandomBiomeSettings(this.randomBiomes, this.randomBiomeDensity, randomBiomeSeed);
+   }
+
+   private EarthGeneratorSettings withRandomBiomeSettings(boolean randomBiomes, double randomBiomeDensity, long randomBiomeSeed) {
+      return new EarthGeneratorSettings(
+         this.worldScale,
+         this.terrestrialHeightScale,
+         this.oceanicHeightScale,
+         this.heightOffset,
+         this.seaLevel,
+         this.spawnLatitude,
+         this.spawnLongitude,
+         this.minAltitude,
+         this.maxAltitude,
+         this.riverLakeShorelineBlend,
+         this.oceanShorelineBlend,
+         this.shorelineBlendCliffLimit,
+         this.caveGeneration,
+         this.oreDistribution,
+         this.lavaPools,
+         this.addStrongholds,
+         this.addVillages,
+         this.addMineshafts,
+         this.addOceanMonuments,
+         this.addWoodlandMansions,
+         this.addDesertTemples,
+         this.addJungleTemples,
+         this.addPillagerOutposts,
+         this.addRuinedPortals,
+         this.addShipwrecks,
+         this.addOceanRuins,
+         this.addBuriedTreasure,
+         this.addIgloos,
+         this.addWitchHuts,
+         this.addAncientCities,
+         this.addTrialChambers,
+         this.addTrailRuins,
+         this.deepDark,
+         this.geodes,
+         this.distantHorizonsWaterResolver,
+         this.distantHorizonsOsmFeatures,
+         this.distantHorizonsOsmRoadMaxDetail,
+         this.distantHorizonsOsmBuildingMaxDetail,
+         this.distantHorizonsOsmNonBlockingFetch,
+         this.realtimeTime,
+         this.realtimeWeather,
+         this.historicalSnow,
+         this.voxyChunkPregenEnabled,
+         this.voxyChunkPregenMaxRadius,
+         this.voxyChunkPregenChunksPerTick,
+         this.distantHorizonsRenderMode,
+         this.demSelection,
+         this.enableRoads,
+         this.enableBuildings,
+         this.enableWater,
+         this.thinShellTerrain,
+         this.climateBasedBuiltUpTerrain,
+         randomBiomes,
+         randomBiomeDensity,
+         randomBiomeSeed
       );
    }
 
@@ -1452,7 +1773,8 @@ public record EarthGeneratorSettings(
       JAPANGSI("japangsi", true, 1 << 5),
       USGS("usgs", true, 1 << 6),
       COPERNICUS("copernicus", true, 1 << 7),
-      ARCTICDEM("arcticdem", true, 1 << 8);
+      ARCTICDEM("arcticdem", true, 1 << 8),
+      GEBCO2026("gebco2026", true, 1 << 9);
 
       public static final Codec<EarthGeneratorSettings.DemProvider> CODEC = Codec.STRING
          .xmap(EarthGeneratorSettings.DemProvider::fromId, EarthGeneratorSettings.DemProvider::id);
@@ -1472,6 +1794,10 @@ public record EarthGeneratorSettings(
 
       public boolean userSelectable() {
          return this.userSelectable;
+      }
+
+      public boolean available() {
+         return this != GEBCO2026;
       }
 
       public int selectionBit() {
@@ -1500,6 +1826,7 @@ public record EarthGeneratorSettings(
    public record DemSelection(boolean automatic, int enabledProviderMask) {
       private static final List<EarthGeneratorSettings.DemProvider> USER_SELECTABLE_PROVIDERS = List.of(
          EarthGeneratorSettings.DemProvider.TERRARIUM,
+         EarthGeneratorSettings.DemProvider.GEBCO2026,
          EarthGeneratorSettings.DemProvider.SWISSALTI3D,
          EarthGeneratorSettings.DemProvider.AHN,
          EarthGeneratorSettings.DemProvider.CANELEVATION,
@@ -1512,7 +1839,10 @@ public record EarthGeneratorSettings(
       private static final int GLOBAL_COVERAGE_MASK = EarthGeneratorSettings.DemProvider.TERRARIUM.selectionBit()
          | EarthGeneratorSettings.DemProvider.COPERNICUS.selectionBit();
       private static final int FULL_USER_SELECTABLE_MASK = computeFullUserSelectableMask();
-      private static final List<String> FULL_PROVIDER_IDS = USER_SELECTABLE_PROVIDERS.stream().map(EarthGeneratorSettings.DemProvider::id).toList();
+      private static final List<String> FULL_PROVIDER_IDS = USER_SELECTABLE_PROVIDERS.stream()
+         .filter(EarthGeneratorSettings.DemProvider::available)
+         .map(EarthGeneratorSettings.DemProvider::id)
+         .toList();
       private static final EarthGeneratorSettings.DemSelection AUTOMATIC_SELECTION = new EarthGeneratorSettings.DemSelection(true, FULL_USER_SELECTABLE_MASK);
 
       public DemSelection {
@@ -1548,7 +1878,7 @@ public record EarthGeneratorSettings(
       }
 
       public boolean isEnabled(EarthGeneratorSettings.DemProvider provider) {
-         return provider != null && provider.userSelectable() && (this.enabledProviderMask & provider.selectionBit()) != 0;
+         return provider != null && provider.userSelectable() && provider.available() && (this.enabledProviderMask & provider.selectionBit()) != 0;
       }
 
       public boolean usesPolarDem() {
@@ -1557,6 +1887,10 @@ public record EarthGeneratorSettings(
 
       public boolean terrainTilesEnabled() {
          return this.isEnabled(EarthGeneratorSettings.DemProvider.TERRARIUM);
+      }
+
+      public boolean gebco2026Enabled() {
+         return this.isEnabled(EarthGeneratorSettings.DemProvider.GEBCO2026);
       }
 
       public boolean copernicusEnabled() {
@@ -1602,7 +1936,7 @@ public record EarthGeneratorSettings(
          }
 
          for (EarthGeneratorSettings.DemProvider provider : providers) {
-            if (provider != null && provider.userSelectable()) {
+            if (provider != null && provider.userSelectable() && provider.available()) {
                mask |= provider.selectionBit();
             }
          }
@@ -1618,7 +1952,7 @@ public record EarthGeneratorSettings(
 
          for (String providerId : providerIds) {
             EarthGeneratorSettings.DemProvider provider = EarthGeneratorSettings.DemProvider.fromId(providerId);
-            if (provider.userSelectable()) {
+            if (provider.userSelectable() && provider.available()) {
                mask |= provider.selectionBit();
             }
          }
@@ -1630,7 +1964,7 @@ public record EarthGeneratorSettings(
          int normalized = 0;
 
          for (EarthGeneratorSettings.DemProvider provider : USER_SELECTABLE_PROVIDERS) {
-            if ((enabledProviderMask & provider.selectionBit()) != 0) {
+            if (provider.available() && (enabledProviderMask & provider.selectionBit()) != 0) {
                normalized |= provider.selectionBit();
             }
          }
@@ -1646,7 +1980,9 @@ public record EarthGeneratorSettings(
          int mask = 0;
 
          for (EarthGeneratorSettings.DemProvider provider : USER_SELECTABLE_PROVIDERS) {
-            mask |= provider.selectionBit();
+            if (provider.available()) {
+               mask |= provider.selectionBit();
+            }
          }
 
          return mask;
@@ -2129,7 +2465,12 @@ public record EarthGeneratorSettings(
             this.demSelection,
             EarthGeneratorSettings.DEFAULT.enableRoads(),
             EarthGeneratorSettings.DEFAULT.enableBuildings(),
-            EarthGeneratorSettings.DEFAULT.enableWater()
+            EarthGeneratorSettings.DEFAULT.enableWater(),
+            EarthGeneratorSettings.DEFAULT.thinShellTerrain(),
+            EarthGeneratorSettings.DEFAULT.climateBasedBuiltUpTerrain(),
+            EarthGeneratorSettings.DEFAULT.randomBiomes(),
+            EarthGeneratorSettings.DEFAULT.randomBiomeDensity(),
+            EarthGeneratorSettings.DEFAULT.randomBiomeSeed()
          );
       }
    }

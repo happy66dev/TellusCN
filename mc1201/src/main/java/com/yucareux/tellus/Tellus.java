@@ -12,8 +12,10 @@ import com.yucareux.tellus.integration.distant_horizons.DistantHorizonsIntegrati
 import com.yucareux.tellus.integration.voxy.TellusVoxyPregenManager;
 import com.yucareux.tellus.network.GeoTpOpenMapPayload;
 import com.yucareux.tellus.network.GeoTpTeleportPayload;
+import com.yucareux.tellus.world.data.elevation.Gebco2026ElevationSource;
 import com.yucareux.tellus.world.realtime.TellusRealtimeManager;
 import com.yucareux.tellus.world.realtime.TellusRealtimeState;
+import com.yucareux.tellus.world.realtime.WeatherTemperaturePolicy;
 import com.yucareux.tellus.worldgen.EarthBiomeSource;
 import com.yucareux.tellus.worldgen.EarthChunkGenerator;
 import com.yucareux.tellus.worldgen.EarthGeneratorSettings;
@@ -28,8 +30,11 @@ import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerChunkEvents;
@@ -96,6 +101,7 @@ public class Tellus implements ModInitializer {
    private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
    private static final TellusRealtimeManager REALTIME_MANAGER = new TellusRealtimeManager();
    private static final TellusVoxyPregenManager VOXY_PREGEN_MANAGER = new TellusVoxyPregenManager();
+   private static final Map<UUID, Long> GEBCO_WARNED_OUTAGES = new ConcurrentHashMap<>();
    public static final Logger LOGGER = LoggerFactory.getLogger("tellus");
 
    
@@ -228,9 +234,11 @@ public class Tellus implements ModInitializer {
       ServerLifecycleEvents.SERVER_STOPPING.register((ServerStopping)server -> {
          REALTIME_MANAGER.onServerStopping(server);
          VOXY_PREGEN_MANAGER.shutdown();
+         GEBCO_WARNED_OUTAGES.clear();
       });
       ServerTickEvents.END_SERVER_TICK.register(REALTIME_MANAGER::onServerTick);
       ServerTickEvents.END_SERVER_TICK.register(VOXY_PREGEN_MANAGER::onServerTick);
+      ServerTickEvents.END_SERVER_TICK.register(Tellus::notifyGebcoFallback);
       ServerTickEvents.END_SERVER_TICK.register(server -> {
          for (ServerLevel level : server.getAllLevels()) {
             ChunkGenerator generator = level.getChunkSource().getGenerator();
@@ -251,6 +259,26 @@ public class Tellus implements ModInitializer {
       }
 
       LOGGER.info("Tellus worldgen initialized");
+   }
+
+   private static void notifyGebcoFallback(MinecraftServer server) {
+      if (!Gebco2026ElevationSource.isRemoteUnavailable()) {
+         return;
+      }
+
+      ServerLevel overworld = server.getLevel(Level.OVERWORLD);
+      if (overworld == null
+         || !(overworld.getChunkSource().getGenerator() instanceof EarthChunkGenerator earthGenerator)
+         || !earthGenerator.settings().demSelection().gebco2026Enabled()) {
+         return;
+      }
+
+      long outageId = Gebco2026ElevationSource.remoteOutageId();
+      for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+         if (!Objects.equals(GEBCO_WARNED_OUTAGES.put(player.getUUID(), outageId), outageId)) {
+            player.sendSystemMessage(Component.translatable("tellus.warning.gebco.chat").withStyle(ChatFormatting.RED));
+         }
+      }
    }
 
    private static int openGeoTpMap(CommandSourceStack source) {
@@ -277,90 +305,117 @@ public class Tellus implements ModInitializer {
       if (player == null) {
          source.sendFailure(Component.literal("Tellus: /tellus weather can only be used by a player."));
          return 0;
-      } else {
-         ServerLevel level = player.serverLevel();
-         if (!(level.getChunkSource().getGenerator() instanceof EarthChunkGenerator earthGenerator)) {
-            source.sendFailure(Component.literal("Tellus: /tellus weather is only available in Tellus worlds."));
-            return 0;
-         } else {
-            BlockPos pos = player.blockPosition();
-            double latitude = clampLatitude(earthGenerator.latitudeFromBlock(pos.getZ()));
-            double longitude = clampLongitude(earthGenerator.longitudeFromBlock(pos.getX()));
-            EarthGeneratorSettings settings = earthGenerator.settings();
-            boolean realtimeTime = REALTIME_MANAGER.isRealtimeTimeEnabled(settings);
-            boolean realtimeWeather = REALTIME_MANAGER.isRealtimeWeatherEnabled(settings);
-            boolean realtimeWeatherActive = realtimeWeather && TellusRealtimeState.isWeatherEnabled();
-            TellusRealtimeState.PrecipitationMode mode = TellusRealtimeState.precipitationMode();
-            Tellus.WeatherDisplay weather = realtimeWeatherActive ? weatherFromRealtime(mode) : weatherFromVanilla(level, pos);
-            source.sendSuccess(() -> Component.literal("Tellus Weather").withStyle(new ChatFormatting[]{ChatFormatting.GOLD, ChatFormatting.BOLD}), false);
-            String locationText = Objects.requireNonNull(String.format(Locale.ROOT, "%.4f, %.4f", latitude, longitude), "locationText");
-            source.sendSuccess(
-               () -> Component.literal("Location: ").withStyle(ChatFormatting.GRAY).append(Component.literal(locationText).withStyle(ChatFormatting.AQUA)),
-               false
-            );
-            String gameTime = Objects.requireNonNull(formatGameTime(level), "gameTime");
-            source.sendSuccess(
-               () -> Component.literal("Game time: ").withStyle(ChatFormatting.GRAY).append(Component.literal(gameTime).withStyle(ChatFormatting.YELLOW)),
-               false
-            );
-            TellusRealtimeManager.WeatherSnapshot snapshot = REALTIME_MANAGER.lastWeatherSnapshot();
-            ZoneId zone = null;
-            boolean approximateTime = true;
-            if (snapshot != null) {
-               zone = resolveZoneId(snapshot.timeZoneId());
-               approximateTime = zone == null;
-            }
+      }
 
-            if (zone == null && realtimeTime && REALTIME_MANAGER.hasTimeOffset()) {
-               ZoneId managerZone = REALTIME_MANAGER.currentTimeZone();
-               if (managerZone != null) {
-                  zone = managerZone;
-                  approximateTime = false;
-               }
-            }
+      ServerLevel level = player.serverLevel();
+      if (!(level.getChunkSource().getGenerator() instanceof EarthChunkGenerator earthGenerator)) {
+         source.sendFailure(Component.literal("Tellus: /tellus weather is only available in Tellus worlds."));
+         return 0;
+      }
 
-            if (zone == null) {
-               int offsetSeconds = approximateUtcOffsetSeconds(longitude);
-               zone = ZoneOffset.ofTotalSeconds(offsetSeconds);
-               approximateTime = true;
-            }
+      BlockPos pos = player.blockPosition();
+      source.sendSuccess(() -> Component.literal("Tellus: fetching local weather...").withStyle(ChatFormatting.GRAY), false);
+      TellusRealtimeManager.WeatherReportRequestResult requestResult = REALTIME_MANAGER.requestWeatherReport(
+         source.getServer(),
+         player.getUUID(),
+         earthGenerator,
+         pos,
+         report -> sendTellusWeatherReport(source, level, pos, earthGenerator.settings(), report)
+      );
+      if (requestResult == TellusRealtimeManager.WeatherReportRequestResult.RATE_LIMITED) {
+         source.sendFailure(Component.literal("Tellus: wait for the current weather request to finish."));
+         return 0;
+      }
+      if (requestResult == TellusRealtimeManager.WeatherReportRequestResult.UNAVAILABLE) {
+         source.sendFailure(Component.literal("Tellus: weather service is unavailable."));
+         return 0;
+      }
 
-            Instant now = REALTIME_MANAGER.currentInstant();
-            int offsetSeconds = zone.getRules().getOffset(now).getTotalSeconds();
-            String timeLabel = formatLocalTime(now, zone);
-            String utcOffsetLabel = formatUtcOffset(offsetSeconds);
-            MutableComponent timeLine = Component.literal("Real time: ")
-               .withStyle(ChatFormatting.GRAY)
-               .append(Component.literal(timeLabel + " " + utcOffsetLabel).withStyle(ChatFormatting.YELLOW));
-            if (approximateTime) {
-               timeLine.append(Component.literal(" (approx)").withStyle(ChatFormatting.DARK_GRAY));
-            }
+      return 1;
+   }
 
-            source.sendSuccess(() -> timeLine, false);
-            MutableComponent tempLine = Component.literal("Temperature: ").withStyle(ChatFormatting.GRAY);
-            if (snapshot != null) {
-               String tempLabel = Objects.requireNonNull(String.format(Locale.ROOT, "%.1f C", snapshot.temperatureC()), "tempLabel");
-               tempLine.append(Component.literal(tempLabel).withStyle(ChatFormatting.YELLOW));
-            } else {
-               tempLine.append(Component.literal("n/a").withStyle(ChatFormatting.DARK_GRAY));
-            }
-
-            source.sendSuccess(() -> tempLine, false);
-            String weatherLabel = Objects.requireNonNull(weather.label(), "weatherLabel");
-            ChatFormatting weatherColor = Objects.requireNonNull(weather.color(), "weatherColor");
-            MutableComponent weatherLine = Component.literal("Weather: ")
-               .withStyle(ChatFormatting.GRAY)
-               .append(Component.literal(weatherLabel).withStyle(weatherColor));
-            if (!realtimeWeather) {
-               weatherLine.append(Component.literal(" (vanilla)").withStyle(ChatFormatting.DARK_GRAY));
-            } else if (!realtimeWeatherActive) {
-               weatherLine.append(Component.literal(" (real-time pending)").withStyle(ChatFormatting.DARK_GRAY));
-            }
-
-            source.sendSuccess(() -> weatherLine, false);
-            return 1;
+   private static void sendTellusWeatherReport(
+      CommandSourceStack source,
+      ServerLevel level,
+      BlockPos pos,
+      EarthGeneratorSettings settings,
+      TellusRealtimeManager.WeatherReport report
+   ) {
+      boolean realtimeTime = REALTIME_MANAGER.isRealtimeTimeEnabled(settings);
+      boolean realtimeWeather = REALTIME_MANAGER.isRealtimeWeatherEnabled(settings);
+      boolean realtimeWeatherActive = realtimeWeather && TellusRealtimeState.isWeatherEnabled();
+      TellusRealtimeState.PrecipitationMode mode = TellusRealtimeState.precipitationMode();
+      Tellus.WeatherDisplay weather = realtimeWeatherActive
+         ? weatherFromRealtime(mode)
+         : weatherFromVanilla(level, pos, report.temperatureC());
+      source.sendSuccess(() -> Component.literal("Tellus Weather").withStyle(new ChatFormatting[]{ChatFormatting.GOLD, ChatFormatting.BOLD}), false);
+      String coordinates = Objects.requireNonNull(
+         String.format(Locale.ROOT, "%.4f, %.4f", report.latitude(), report.longitude()), "coordinates"
+      );
+      String locationText = report.locationName() == null || report.locationName().isBlank()
+         ? coordinates
+         : report.locationName() + " (" + coordinates + ")";
+      source.sendSuccess(
+         () -> Component.literal("Location: ").withStyle(ChatFormatting.GRAY).append(Component.literal(locationText).withStyle(ChatFormatting.AQUA)),
+         false
+      );
+      String gameTime = Objects.requireNonNull(formatGameTime(level), "gameTime");
+      source.sendSuccess(
+         () -> Component.literal("Game time: ").withStyle(ChatFormatting.GRAY).append(Component.literal(gameTime).withStyle(ChatFormatting.YELLOW)),
+         false
+      );
+      ZoneId zone = resolveZoneId(report.timeZoneId());
+      boolean approximateTime = zone == null;
+      if (zone == null && realtimeTime && REALTIME_MANAGER.hasTimeOffset()) {
+         ZoneId managerZone = REALTIME_MANAGER.currentTimeZone();
+         if (managerZone != null) {
+            zone = managerZone;
+            approximateTime = false;
          }
       }
+
+      if (zone == null) {
+         int offsetSeconds = approximateUtcOffsetSeconds(report.longitude());
+         zone = ZoneOffset.ofTotalSeconds(offsetSeconds);
+         approximateTime = true;
+      }
+
+      Instant now = REALTIME_MANAGER.currentInstant();
+      int offsetSeconds = zone.getRules().getOffset(now).getTotalSeconds();
+      String timeLabel = formatLocalTime(now, zone);
+      String utcOffsetLabel = formatUtcOffset(offsetSeconds);
+      MutableComponent timeLine = Component.literal("Real time: ")
+         .withStyle(ChatFormatting.GRAY)
+         .append(Component.literal(timeLabel + " " + utcOffsetLabel).withStyle(ChatFormatting.YELLOW));
+      if (approximateTime) {
+         timeLine.append(Component.literal(" (approx)").withStyle(ChatFormatting.DARK_GRAY));
+      }
+
+      source.sendSuccess(() -> timeLine, false);
+      MutableComponent tempLine = Component.literal("Temperature: ").withStyle(ChatFormatting.GRAY);
+      if (Float.isFinite(report.temperatureC())) {
+         String tempLabel = Objects.requireNonNull(String.format(Locale.ROOT, "%.1f C", report.temperatureC()), "tempLabel");
+         tempLine.append(Component.literal(tempLabel).withStyle(ChatFormatting.YELLOW));
+      } else {
+         tempLine.append(Component.literal("n/a").withStyle(ChatFormatting.DARK_GRAY));
+      }
+
+      source.sendSuccess(() -> tempLine, false);
+      String weatherLabel = Objects.requireNonNull(weather.label(), "weatherLabel");
+      ChatFormatting weatherColor = Objects.requireNonNull(weather.color(), "weatherColor");
+      MutableComponent weatherLine = Component.literal("Weather: ")
+         .withStyle(ChatFormatting.GRAY)
+         .append(Component.literal(weatherLabel).withStyle(weatherColor));
+      if (!realtimeWeather) {
+         String weatherSource = Float.isFinite(report.temperatureC())
+            ? " (vanilla timing, real temperature)"
+            : " (vanilla fallback)";
+         weatherLine.append(Component.literal(weatherSource).withStyle(ChatFormatting.DARK_GRAY));
+      } else if (!realtimeWeatherActive) {
+         weatherLine.append(Component.literal(" (real-time pending)").withStyle(ChatFormatting.DARK_GRAY));
+      }
+
+      source.sendSuccess(() -> weatherLine, false);
    }
 
    private static int setRealtimeTimeOverride(CommandSourceStack source, boolean enabled) {
@@ -508,16 +563,26 @@ public class Tellus implements ModInitializer {
       };
    }
 
-   private static Tellus.WeatherDisplay weatherFromVanilla(ServerLevel level,  BlockPos pos) {
-      if (level.isThundering()) {
-         return new Tellus.WeatherDisplay("Thunder", ChatFormatting.DARK_PURPLE);
-      } else if (level.isRainingAt(pos)) {
-         Biome biome = (Biome)level.getBiome(pos).value();
-         boolean snow = biome.getPrecipitationAt(pos) == Precipitation.SNOW;
-         return new Tellus.WeatherDisplay(snow ? "Snow" : "Rain", snow ? ChatFormatting.AQUA : ChatFormatting.BLUE);
-      } else {
+   private static Tellus.WeatherDisplay weatherFromVanilla(ServerLevel level, BlockPos pos, float temperatureC) {
+      if (!level.isRaining()) {
          return new Tellus.WeatherDisplay("Clear", ChatFormatting.GREEN);
       }
+
+      Biome biome = (Biome)level.getBiome(pos).value();
+      if (!biome.hasPrecipitation()) {
+         return new Tellus.WeatherDisplay("Clear", ChatFormatting.GREEN);
+      }
+
+      boolean snow = Float.isFinite(temperatureC)
+         ? WeatherTemperaturePolicy.shouldSnow(temperatureC)
+         : biome.getPrecipitationAt(pos) == Precipitation.SNOW;
+      if (snow) {
+         return new Tellus.WeatherDisplay("Snow", ChatFormatting.AQUA);
+      }
+
+      return level.isThundering()
+         ? new Tellus.WeatherDisplay("Thunder", ChatFormatting.DARK_PURPLE)
+         : new Tellus.WeatherDisplay("Rain", ChatFormatting.BLUE);
    }
 
    private static ZoneId resolveZoneId(String zoneId) {

@@ -6,6 +6,7 @@ import com.google.common.cache.LoadingCache;
 import com.yucareux.tellus.Tellus;
 import com.yucareux.tellus.config.TellusEndpointConfig;
 import com.yucareux.tellus.cache.TellusCacheDomain;
+import com.yucareux.tellus.cache.TellusCacheFiles;
 import com.yucareux.tellus.cache.TellusCacheHandle;
 import com.yucareux.tellus.cache.TellusCacheRegistry;
 import com.yucareux.tellus.world.data.source.DownloadProgressReporter;
@@ -18,9 +19,9 @@ import java.net.HttpURLConnection;
 import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.Locale;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -262,19 +263,19 @@ public final class CopernicusDemElevationSource implements TellusCacheHandle {
          return MISSING_TILE;
       }
 
+      long generation = TellusCacheRegistry.generation(TellusCacheDomain.COPERNICUS);
       try {
          return new CopernicusDemElevationSource.TileRecord(CopernicusDemElevationSource.TileFile.open(key.url(), tileCacheDir), false);
       } catch (CopernicusDemElevationSource.MissingTileException error) {
-         this.writeMissingMarker(missingMarker);
+         this.writeMissingMarker(missingMarker, generation);
          return MISSING_TILE;
       }
    }
 
-   private void writeMissingMarker(Path missingMarker) {
+   private void writeMissingMarker(Path missingMarker, long generation) {
       try {
-         Files.createDirectories(missingMarker.getParent());
          if (!Files.exists(missingMarker)) {
-            Files.writeString(missingMarker, "missing");
+            TellusCacheFiles.writeStringIfCurrent(TellusCacheDomain.COPERNICUS, generation, missingMarker, "missing", StandardCharsets.UTF_8);
          }
       } catch (IOException error) {
          Tellus.LOGGER.debug("Failed to persist Copernicus missing-tile marker {}", missingMarker, error);
@@ -391,6 +392,7 @@ public final class CopernicusDemElevationSource implements TellusCacheHandle {
             }
 
             String rangeHeader = "bytes=" + offset + "-" + (offset + length - 1L);
+            long generation = TellusCacheRegistry.generation(TellusCacheDomain.COPERNICUS);
             HttpURLConnection connection = CopernicusDemElevationSource.openConnection(URI.create(this.url), rangeHeader);
             try {
                int status = connection.getResponseCode();
@@ -407,7 +409,7 @@ public final class CopernicusDemElevationSource implements TellusCacheHandle {
                      if (data.length != length) {
                         throw new EOFException("Unexpected range length " + data.length + " for " + this.url);
                      } else {
-                        this.writeCachedRange(cachePath, data);
+                        this.writeCachedRange(cachePath, data, generation);
                         return data;
                      }
                   } finally {
@@ -434,12 +436,9 @@ public final class CopernicusDemElevationSource implements TellusCacheHandle {
          }
       }
 
-      private void writeCachedRange(Path cachePath, byte[] data) {
+      private void writeCachedRange(Path cachePath, byte[] data, long generation) {
          try {
-            Files.createDirectories(cachePath.getParent());
-            Path tempPath = cachePath.resolveSibling(cachePath.getFileName() + ".tmp");
-            Files.write(tempPath, data);
-            Files.move(tempPath, cachePath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            TellusCacheFiles.writeBytesIfCurrent(TellusCacheDomain.COPERNICUS, generation, cachePath, data);
          } catch (IOException error) {
             Tellus.LOGGER.debug("Failed to cache Copernicus DEM range {}", cachePath, error);
          }

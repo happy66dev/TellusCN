@@ -105,7 +105,7 @@ public final class BiomeClassification {
       }
    }
 
-   private static ResourceKey<Biome> toBiomeKey(String biomeId) {
+   public static ResourceKey<Biome> toBiomeKey(String biomeId) {
       ResourceLocation id = biomeId.contains(":") ? ResourceLocation.tryParse(biomeId) : new ResourceLocation("minecraft", biomeId);
       if (id == null) {
          id = new ResourceLocation("minecraft", "plains");
