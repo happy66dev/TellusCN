@@ -20,4 +20,24 @@ class WeatherTemperaturePolicyTest {
    void missingTemperatureDoesNotForceSnow() {
       assertFalse(WeatherTemperaturePolicy.shouldSnow(Float.NaN));
    }
+
+   @Test
+   void freshWaterCanFreezeAtThePhysicalFreezingPoint() {
+      assertTrue(WeatherTemperaturePolicy.canWaterFreeze(false, 0.0F));
+   }
+
+   @Test
+   void freshWaterCannotFreezeAboveThePhysicalFreezingPoint() {
+      assertFalse(WeatherTemperaturePolicy.canWaterFreeze(false, 0.1F));
+   }
+
+   @Test
+   void missingTemperatureCannotFreezeFreshWater() {
+      assertFalse(WeatherTemperaturePolicy.canWaterFreeze(false, Float.NaN));
+   }
+
+   @Test
+   void oceanWaterCannotFreezeEvenBelowTheFreshWaterFreezingPoint() {
+      assertFalse(WeatherTemperaturePolicy.canWaterFreeze(true, -20.0F));
+   }
 }

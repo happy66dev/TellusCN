@@ -1,8 +1,10 @@
 package com.yucareux.tellus.worldgen;
 
 import com.yucareux.tellus.world.data.mask.TellusLandMaskSource;
+import com.yucareux.tellus.world.data.osm.OsmQueryMode;
 import com.yucareux.tellus.world.data.osm.OsmWaterFeature;
 import com.yucareux.tellus.world.data.osm.OsmWaterKind;
+import com.yucareux.tellus.world.data.osm.TellusOsmWaterSource;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -10,6 +12,36 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DhLodWaterResolverTest {
+   @Test
+   void oceanSafetyRampInheritsFullTerrainDefault() {
+      assertEquals(512, DhLodWaterResolver.oceanFloorTransitionBlocks());
+   }
+
+   @Test
+   void keepsRawOceanBathymetryInDhByDefault() {
+      assertEquals(-4937, DhLodWaterResolver.displayOceanLodTerrainSurface(-4937, 63));
+      assertEquals(-127, DhLodWaterResolver.displayOceanLodTerrainSurface(-127, 63));
+   }
+
+   @Test
+   void retriesOnlyPendingNonBlockingCoverageSynchronously() {
+      assertTrue(
+         DhLodWaterResolver.shouldRetryPendingCoverage(
+            TellusOsmWaterSource.CoverageStatus.PENDING, OsmQueryMode.NON_BLOCKING
+         )
+      );
+      assertFalse(
+         DhLodWaterResolver.shouldRetryPendingCoverage(
+            TellusOsmWaterSource.CoverageStatus.PENDING, OsmQueryMode.BLOCKING
+         )
+      );
+      assertFalse(
+         DhLodWaterResolver.shouldRetryPendingCoverage(
+            TellusOsmWaterSource.CoverageStatus.FAILED, OsmQueryMode.NON_BLOCKING
+         )
+      );
+   }
+
    @Test
    void usesTwentyBlockSimpleInlandWaterDepth() {
       assertEquals(44, DhLodWaterResolver.simpleInlandWaterTerrainSurface(64));
@@ -22,6 +54,16 @@ class DhLodWaterResolverTest {
       assertEquals(20, DhLodWaterResolver.simpleInlandWaterDepthForDistance(3));
       assertEquals(20, DhLodWaterResolver.simpleInlandWaterDepthForDistance(20));
       assertEquals(20, DhLodWaterResolver.simpleInlandWaterDepthForDistance(100));
+   }
+
+   @Test
+   void reducesVectorWaterTileBudgetForDistantLodCells() {
+      assertEquals(64, DhLodWaterResolver.waterQueryTileBudget(64));
+      assertEquals(32, DhLodWaterResolver.waterQueryTileBudget(128));
+      assertEquals(16, DhLodWaterResolver.waterQueryTileBudget(256));
+      assertEquals(8, DhLodWaterResolver.waterQueryTileBudget(512));
+      assertEquals(4, DhLodWaterResolver.waterQueryTileBudget(1024));
+      assertEquals(4, DhLodWaterResolver.waterQueryTileBudget(4096));
    }
 
    @Test
@@ -167,22 +209,37 @@ class DhLodWaterResolverTest {
    }
 
    @Test
-   void classifiesUnhintedOvertureWaterAsOceanWhenLandMaskIsMarine() {
-      boolean ocean = DhLodWaterResolver.classifyWaterCellAsOcean(false, TellusLandMaskSource.LandMaskSample.known(false), 62, 80, 63);
+   void keepsUnhintedOvertureWaterInlandWhenStrictOsmModeUsesMarineLandMask() {
+      boolean ocean = DhLodWaterResolver.classifyWaterCellAsOcean(
+         false, true, TellusLandMaskSource.LandMaskSample.known(false), 62, 80, 63
+      );
+
+      assertFalse(ocean);
+   }
+
+   @Test
+   void classifiesUnhintedWaterAsOceanWhenNotInStrictOsmModeAndLandMaskIsMarine() {
+      boolean ocean = DhLodWaterResolver.classifyWaterCellAsOcean(
+         false, false, TellusLandMaskSource.LandMaskSample.known(false), 62, 80, 63
+      );
 
       assertTrue(ocean);
    }
 
    @Test
    void keepsUnhintedOvertureWaterInlandWhenLandMaskIsLand() {
-      boolean ocean = DhLodWaterResolver.classifyWaterCellAsOcean(false, TellusLandMaskSource.LandMaskSample.known(true), 62, 80, 63);
+      boolean ocean = DhLodWaterResolver.classifyWaterCellAsOcean(
+         false, false, TellusLandMaskSource.LandMaskSample.known(true), 62, 80, 63
+      );
 
       assertFalse(ocean);
    }
 
    @Test
    void acceptsOvertureOceanHint() {
-      boolean ocean = DhLodWaterResolver.classifyWaterCellAsOcean(true, TellusLandMaskSource.LandMaskSample.known(true), 80, 80, 63);
+      boolean ocean = DhLodWaterResolver.classifyWaterCellAsOcean(
+         true, true, TellusLandMaskSource.LandMaskSample.known(true), 80, 80, 63
+      );
 
       assertTrue(ocean);
    }
@@ -213,7 +270,9 @@ class DhLodWaterResolverTest {
 
    @Test
    void classifiesKnownOceanWaterCoverAboveSeaLevelAsOcean() {
-      boolean ocean = DhLodWaterResolver.classifyWaterCellAsOcean(false, TellusLandMaskSource.LandMaskSample.known(false), 120, 80, 63);
+      boolean ocean = DhLodWaterResolver.classifyWaterCellAsOcean(
+         false, false, TellusLandMaskSource.LandMaskSample.known(false), 120, 80, 63
+      );
 
       assertTrue(ocean);
    }

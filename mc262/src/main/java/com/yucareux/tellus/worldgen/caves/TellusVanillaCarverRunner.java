@@ -42,7 +42,12 @@ public final class TellusVanillaCarverRunner {
    private final int chunkMinY;
 
    public TellusVanillaCarverRunner(
-       BiomeSource biomeSource, Registry<Block> blockRegistry,  Holder<NoiseGeneratorSettings> noiseSettings, int tellusMinY, int tellusHeight
+      BiomeSource biomeSource,
+      Registry<Block> blockRegistry,
+      Holder<NoiseGeneratorSettings> noiseSettings,
+      int tellusMinY,
+      int tellusHeight,
+      boolean fullHeightCarvers
    ) {
       this.biomeSource = Objects.requireNonNull(biomeSource, "biomeSource");
       Objects.requireNonNull(blockRegistry, "blockRegistry");
@@ -50,7 +55,7 @@ public final class TellusVanillaCarverRunner {
       this.chunkMinY = tellusMinY;
       this.contextNoiseSettings = Objects.requireNonNull((NoiseGeneratorSettings)contextSettings.value(), "contextNoiseSettings");
       this.carvingContextGenerator = Objects.requireNonNull(new NoiseBasedChunkGenerator(this.biomeSource, contextSettings), "carvingContextGenerator");
-      this.configuredCarvers = TellusConfiguredCarvers.create(blockRegistry, tellusMinY, tellusHeight).orderedCarvers();
+      this.configuredCarvers = TellusConfiguredCarvers.create(blockRegistry, tellusMinY, tellusHeight, fullHeightCarvers).orderedCarvers();
    }
 
    public void applyCarvers(
@@ -60,7 +65,8 @@ public final class TellusVanillaCarverRunner {
       BiomeManager biomeManager,
       StructureManager structures,
       ChunkAccess chunk,
-      int[] floodGuardYByColumn
+      int[] floodGuardYByColumn,
+      int[] shellBottomYByColumn
    ) {
       RandomState safeRandomState = Objects.requireNonNull(randomState, "randomState");
       StructureManager safeStructures = Objects.requireNonNull(structures, "structures");
@@ -87,7 +93,7 @@ public final class TellusVanillaCarverRunner {
       CarvingContext carvingContext = new CarvingContext(
          safeCarvingContextGenerator, registryAccess, chunk.getHeightAccessorForGeneration(), noiseChunk, safeRandomState, safeNoiseSettings.surfaceRule()
       );
-      CarvingMask carvingMask = Objects.requireNonNull(getCarvingMask(chunk, floodGuardYByColumn), "carvingMask");
+      CarvingMask carvingMask = Objects.requireNonNull(getCarvingMask(chunk, floodGuardYByColumn, shellBottomYByColumn), "carvingMask");
 
       for (int offsetX = -CARVER_RADIUS_CHUNKS; offsetX <= CARVER_RADIUS_CHUNKS; offsetX++) {
          for (int offsetZ = -CARVER_RADIUS_CHUNKS; offsetZ <= CARVER_RADIUS_CHUNKS; offsetZ++) {
@@ -117,7 +123,7 @@ public final class TellusVanillaCarverRunner {
    }
 
    
-   private static CarvingMask getCarvingMask(ChunkAccess chunk, int[] floodGuardYByColumn) {
+   private static CarvingMask getCarvingMask(ChunkAccess chunk, int[] floodGuardYByColumn, int[] shellBottomYByColumn) {
       CarvingMask baseMask;
       if (chunk instanceof ProtoChunk protoChunk) {
          baseMask = protoChunk.getOrCreateCarvingMask();
@@ -125,11 +131,15 @@ public final class TellusVanillaCarverRunner {
          baseMask = new CarvingMask(chunk.getHeight(), chunk.getMinY());
       }
 
-      if (floodGuardYByColumn == null) {
+      if (floodGuardYByColumn == null && shellBottomYByColumn == null) {
          return Objects.requireNonNull(baseMask, "baseMask");
       } else {
          CarvingMask guardedMask = new CarvingMask(baseMask.toArray(), chunk.getMinY());
-         guardedMask.setAdditionalMask((x, y, z) -> y >= floodGuardYByColumn[chunkIndex(x & 15, z & 15)]);
+         guardedMask.setAdditionalMask((x, y, z) -> {
+            int index = chunkIndex(x & 15, z & 15);
+            return floodGuardYByColumn != null && y >= floodGuardYByColumn[index]
+               || shellBottomYByColumn != null && y <= shellBottomYByColumn[index];
+         });
          return Objects.requireNonNull(guardedMask, "guardedMask");
       }
    }

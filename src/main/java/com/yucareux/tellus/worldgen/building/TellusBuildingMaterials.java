@@ -2,6 +2,7 @@ package com.yucareux.tellus.worldgen.building;
 
 import com.yucareux.tellus.worldgen.arnis.ArnisBuildingRules;
 import com.yucareux.tellus.worldgen.TellusBlockReferences;
+import net.minecraft.core.Direction;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
@@ -499,6 +500,64 @@ public final class TellusBuildingMaterials {
          case HVAC, SOLAR_PANEL, ANTENNA, VENT_STACK -> 1;
          case NONE -> blueprint.style().roofDetail() == BuildingStyle.RoofDetail.ANTENNA ? 2 : 1;
       };
+   }
+
+   public static BlockState resolveRoofStairBlock(TellusBuildingMaterials.BuildingMaterialPalette palette, Direction facing) {
+      BlockState roof = palette.roof();
+      BlockState stair = Blocks.STONE_BRICK_STAIRS.defaultBlockState();
+      if (roof.getBlock() == Blocks.BRICKS) {
+         stair = Blocks.BRICK_STAIRS.defaultBlockState();
+      } else if (roof.getBlock() == Blocks.DEEPSLATE_TILES) {
+         stair = Blocks.DEEPSLATE_TILE_STAIRS.defaultBlockState();
+      } else if (roof.getBlock() == Blocks.DEEPSLATE_BRICKS) {
+         stair = Blocks.DEEPSLATE_BRICK_STAIRS.defaultBlockState();
+      } else if (roof.getBlock() == Blocks.STONE_BRICKS) {
+         stair = Blocks.STONE_BRICK_STAIRS.defaultBlockState();
+      } else if (roof.getBlock() == Blocks.SANDSTONE || roof.getBlock() == Blocks.SMOOTH_SANDSTONE || roof.getBlock() == Blocks.CUT_SANDSTONE) {
+         stair = Blocks.SANDSTONE_STAIRS.defaultBlockState();
+      } else if (roof.getBlock() == Blocks.DARK_OAK_PLANKS) {
+         stair = Blocks.DARK_OAK_STAIRS.defaultBlockState();
+      } else if (roof.getBlock() == Blocks.OAK_PLANKS) {
+         stair = Blocks.OAK_STAIRS.defaultBlockState();
+      } else if (roof.getBlock() == Blocks.BLACKSTONE) {
+         stair = Blocks.BLACKSTONE_STAIRS.defaultBlockState();
+      } else if (roof.getBlock() == Blocks.POLISHED_BLACKSTONE_BRICKS) {
+         stair = Blocks.POLISHED_BLACKSTONE_BRICK_STAIRS.defaultBlockState();
+      } else if (roof.getBlock() == Blocks.QUARTZ_BLOCK || roof.getBlock() == Blocks.SMOOTH_QUARTZ) {
+         stair = Blocks.QUARTZ_STAIRS.defaultBlockState();
+      } else if (roof.getBlock() == Blocks.COBBLESTONE) {
+         stair = Blocks.COBBLESTONE_STAIRS.defaultBlockState();
+      } else if (roof.getBlock() == Blocks.MOSSY_COBBLESTONE) {
+         stair = Blocks.MOSSY_COBBLESTONE_STAIRS.defaultBlockState();
+      } else if (roof.getBlock() == Blocks.MOSSY_STONE_BRICKS) {
+         stair = Blocks.MOSSY_STONE_BRICK_STAIRS.defaultBlockState();
+      } else if (roof.getBlock() == Blocks.MUD_BRICKS) {
+         stair = Blocks.MUD_BRICK_STAIRS.defaultBlockState();
+      } else if (roof.getBlock() == Blocks.NETHER_BRICKS) {
+         stair = Blocks.NETHER_BRICK_STAIRS.defaultBlockState();
+      } else if (roof.getBlock() == Blocks.RED_NETHER_BRICKS) {
+         stair = Blocks.RED_NETHER_BRICK_STAIRS.defaultBlockState();
+      } else if (roof.getBlock() == Blocks.POLISHED_DEEPSLATE) {
+         stair = Blocks.POLISHED_DEEPSLATE_STAIRS.defaultBlockState();
+      } else if (roof.getBlock() == Blocks.ANDESITE) {
+         stair = Blocks.ANDESITE_STAIRS.defaultBlockState();
+      } else if (roof.getBlock() == Blocks.POLISHED_ANDESITE) {
+         stair = Blocks.POLISHED_ANDESITE_STAIRS.defaultBlockState();
+      } else if (roof.getBlock() == Blocks.GRANITE) {
+         stair = Blocks.GRANITE_STAIRS.defaultBlockState();
+      } else if (roof.getBlock() == Blocks.POLISHED_GRANITE) {
+         stair = Blocks.POLISHED_GRANITE_STAIRS.defaultBlockState();
+      } else if (roof.getBlock() == Blocks.DIORITE) {
+         stair = Blocks.DIORITE_STAIRS.defaultBlockState();
+      } else if (roof.getBlock() == Blocks.POLISHED_DIORITE) {
+         stair = Blocks.POLISHED_DIORITE_STAIRS.defaultBlockState();
+      } else if (roof.getBlock() == Blocks.END_STONE_BRICKS) {
+         stair = Blocks.END_STONE_BRICK_STAIRS.defaultBlockState();
+      } else {
+         return roof;
+      }
+
+      return stair.hasProperty(BlockStateProperties.HORIZONTAL_FACING) ? stair.setValue(BlockStateProperties.HORIZONTAL_FACING, facing) : stair;
    }
 
    private static BlockState lodRoofEquipmentBlock(ArnisBuildingRules.RooftopEquipment equipment, TellusBuildingMaterials.BuildingMaterialPalette palette) {

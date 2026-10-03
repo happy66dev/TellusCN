@@ -144,13 +144,14 @@ final class TellusRasterReader {
 
       abstract int apply(int var1, int var2, int var3, int var4);
 
-      static TellusRasterReader.RasterFilter byId(int id) {
+      static TellusRasterReader.RasterFilter byId(int id) throws IOException {
          return switch (id) {
+            case 0 -> NONE;
             case 1 -> LEFT;
             case 2 -> UP;
             case 3 -> AVERAGE;
             case 4 -> PAETH;
-            default -> NONE;
+            default -> throw new IOException("Unsupported tellus raster filter " + id);
          };
       }
    }

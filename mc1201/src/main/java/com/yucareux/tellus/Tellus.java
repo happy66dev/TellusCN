@@ -9,16 +9,19 @@ import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.serialization.DynamicOps;
 import com.mojang.serialization.JsonOps;
 import com.yucareux.tellus.integration.distant_horizons.DistantHorizonsIntegration;
+import com.yucareux.tellus.integration.distant_horizons.managed.ManagedTerrainDownloadManager;
 import com.yucareux.tellus.integration.voxy.TellusVoxyPregenManager;
 import com.yucareux.tellus.network.GeoTpOpenMapPayload;
 import com.yucareux.tellus.network.GeoTpTeleportPayload;
-import com.yucareux.tellus.world.data.elevation.Gebco2026ElevationSource;
+import com.yucareux.tellus.network.ManagedTerrainStatusPayload;
+import com.yucareux.tellus.network.ManagedTerrainViewPayload;
 import com.yucareux.tellus.world.realtime.TellusRealtimeManager;
 import com.yucareux.tellus.world.realtime.TellusRealtimeState;
 import com.yucareux.tellus.world.realtime.WeatherTemperaturePolicy;
 import com.yucareux.tellus.worldgen.EarthBiomeSource;
 import com.yucareux.tellus.worldgen.EarthChunkGenerator;
 import com.yucareux.tellus.worldgen.EarthGeneratorSettings;
+import com.yucareux.tellus.worldgen.ExperimentalHeightSupport;
 import java.io.BufferedWriter;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -30,11 +33,8 @@ import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerChunkEvents;
@@ -101,7 +101,7 @@ public class Tellus implements ModInitializer {
    private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
    private static final TellusRealtimeManager REALTIME_MANAGER = new TellusRealtimeManager();
    private static final TellusVoxyPregenManager VOXY_PREGEN_MANAGER = new TellusVoxyPregenManager();
-   private static final Map<UUID, Long> GEBCO_WARNED_OUTAGES = new ConcurrentHashMap<>();
+   private static final ManagedTerrainDownloadManager MANAGED_TERRAIN_DOWNLOAD_MANAGER = new ManagedTerrainDownloadManager();
    public static final Logger LOGGER = LoggerFactory.getLogger("tellus");
 
    
@@ -110,9 +110,14 @@ public class Tellus implements ModInitializer {
    }
 
    public void onInitialize() {
+      ExperimentalHeightSupport.validateActiveRuntimeProfileOrThrow();
       Registry.register(BuiltInRegistries.BIOME_SOURCE, id("earth"), EarthBiomeSource.CODEC);
       Registry.register(BuiltInRegistries.CHUNK_GENERATOR, id("earth"), EarthChunkGenerator.CODEC);
       ServerPlayNetworking.registerGlobalReceiver(GeoTpTeleportPayload.TYPE, Tellus::handleGeoTeleport);
+      ServerPlayNetworking.registerGlobalReceiver(
+         ManagedTerrainViewPayload.TYPE,
+         (payload, player, responseSender) -> MANAGED_TERRAIN_DOWNLOAD_MANAGER.updateViewDistance(player, payload.renderRadiusChunks())
+      );
       CommandRegistrationCallback.EVENT
          .register(
             (dispatcher, registryAccess, environment) -> dispatcher.register(
@@ -225,6 +230,7 @@ public class Tellus implements ModInitializer {
             ChunkGenerator generator = world.getChunkSource().getGenerator();
             logOverworldSettings(server, world, generator);
             if (generator instanceof EarthChunkGenerator earthGenerator) {
+               ExperimentalHeightSupport.configureWorldBorder(earthGenerator.settings(), world.getWorldBorder());
                BlockPos spawn = Objects.requireNonNull(earthGenerator.getSpawnPosition(world), "spawnPosition");
                world.setDefaultSpawnPos(spawn, 0.0F);
                ensureDynamicDimensionPack(server, world.dimensionTypeRegistration(), world.dimensionType(), earthGenerator);
@@ -234,11 +240,19 @@ public class Tellus implements ModInitializer {
       ServerLifecycleEvents.SERVER_STOPPING.register((ServerStopping)server -> {
          REALTIME_MANAGER.onServerStopping(server);
          VOXY_PREGEN_MANAGER.shutdown();
-         GEBCO_WARNED_OUTAGES.clear();
+         MANAGED_TERRAIN_DOWNLOAD_MANAGER.reset();
       });
       ServerTickEvents.END_SERVER_TICK.register(REALTIME_MANAGER::onServerTick);
       ServerTickEvents.END_SERVER_TICK.register(VOXY_PREGEN_MANAGER::onServerTick);
-      ServerTickEvents.END_SERVER_TICK.register(Tellus::notifyGebcoFallback);
+      ServerTickEvents.END_SERVER_TICK.register(MANAGED_TERRAIN_DOWNLOAD_MANAGER::onServerTick);
+      ServerTickEvents.END_SERVER_TICK.register(server -> {
+         if (MANAGED_TERRAIN_DOWNLOAD_MANAGER.shouldBroadcastStatus()) {
+            for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+               MANAGED_TERRAIN_DOWNLOAD_MANAGER.statusFor(player)
+                  .ifPresent(status -> ServerPlayNetworking.send(player, new ManagedTerrainStatusPayload(status)));
+            }
+         }
+      });
       ServerTickEvents.END_SERVER_TICK.register(server -> {
          for (ServerLevel level : server.getAllLevels()) {
             ChunkGenerator generator = level.getChunkSource().getGenerator();
@@ -254,31 +268,17 @@ public class Tellus implements ModInitializer {
          }
       });
       ServerPlayConnectionEvents.JOIN.register((Join)(handler, sender, server) -> REALTIME_MANAGER.onPlayerJoin(server, handler.getPlayer()));
+      ServerPlayConnectionEvents.DISCONNECT.register(
+         (handler, server) -> MANAGED_TERRAIN_DOWNLOAD_MANAGER.onPlayerDisconnect(handler.getPlayer())
+      );
       if (FabricLoader.getInstance().isModLoaded("distanthorizons")) {
          DistantHorizonsIntegration.bootstrap();
       }
 
-      LOGGER.info("Tellus worldgen initialized");
-   }
-
-   private static void notifyGebcoFallback(MinecraftServer server) {
-      if (!Gebco2026ElevationSource.isRemoteUnavailable()) {
-         return;
-      }
-
-      ServerLevel overworld = server.getLevel(Level.OVERWORLD);
-      if (overworld == null
-         || !(overworld.getChunkSource().getGenerator() instanceof EarthChunkGenerator earthGenerator)
-         || !earthGenerator.settings().demSelection().gebco2026Enabled()) {
-         return;
-      }
-
-      long outageId = Gebco2026ElevationSource.remoteOutageId();
-      for (ServerPlayer player : server.getPlayerList().getPlayers()) {
-         if (!Objects.equals(GEBCO_WARNED_OUTAGES.put(player.getUUID(), outageId), outageId)) {
-            player.sendSystemMessage(Component.translatable("tellus.warning.gebco.chat").withStyle(ChatFormatting.RED));
-         }
-      }
+      LOGGER.info(
+         "Tellus worldgen initialized{}",
+         ExperimentalHeightSupport.isRuntimeProfileActive() ? " with the dense global packed-coordinate profile" : ""
+      );
    }
 
    private static int openGeoTpMap(CommandSourceStack source) {

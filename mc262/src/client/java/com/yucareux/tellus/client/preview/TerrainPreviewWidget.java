@@ -1,6 +1,5 @@
 package com.yucareux.tellus.client.preview;
 
-import com.yucareux.tellus.world.data.elevation.Gebco2026ElevationSource;
 import com.yucareux.tellus.world.data.elevation.TellusElevationSource;
 import com.yucareux.tellus.worldgen.EarthGeneratorSettings;
 import java.util.Locale;
@@ -23,13 +22,13 @@ import net.minecraft.util.Mth;
 public final class TerrainPreviewWidget extends AbstractWidget implements AutoCloseable {
    private static final float DEFAULT_ROTATION_X = (float)Math.toRadians(18.0);
    private static final float DEFAULT_ROTATION_Y = (float)Math.toRadians(18.0);
-   private static final float DEFAULT_ZOOM = 1.4F;
+   private static final float DEFAULT_CAMERA_DISTANCE = 1.9F;
    private static final float MIN_ROTATION_X = (float)Math.toRadians(0.0);
    private static final float MAX_ROTATION_X = (float)Math.toRadians(80.0);
-   private static final float MIN_ZOOM = 0.5F;
-   private static final float MAX_ZOOM = 4.0F;
+   private static final float MIN_CAMERA_DISTANCE = 0.9F;
+   private static final float MAX_CAMERA_DISTANCE = 6.0F;
    private static final float ROTATION_SPEED = 0.01F;
-   private static final float ZOOM_SPEED = 0.1F;
+   private static final float CAMERA_DOLLY_SPEED = 0.2F;
    private static final float AUTO_ROTATION_SPEED = -0.0022F;
    private static final long AUTO_RESUME_DELAY_MS = 1200L;
    private static final int MODE_BUTTON_WIDTH = 36;
@@ -59,11 +58,7 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
    private static final int LOADING_BAR_BORDER = -13816531;
    private static final int LOADING_BAR_FILL = -12599473;
    private static final int LOADING_TEXT = -1;
-   private static final int GEBCO_WARNING_BG = 0xCC100000;
-   private static final int GEBCO_WARNING_BORDER = 0xFFFF5555;
-   private static final int GEBCO_WARNING_TITLE = 0xFFFF5555;
-   private static final int GEBCO_WARNING_DETAIL = 0xFFFF8888;
-   private static final long GEBCO_WARNING_DURATION_MS = 5000L;
+   private static final int LOADING_DETAIL_TEXT = -3355444;
    private final TerrainPreview preview;
    private final boolean ownsPreview;
    private final Button modeButton;
@@ -73,15 +68,15 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
    
    private Function<TerrainPreview.PreviewInfo, EarthGeneratorSettings> autoAdjustAction;
    private Runnable fullscreenAction;
+   private boolean autoAdjustDisabled;
+   private Component autoAdjustDisabledTooltip;
    private boolean dragging;
    private boolean infoPanelVisible;
    private float rotationX = DEFAULT_ROTATION_X;
    private float rotationY = DEFAULT_ROTATION_Y;
-   private float zoom = DEFAULT_ZOOM;
+   private float cameraDistance = DEFAULT_CAMERA_DISTANCE;
    private TerrainPreviewWidget.RenderMode renderMode = TerrainPreviewWidget.RenderMode.FULL_DETAIL;
    private long lastInteractionTime;
-   private long gebcoWarningOutageId = -1L;
-   private long gebcoWarningUntilMs;
 
    public TerrainPreviewWidget(int x, int y, int width, int height) {
       this(x, y, width, height, new TerrainPreview(), true);
@@ -127,18 +122,24 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
       this.autoAdjustAction = action;
    }
 
+   public void setAutoAdjustDisabled(boolean disabled, Component tooltip) {
+      this.autoAdjustDisabled = disabled;
+      this.autoAdjustDisabledTooltip = disabled ? Objects.requireNonNull(tooltip, "autoAdjustDisabledTooltip") : null;
+      this.autoAdjustButton.setTooltip(disabled && tooltip != null ? Tooltip.create(tooltip) : null);
+   }
+
    public TerrainPreview getPreview() {
       return this.preview;
    }
 
    public TerrainPreviewWidget.ViewState getViewState() {
-      return new TerrainPreviewWidget.ViewState(this.rotationX, this.rotationY, this.zoom, this.renderMode);
+      return new TerrainPreviewWidget.ViewState(this.rotationX, this.rotationY, this.cameraDistance, this.renderMode);
    }
 
    public void setViewState(TerrainPreviewWidget.ViewState state) {
       this.rotationX = Mth.clamp(state.rotationX(), MIN_ROTATION_X, MAX_ROTATION_X);
       this.rotationY = state.rotationY();
-      this.zoom = Mth.clamp(state.zoom(), MIN_ZOOM, MAX_ZOOM);
+      this.cameraDistance = Mth.clamp(state.cameraDistance(), MIN_CAMERA_DISTANCE, MAX_CAMERA_DISTANCE);
       this.renderMode = state.renderMode();
       this.updateModeButtonLabel();
    }
@@ -158,9 +159,9 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
       int contentY = this.getY() + inset;
       int contentWidth = Math.max(1, this.width - inset * 2);
       int contentHeight = Math.max(1, this.height - inset * 2);
-      this.preview.render(graphics, contentX, contentY, contentWidth, contentHeight, this.rotationX, this.rotationY, this.zoom, this.renderMode);
+      this.preview
+         .render(graphics, contentX, contentY, contentWidth, contentHeight, this.rotationX, this.rotationY, this.cameraDistance, this.renderMode);
       this.renderLoadingOverlay(graphics, contentX, contentY, contentWidth, contentHeight);
-      this.renderGebcoWarning(graphics, contentX, contentY, contentWidth, contentHeight);
       this.renderModeButton(graphics, mouseX, mouseY, delta);
       this.renderInfoButton(graphics, mouseX, mouseY, delta);
       this.renderInfoPanel(graphics, mouseX, mouseY, delta);
@@ -246,7 +247,9 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
          || this.fullscreenAction != null && this.fullscreenButton.isMouseOver(mouseX, mouseY)) {
          return false;
       } else if (this.isMouseOver(mouseX, mouseY)) {
-         this.zoom = Mth.clamp(this.zoom + (float)verticalAmount * ZOOM_SPEED, MIN_ZOOM, MAX_ZOOM);
+         this.cameraDistance = Mth.clamp(
+            this.cameraDistance - (float)verticalAmount * CAMERA_DOLLY_SPEED, MIN_CAMERA_DISTANCE, MAX_CAMERA_DISTANCE
+         );
          this.lastInteractionTime = System.currentTimeMillis();
          return true;
       } else {
@@ -288,25 +291,33 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
                percentValue >= 10.0F ? String.format(Locale.ROOT, "%.0f%%", percentValue) : String.format(Locale.ROOT, "%.1f%%", percentValue),
                "loadingPercent"
             );
+            String detail = status.detail();
             Font font = Minecraft.getInstance().font;
             int padding = 6;
             int maxInnerWidth = Math.max(20, width - padding * 2 - 4);
             int barWidth = Math.min(180, maxInnerWidth);
             int textLineWidth = font.width(label) + font.width(percentText) + 12;
-            int innerWidth = Math.min(maxInnerWidth, Math.max(barWidth, textLineWidth));
+            int detailLineWidth = detail == null ? 0 : font.width(detail);
+            int innerWidth = Math.min(maxInnerWidth, Math.max(Math.max(barWidth, textLineWidth), detailLineWidth));
             int panelWidth = innerWidth + padding * 2;
             int barHeight = 8;
-            int panelHeight = padding * 3 + 9 + barHeight;
+            int detailHeight = detail == null ? 0 : 10;
+            int panelHeight = padding * 3 + 9 + detailHeight + barHeight;
             int panelX = x + (width - panelWidth) / 2;
             int panelY = y + height - panelHeight - 10;
             panelY = Mth.clamp(panelY, y + 6, y + height - panelHeight - 6);
             graphics.fill(panelX, panelY, panelX + panelWidth, panelY + panelHeight, LOADING_PANEL_BG);
             graphics.outline(panelX, panelY, panelWidth, panelHeight, LOADING_PANEL_BORDER);
             int textY = panelY + padding;
-            graphics.text(font, label, panelX + padding, textY, LOADING_TEXT, true);
+            int labelWidth = Math.max(0, innerWidth - font.width(percentText) - 12);
+            graphics.text(font, this.truncate(font, label, labelWidth), panelX + padding, textY, LOADING_TEXT, true);
             graphics.text(font, percentText, panelX + panelWidth - padding - font.width(percentText), textY, LOADING_TEXT, true);
             int barX = panelX + padding;
             int barY = textY + 9 + padding;
+            if (detail != null) {
+               graphics.text(font, this.truncate(font, detail, innerWidth), panelX + padding, textY + 10, LOADING_DETAIL_TEXT, true);
+               barY += detailHeight;
+            }
             int barInnerWidth = innerWidth - 2;
             graphics.fill(barX, barY, barX + innerWidth, barY + barHeight, LOADING_BAR_BG);
             graphics.outline(barX, barY, innerWidth, barHeight, LOADING_BAR_BORDER);
@@ -321,38 +332,6 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
             }
          }
       }
-   }
-
-   private void renderGebcoWarning(GuiGraphicsExtractor graphics, int x, int y, int width, int height) {
-      EarthGeneratorSettings settings = this.preview.getLastSettings();
-      if ((settings != null && !settings.demSelection().gebco2026Enabled()) || !Gebco2026ElevationSource.isRemoteUnavailable()) {
-         this.gebcoWarningOutageId = -1L;
-         this.gebcoWarningUntilMs = 0L;
-         return;
-      }
-
-      long outageId = Gebco2026ElevationSource.remoteOutageId();
-      long now = System.currentTimeMillis();
-      if (this.gebcoWarningOutageId != outageId) {
-         this.gebcoWarningOutageId = outageId;
-         this.gebcoWarningUntilMs = now + GEBCO_WARNING_DURATION_MS;
-      } else if (now >= this.gebcoWarningUntilMs) {
-         return;
-      }
-
-      Font font = Minecraft.getInstance().font;
-      Component title = Component.translatable("tellus.warning.gebco.preview.title");
-      Component detail = Component.translatable("tellus.warning.gebco.preview.fallback");
-      int padding = 7;
-      int panelWidth = Math.min(width - 12, Math.max(font.width(title), font.width(detail)) + padding * 2);
-      int panelHeight = 31;
-      int panelX = x + (width - panelWidth) / 2;
-      int panelY = y + (height - panelHeight) / 2;
-      graphics.fill(panelX, panelY, panelX + panelWidth, panelY + panelHeight, GEBCO_WARNING_BG);
-      graphics.outline(panelX, panelY, panelWidth, panelHeight, GEBCO_WARNING_BORDER);
-      int centerX = panelX + panelWidth / 2;
-      graphics.centeredText(font, title, centerX, panelY + 6, GEBCO_WARNING_TITLE);
-      graphics.centeredText(font, detail, centerX, panelY + 17, GEBCO_WARNING_DETAIL);
    }
 
    private static float displayedProgress(TerrainPreview.PreviewStatus status) {
@@ -380,7 +359,7 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
    }
 
    private void runAutoAdjust() {
-      if (this.autoAdjustAction != null) {
+      if (!this.autoAdjustDisabled && this.autoAdjustAction != null) {
          TerrainPreview.PreviewInfo info = this.preview.getInfo();
          if (info != null) {
             EarthGeneratorSettings settings = this.autoAdjustAction.apply(info);
@@ -431,6 +410,9 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
          graphics.text(font, Component.translatable("tellus.preview.info.title"), textX, textY, INFO_TEXT, false);
          graphics.text(font, Component.translatable("tellus.preview.info.loading"), textX, textY + INFO_TITLE_SPACING, INFO_SUBTLE, false);
          this.autoAdjustButton.active = false;
+         if (this.autoAdjustDisabled && this.autoAdjustDisabledTooltip != null) {
+            this.autoAdjustButton.setTooltip(Tooltip.create(this.autoAdjustDisabledTooltip));
+         }
       } else {
          graphics.text(font, Component.translatable("tellus.preview.info.title"), textX, textY, INFO_TEXT, false);
          textY += INFO_TITLE_SPACING;
@@ -471,7 +453,12 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
             layout.contentWidth()
          );
          textY += INFO_SECTION_SPACING;
-         this.autoAdjustButton.active = this.autoAdjustAction != null;
+         this.autoAdjustButton.active = this.autoAdjustAction != null && !this.autoAdjustDisabled;
+         if (this.autoAdjustDisabled && this.autoAdjustDisabledTooltip != null) {
+            this.autoAdjustButton.setTooltip(Tooltip.create(this.autoAdjustDisabledTooltip));
+         } else {
+            this.autoAdjustButton.setTooltip(null);
+         }
       }
 
       this.autoAdjustButton.setX(layout.buttonX());
@@ -629,11 +616,11 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
    }
 
    @Environment(EnvType.CLIENT)
-   public record ViewState(float rotationX, float rotationY, float zoom, TerrainPreviewWidget.RenderMode renderMode) {
-      public ViewState(float rotationX, float rotationY, float zoom, TerrainPreviewWidget.RenderMode renderMode) {
+   public record ViewState(float rotationX, float rotationY, float cameraDistance, TerrainPreviewWidget.RenderMode renderMode) {
+      public ViewState(float rotationX, float rotationY, float cameraDistance, TerrainPreviewWidget.RenderMode renderMode) {
          this.rotationX = rotationX;
          this.rotationY = rotationY;
-         this.zoom = zoom;
+         this.cameraDistance = cameraDistance;
          this.renderMode = Objects.requireNonNull(renderMode, "renderMode");
       }
    }

@@ -31,6 +31,12 @@ bin/
 # fabric
 
 run/
+mc*/logs/
+
+# local build and integration output
+
+/output/
+/third_party/
 
 # 游戏与构建运行日志（Gradle 测试 / 启动游戏时自动生成，不应提交）
 logs/

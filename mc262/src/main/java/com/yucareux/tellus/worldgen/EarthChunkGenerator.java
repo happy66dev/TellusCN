@@ -3,6 +3,8 @@ package com.yucareux.tellus.worldgen;
 import com.mojang.serialization.MapCodec;
 import com.mojang.serialization.codecs.RecordCodecBuilder;
 import com.yucareux.tellus.Tellus;
+import com.yucareux.tellus.preload.TerrainPreloadPackage;
+import com.yucareux.tellus.preload.TerrainPreloadPackageRegistry;
 import com.yucareux.tellus.world.data.cover.TellusLandCoverSource;
 import com.yucareux.tellus.world.data.elevation.TellusElevationSource;
 import com.yucareux.tellus.world.data.koppen.TellusKoppenSource;
@@ -376,6 +378,7 @@ public final class EarthChunkGenerator extends ChunkGenerator {
    private final int minY;
    private final int height;
    private final WaterSurfaceResolver waterResolver;
+   private final TerrainPreloadPackageRegistry.SettingsView preloadedTerrain;
    private volatile TellusVanillaCarverRunner tellusCarverRunner;
    private final ThreadLocal<EarthChunkGenerator.WaterChunkCache> waterChunkCache = ThreadLocal.withInitial(EarthChunkGenerator.WaterChunkCache::new);
    private final ThreadLocal<EarthChunkGenerator.OsmOverlayScratch> osmOverlayScratch = ThreadLocal.withInitial(EarthChunkGenerator.OsmOverlayScratch::new);
@@ -393,8 +396,6 @@ public final class EarthChunkGenerator extends ChunkGenerator {
    private final EarthChunkGenerator.TerrainRefinementManager terrainRefinementManager = new EarthChunkGenerator.TerrainRefinementManager();
    private final int configuredSpawnChunkX;
    private final int configuredSpawnChunkZ;
-   private final boolean remaSnowEnabled;
-   private final double remaSnowBoundaryZ;
    private volatile long worldSeed = 0L;
    private static final long JAVA_RANDOM_MULTIPLIER = 25214903917L;
    private static final long JAVA_RANDOM_ADDEND = 11L;
@@ -407,13 +408,13 @@ public final class EarthChunkGenerator extends ChunkGenerator {
    public EarthChunkGenerator(BiomeSource biomeSource, EarthGeneratorSettings settings) {
       super(biomeSource, biome -> generationSettingsForBiome(biome, settings));
       this.settings = settings;
-      this.seaLevel = settings.resolveSeaLevel();
+      this.seaLevel = settings.effectiveHeightOffset();
       EarthGeneratorSettings.HeightLimits limits = EarthGeneratorSettings.resolveHeightLimits(settings);
+      ExperimentalHeightSupport.validateOrThrow(settings, limits);
       this.minY = limits.minY();
       this.height = limits.height();
       this.waterResolver = TellusWorldgenSources.waterResolver(settings);
-      this.remaSnowEnabled = TellusElevationSource.usesPolarDem(settings.demSelection()) && settings.worldScale() > 0.0;
-      this.remaSnowBoundaryZ = this.remaSnowEnabled ? TellusElevationSource.remaBoundaryBlockZ(settings.worldScale()) : Double.POSITIVE_INFINITY;
+      this.preloadedTerrain = TerrainPreloadPackageRegistry.instance().viewFor(settings);
       double blocksPerDegree = blocksPerDegree(settings.worldScale());
       int spawnBlockX = Mth.floor(settings.spawnLongitude() * blocksPerDegree);
       int spawnBlockZ = Mth.floor(EarthProjection.latToBlockZ(settings.spawnLatitude(), settings.worldScale()));
@@ -464,6 +465,10 @@ public final class EarthChunkGenerator extends ChunkGenerator {
       return this.getSurfacePosition(heightAccessor, this.settings.spawnLatitude(), this.settings.spawnLongitude(), true);
    }
 
+   public BlockPos getInitialSpawnPosition(LevelHeightAccessor heightAccessor) {
+      return this.getSurfacePosition(heightAccessor, this.settings.spawnLatitude(), this.settings.spawnLongitude(), false);
+   }
+
    public BlockPos getSurfacePosition(LevelHeightAccessor heightAccessor, double latitude, double longitude) {
       return this.getSurfacePosition(heightAccessor, latitude, longitude, true);
    }
@@ -472,7 +477,10 @@ public final class EarthChunkGenerator extends ChunkGenerator {
       double blocksPerDegree = blocksPerDegree(this.settings.worldScale());
       int spawnX = Mth.floor(longitude * blocksPerDegree);
       int spawnZ = Mth.floor(EarthProjection.latToBlockZ(latitude, this.settings.worldScale()));
-      int coverClass = LAND_COVER_SOURCE.sampleCoverClass(spawnX, spawnZ, this.settings.worldScale());
+      ExperimentalHeightSupport.validateHorizontalPositionOrThrow(
+         this.settings, spawnX, spawnZ, "surface target lat=" + latitude + ", lon=" + longitude
+      );
+      int coverClass = this.sampleCoverClass(spawnX, spawnZ);
       int surface;
       if (useDetailedWaterResolver) {
          WaterSurfaceResolver.WaterColumnData column = this.settings.enableWater()
@@ -489,6 +497,9 @@ public final class EarthChunkGenerator extends ChunkGenerator {
 
       int maxY = heightAccessor.getMaxY() - 1;
       int spawnY = Mth.clamp(surface + 1, heightAccessor.getMinY(), maxY);
+      ExperimentalHeightSupport.validateBlockPositionOrThrow(
+         this.settings, spawnX, spawnY, spawnZ, "surface target lat=" + latitude + ", lon=" + longitude
+      );
       return new BlockPos(spawnX, spawnY, spawnZ);
    }
 
@@ -631,6 +642,12 @@ public final class EarthChunkGenerator extends ChunkGenerator {
       return Objects.requireNonNull(CODEC, "CODEC");
    }
 
+   @Override
+   public CompletableFuture<ChunkAccess> createBiomes(RandomState random, Blender blender, StructureManager structures, ChunkAccess chunk) {
+      this.disableFastSpawnMode();
+      return super.createBiomes(random, blender, structures, chunk);
+   }
+
    public void applyCarvers(
        WorldGenRegion level,
       long seed,
@@ -639,57 +656,66 @@ public final class EarthChunkGenerator extends ChunkGenerator {
        StructureManager structures,
       ChunkAccess chunk
    ) {
-      long totalStartNs = beginFullChunkProfiling();
-      if (!SharedConstants.DEBUG_DISABLE_CARVERS && this.settings.caveGeneration() && !this.settings.thinShellTerrain()) {
-         long phaseStartNs = beginFullChunkProfiling();
-         boolean[] waterFlags = new boolean[CHUNK_AREA];
-         WaterSurfaceResolver.WaterChunkData waterData = this.resolveChunkWaterData(chunk.getPos());
-         int waterColumnCount = 0;
+      EarthChunkGenerator.FullChunkTrace timingTrace = EarthChunkGenerator.FullChunkPerf.beginTrace("carvers", chunk.getPos());
+      try {
+         long totalStartNs = beginFullChunkProfiling();
+         if (!SharedConstants.DEBUG_DISABLE_CARVERS && this.settings.caveGeneration() && !this.settings.suppressesUndergroundGenerationForTerrainShell()) {
+            long phaseStartNs = beginFullChunkProfiling();
+            boolean[] waterFlags = new boolean[CHUNK_AREA];
+            WaterSurfaceResolver.WaterChunkData waterData = this.resolveChunkWaterData(chunk.getPos());
+            int waterColumnCount = 0;
 
-         for (int localZ = 0; localZ < CHUNK_SIDE; localZ++) {
-            for (int localX = 0; localX < CHUNK_SIDE; localX++) {
-               boolean hasWater = waterData.hasWater(localX, localZ);
-               waterFlags[chunkIndex(localX, localZ)] = hasWater;
-               if (hasWater) {
-                  waterColumnCount++;
-               }
-            }
-         }
-
-         boolean[] floodGuardColumns = computeFloodGuardColumns(waterFlags);
-         int defaultFloodGuardY = this.seaLevel - SPAGHETTI_WATER_GUARD_DEPTH;
-         int[] floodGuardYByColumn = new int[CHUNK_AREA];
-         Arrays.fill(floodGuardYByColumn, Integer.MAX_VALUE);
-
-         for (int localZ = 0; localZ < CHUNK_SIDE; localZ++) {
-            for (int localXx = 0; localXx < CHUNK_SIDE; localXx++) {
-               int index = chunkIndex(localXx, localZ);
-               if (floodGuardColumns[index]) {
-                  floodGuardYByColumn[index] = defaultFloodGuardY;
-               }
-            }
-         }
-
-         if (waterColumnCount >= Math.ceil(CHUNK_AREA * OCEAN_CHUNK_CARVER_GUARD_RATIO)) {
             for (int localZ = 0; localZ < CHUNK_SIDE; localZ++) {
-               for (int localXxx = 0; localXxx < CHUNK_SIDE; localXxx++) {
-                  int index = chunkIndex(localXxx, localZ);
-                  if (floodGuardColumns[index] && waterData.hasWater(localXxx, localZ)) {
-                     int terrainSurface = waterData.terrainSurface(localXxx, localZ);
-                     int oceanFloorGuardY = Math.max(chunk.getMinY(), terrainSurface - OCEAN_CARVER_FLOOR_BUFFER);
-                     floodGuardYByColumn[index] = Math.min(floodGuardYByColumn[index], oceanFloorGuardY);
+               for (int localX = 0; localX < CHUNK_SIDE; localX++) {
+                  boolean hasWater = waterData.hasWater(localX, localZ);
+                  waterFlags[chunkIndex(localX, localZ)] = hasWater;
+                  if (hasWater) {
+                     waterColumnCount++;
                   }
                }
             }
+
+            boolean[] floodGuardColumns = computeFloodGuardColumns(waterFlags);
+            int defaultFloodGuardY = this.seaLevel - SPAGHETTI_WATER_GUARD_DEPTH;
+            int[] floodGuardYByColumn = new int[CHUNK_AREA];
+            Arrays.fill(floodGuardYByColumn, Integer.MAX_VALUE);
+
+            for (int localZ = 0; localZ < CHUNK_SIDE; localZ++) {
+               for (int localXx = 0; localXx < CHUNK_SIDE; localXx++) {
+                  int index = chunkIndex(localXx, localZ);
+                  if (floodGuardColumns[index]) {
+                     floodGuardYByColumn[index] = defaultFloodGuardY;
+                  }
+               }
+            }
+
+            if (waterColumnCount >= Math.ceil(CHUNK_AREA * OCEAN_CHUNK_CARVER_GUARD_RATIO)) {
+               for (int localZ = 0; localZ < CHUNK_SIDE; localZ++) {
+                  for (int localXxx = 0; localXxx < CHUNK_SIDE; localXxx++) {
+                     int index = chunkIndex(localXxx, localZ);
+                     if (floodGuardColumns[index] && waterData.hasWater(localXxx, localZ)) {
+                        int terrainSurface = waterData.terrainSurface(localXxx, localZ);
+                        int oceanFloorGuardY = Math.max(chunk.getMinY(), terrainSurface - OCEAN_CARVER_FLOOR_BUFFER);
+                        floodGuardYByColumn[index] = Math.min(floodGuardYByColumn[index], oceanFloorGuardY);
+                     }
+                  }
+               }
+            }
+
+            endFullChunkProfiling(EarthChunkGenerator.FullChunkPhase.CARVERS_WATER_GUARD, phaseStartNs);
+            phaseStartNs = beginFullChunkProfiling();
+            int[] shellBottomYByColumn = this.settings.experimentalIncreaseHeight() ? this.computeExperimentalCarverShellBottomYByColumn(chunk, waterData) : null;
+            this.getTellusCarverRunner(level.registryAccess())
+               .applyCarvers(level, seed, random, biomeManager, structures, chunk, floodGuardYByColumn, shellBottomYByColumn);
+            endFullChunkProfiling(EarthChunkGenerator.FullChunkPhase.CARVERS_RUNNER, phaseStartNs);
          }
 
-         endFullChunkProfiling(EarthChunkGenerator.FullChunkPhase.CARVERS_WATER_GUARD, phaseStartNs);
-         phaseStartNs = beginFullChunkProfiling();
-         this.getTellusCarverRunner(level.registryAccess()).applyCarvers(level, seed, random, biomeManager, structures, chunk, floodGuardYByColumn);
-         endFullChunkProfiling(EarthChunkGenerator.FullChunkPhase.CARVERS_RUNNER, phaseStartNs);
+         endFullChunkProfiling(EarthChunkGenerator.FullChunkPhase.CARVERS_TOTAL, totalStartNs);
+         EarthChunkGenerator.FullChunkPerf.finishTrace(timingTrace, "success", null);
+      } catch (RuntimeException | Error error) {
+         EarthChunkGenerator.FullChunkPerf.finishTrace(timingTrace, "failed", error);
+         throw error;
       }
-
-      endFullChunkProfiling(EarthChunkGenerator.FullChunkPhase.CARVERS_TOTAL, totalStartNs);
    }
 
    public void buildSurface( WorldGenRegion level,  StructureManager structures,  RandomState random,  ChunkAccess chunk) {
@@ -704,14 +730,16 @@ public final class EarthChunkGenerator extends ChunkGenerator {
    }
 
    public void applyBiomeDecoration( WorldGenLevel level,  ChunkAccess chunk,  StructureManager structures) {
+      EarthChunkGenerator.FullChunkTrace timingTrace = EarthChunkGenerator.FullChunkPerf.beginTrace("decoration", chunk.getPos());
       long chunkKey = ChunkPos.pack(chunk.getPos().x(), chunk.getPos().z());
       long totalStartNs = beginFullChunkProfiling();
       long phaseStartNs;
+      Throwable failure = null;
       try {
          phaseStartNs = beginFullChunkProfiling();
          super.applyBiomeDecoration(level, chunk, structures);
          endFullChunkProfiling(EarthChunkGenerator.FullChunkPhase.DECORATION_SUPER, phaseStartNs);
-         if (this.settings.caveGeneration() && !this.settings.thinShellTerrain()) {
+         if (this.settings.caveGeneration() && !this.settings.suppressesUndergroundGenerationForTerrainShell()) {
             phaseStartNs = beginFullChunkProfiling();
             this.spawnAxolotlsInLushPonds(level, chunk);
             endFullChunkProfiling(EarthChunkGenerator.FullChunkPhase.DECORATION_AXOLOTLS, phaseStartNs);
@@ -750,9 +778,13 @@ public final class EarthChunkGenerator extends ChunkGenerator {
          }
 
          endFullChunkProfiling(EarthChunkGenerator.FullChunkPhase.DECORATION_TOTAL, totalStartNs);
+      } catch (RuntimeException | Error error) {
+         failure = error;
+         throw error;
       } finally {
          this.chunkDecorationContexts.remove(chunkKey);
          this.clearPreparedChunkStateTracking(chunkKey);
+         EarthChunkGenerator.FullChunkPerf.finishTrace(timingTrace, failure == null ? "success" : "failed", failure);
       }
    }
 
@@ -764,53 +796,66 @@ public final class EarthChunkGenerator extends ChunkGenerator {
        StructureTemplateManager templates,
        ResourceKey<Level> levelKey
    ) {
-      long totalStartNs = beginFullChunkProfiling();
-      long phaseStartNs = beginFullChunkProfiling();
-      super.createStructures(registryAccess, structureState, structures, chunk, templates, levelKey);
-      endFullChunkProfiling(EarthChunkGenerator.FullChunkPhase.STRUCTURES_SUPER, phaseStartNs);
-      phaseStartNs = beginFullChunkProfiling();
-      this.filterVillageStarts(registryAccess, chunk);
-      endFullChunkProfiling(EarthChunkGenerator.FullChunkPhase.STRUCTURES_VILLAGES, phaseStartNs);
-      if (this.settings.addWoodlandMansions()) {
+      EarthChunkGenerator.FullChunkTrace timingTrace = EarthChunkGenerator.FullChunkPerf.beginTrace("structures", chunk.getPos());
+      try {
+         long totalStartNs = beginFullChunkProfiling();
+         long phaseStartNs = beginFullChunkProfiling();
+         super.createStructures(registryAccess, structureState, structures, chunk, templates, levelKey);
+         endFullChunkProfiling(EarthChunkGenerator.FullChunkPhase.STRUCTURES_SUPER, phaseStartNs);
          phaseStartNs = beginFullChunkProfiling();
-         this.filterWoodlandMansionStarts(registryAccess, chunk);
-         endFullChunkProfiling(EarthChunkGenerator.FullChunkPhase.STRUCTURES_WOODLAND_MANSIONS, phaseStartNs);
-      }
+         this.filterVillageStarts(registryAccess, chunk);
+         endFullChunkProfiling(EarthChunkGenerator.FullChunkPhase.STRUCTURES_VILLAGES, phaseStartNs);
+         if (this.settings.addWoodlandMansions()) {
+            phaseStartNs = beginFullChunkProfiling();
+            this.filterWoodlandMansionStarts(registryAccess, chunk);
+            endFullChunkProfiling(EarthChunkGenerator.FullChunkPhase.STRUCTURES_WOODLAND_MANSIONS, phaseStartNs);
+         }
 
-      if (this.settings.addIgloos() && !this.isFrozenPeaksChunk(chunk.getPos(), structureState.randomState())) {
+         if (this.settings.addIgloos() && !this.isFrozenPeaksChunk(chunk.getPos(), structureState.randomState())) {
+            phaseStartNs = beginFullChunkProfiling();
+            this.stripIglooStarts(registryAccess, chunk);
+            endFullChunkProfiling(EarthChunkGenerator.FullChunkPhase.STRUCTURES_IGLOOS, phaseStartNs);
+         }
+
+         if (this.settings.addStrongholds()) {
+            phaseStartNs = beginFullChunkProfiling();
+            this.retargetStrongholdStarts(registryAccess, chunk);
+            endFullChunkProfiling(EarthChunkGenerator.FullChunkPhase.STRUCTURES_STRONGHOLDS, phaseStartNs);
+         }
+
+         if (this.settings.addMineshafts()) {
+            phaseStartNs = beginFullChunkProfiling();
+            this.retargetMineshaftStarts(registryAccess, chunk);
+            endFullChunkProfiling(EarthChunkGenerator.FullChunkPhase.STRUCTURES_MINESHAFTS, phaseStartNs);
+         }
+
+         if (this.settings.addAncientCities()) {
+            phaseStartNs = beginFullChunkProfiling();
+            this.retargetAncientCityStarts(registryAccess, chunk);
+            endFullChunkProfiling(EarthChunkGenerator.FullChunkPhase.STRUCTURES_ANCIENT_CITIES, phaseStartNs);
+         }
+
+         if (this.settings.addTrialChambers()) {
+            phaseStartNs = beginFullChunkProfiling();
+            this.retargetTrialChamberStarts(registryAccess, chunk);
+            endFullChunkProfiling(EarthChunkGenerator.FullChunkPhase.STRUCTURES_TRIAL_CHAMBERS, phaseStartNs);
+         }
+
+         if (this.settings.addOceanMonuments()) {
+            phaseStartNs = beginFullChunkProfiling();
+            this.adjustOceanMonumentStarts(registryAccess, chunk);
+            endFullChunkProfiling(EarthChunkGenerator.FullChunkPhase.STRUCTURES_OCEAN_MONUMENTS, phaseStartNs);
+         }
+
          phaseStartNs = beginFullChunkProfiling();
-         this.stripIglooStarts(registryAccess, chunk);
-         endFullChunkProfiling(EarthChunkGenerator.FullChunkPhase.STRUCTURES_IGLOOS, phaseStartNs);
+         this.filterStartsCollidingWithOsm(registryAccess, chunk);
+         endFullChunkProfiling(EarthChunkGenerator.FullChunkPhase.STRUCTURES_OSM_COLLISIONS, phaseStartNs);
+         endFullChunkProfiling(EarthChunkGenerator.FullChunkPhase.STRUCTURES_TOTAL, totalStartNs);
+         EarthChunkGenerator.FullChunkPerf.finishTrace(timingTrace, "success", null);
+      } catch (RuntimeException | Error error) {
+         EarthChunkGenerator.FullChunkPerf.finishTrace(timingTrace, "failed", error);
+         throw error;
       }
-
-      if (this.settings.addStrongholds()) {
-         phaseStartNs = beginFullChunkProfiling();
-         this.retargetStrongholdStarts(registryAccess, chunk);
-         endFullChunkProfiling(EarthChunkGenerator.FullChunkPhase.STRUCTURES_STRONGHOLDS, phaseStartNs);
-      }
-
-      if (this.settings.addMineshafts()) {
-         phaseStartNs = beginFullChunkProfiling();
-         this.retargetMineshaftStarts(registryAccess, chunk);
-         endFullChunkProfiling(EarthChunkGenerator.FullChunkPhase.STRUCTURES_MINESHAFTS, phaseStartNs);
-      }
-
-      if (this.settings.addTrialChambers()) {
-         phaseStartNs = beginFullChunkProfiling();
-         this.retargetTrialChamberStarts(registryAccess, chunk);
-         endFullChunkProfiling(EarthChunkGenerator.FullChunkPhase.STRUCTURES_TRIAL_CHAMBERS, phaseStartNs);
-      }
-
-      if (this.settings.addOceanMonuments()) {
-         phaseStartNs = beginFullChunkProfiling();
-         this.adjustOceanMonumentStarts(registryAccess, chunk);
-         endFullChunkProfiling(EarthChunkGenerator.FullChunkPhase.STRUCTURES_OCEAN_MONUMENTS, phaseStartNs);
-      }
-
-      phaseStartNs = beginFullChunkProfiling();
-      this.filterStartsCollidingWithOsm(registryAccess, chunk);
-      endFullChunkProfiling(EarthChunkGenerator.FullChunkPhase.STRUCTURES_OSM_COLLISIONS, phaseStartNs);
-      endFullChunkProfiling(EarthChunkGenerator.FullChunkPhase.STRUCTURES_TOTAL, totalStartNs);
    }
 
    public void createReferences( WorldGenLevel level,  StructureManager structures,  ChunkAccess chunk) {
@@ -821,21 +866,29 @@ public final class EarthChunkGenerator extends ChunkGenerator {
    public CompletableFuture<ChunkAccess> fillFromNoise(
        Blender blender,  RandomState random,  StructureManager structures,  ChunkAccess chunk
    ) {
-      this.disableFastSpawnMode();
-      long baseTerrainStartNs = EarthChunkGenerator.ChunkDetailPerf.now();
-      long fullChunkStartNs = beginFullChunkProfiling();
-      this.fillTellusSurface(random, structures, chunk);
-      EarthChunkGenerator.ChunkDetailPerf.recordBaseTerrain(EarthChunkGenerator.ChunkDetailPerf.elapsedSince(baseTerrainStartNs));
-      endFullChunkProfiling(EarthChunkGenerator.FullChunkPhase.FILL_TOTAL, fullChunkStartNs);
-      return Objects.requireNonNull(CompletableFuture.completedFuture(chunk), "completedFuture");
+      EarthChunkGenerator.FullChunkTrace timingTrace = EarthChunkGenerator.FullChunkPerf.beginTrace("fill", chunk.getPos());
+      try {
+         this.disableFastSpawnMode();
+         long baseTerrainStartNs = EarthChunkGenerator.ChunkDetailPerf.now();
+         long fullChunkStartNs = beginFullChunkProfiling();
+         this.fillTellusSurface(random, structures, chunk);
+         EarthChunkGenerator.ChunkDetailPerf.recordBaseTerrain(EarthChunkGenerator.ChunkDetailPerf.elapsedSince(baseTerrainStartNs));
+         endFullChunkProfiling(EarthChunkGenerator.FullChunkPhase.FILL_TOTAL, fullChunkStartNs);
+         EarthChunkGenerator.FullChunkPerf.finishTrace(timingTrace, "success", null);
+         return Objects.requireNonNull(CompletableFuture.completedFuture(chunk), "completedFuture");
+      } catch (RuntimeException | Error error) {
+         EarthChunkGenerator.FullChunkPerf.finishTrace(timingTrace, "failed", error);
+         throw error;
+      }
    }
 
    private void fillTellusSurface( RandomState random,  StructureManager structures,  ChunkAccess chunk) {
       ChunkPos pos = chunk.getPos();
+      validateExperimentalChunkBounds(this.settings, pos);
       long chunkKey = ChunkPos.pack(pos.x(), pos.z());
       long generationStamp = this.chunkDetailGenerationSequence.incrementAndGet();
       boolean terrainShellMode = this.usesDeferredTerrainRefinement() && !this.shouldForceExactSpawnTerrain(pos);
-      boolean thinShellTerrain = this.settings.thinShellTerrain();
+      boolean thinShellTerrain = this.settings.usesTerrainShell();
       this.discardPreparedChunkState(chunkKey);
       if (terrainShellMode) {
          this.terrainGenerationStamps.put(chunkKey, generationStamp);
@@ -895,8 +948,22 @@ public final class EarthChunkGenerator extends ChunkGenerator {
       recordFullChunkProfilingCount(EarthChunkGenerator.FullChunkPhase.FILL_HEIGHT_GRID_CACHE_MISS, heightGridResult.cacheMisses());
 
       phaseStartNs = beginFullChunkProfiling();
-      WaterSurfaceResolver.WaterChunkData waterData = this.resolveChunkWaterData(pos, terrainSurfaces);
-      if (waterData.approximate() && this.settings.enableWater() && this.shouldResolveApproximateWaterExactly(pos, terrainSurfaces)) {
+      boolean oceanUnresolved = false;
+      WaterSurfaceResolver.WaterChunkData waterData;
+      try {
+         waterData = this.resolveChunkWaterData(pos, terrainSurfaces);
+      } catch (OceanCoverageUnavailableException error) {
+         waterData = WaterSurfaceResolver.WaterChunkData.fromArrays(
+            terrainSurfaces, terrainSurfaces, new byte[CHUNK_AREA], true
+         );
+         oceanUnresolved = true;
+         this.terrainGenerationStamps.put(chunkKey, generationStamp);
+         Tellus.LOGGER.debug("Deferring unresolved Overture coastline for {}", pos, error);
+      }
+      if (!oceanUnresolved
+         && waterData.approximate()
+         && this.settings.enableWater()
+         && this.shouldResolveApproximateWaterExactly(pos, terrainSurfaces)) {
          waterData = this.resolveExactChunkWaterData(pos);
       }
 
@@ -911,7 +978,7 @@ public final class EarthChunkGenerator extends ChunkGenerator {
       int shellCoverMisses = 0;
       int shellVisualCoverMisses = 0;
       phaseStartNs = beginFullChunkProfiling();
-      if (terrainShellMode) {
+      if (terrainShellMode || oceanUnresolved) {
          EarthChunkGenerator.TerrainShellColumnFillResult shellColumns = this.fillTerrainShellColumns(
             pos,
             chunkMinY,
@@ -1018,7 +1085,7 @@ public final class EarthChunkGenerator extends ChunkGenerator {
       EarthChunkGenerator.TerrainWarmupTicket warmupTicket = new EarthChunkGenerator.TerrainWarmupTicket(
          heightGridResult.missingCount(), shellCoverMisses, shellVisualCoverMisses, waterData.approximate(), heightGridResult.usedFallback()
       );
-      if (terrainShellMode) {
+      if (terrainShellMode || oceanUnresolved) {
          phaseStartNs = beginFullChunkProfiling();
          EarthChunkGenerator.TerrainShellBuildResult shellResult = EarthChunkGenerator.TerrainShellBuildResult.capture(
             pos,
@@ -1114,7 +1181,11 @@ public final class EarthChunkGenerator extends ChunkGenerator {
                boolean retainSurfaceSnow = surface >= this.seaLevel
                   && this.shouldRetainSurfaceSnow(useFastSurfacePalette, surfaceCoverClass, surface, slopeDiff, convexity, worldX, worldZ);
                if (thinShellTerrain) {
-                  int supportBottomY = this.resolveThinShellSupportBottomY(localX, localZ, worldX, worldZ, surface, terrainSurfaces, chunkMinY);
+                  int supportAnchorY = underwater ? waterSurface : surface;
+                  boolean oceanSupport = underwater && oceanFlags[index];
+                  int supportBottomY = this.resolveThinShellSupportBottomY(
+                     localX, localZ, worldX, worldZ, surface, supportAnchorY, terrainSurfaces, chunkMinY, oceanSupport
+                  );
                   int fillTopY = Math.min(chunkMaxY - 1, surface - 1);
                   int shellBedrockY = Math.min(supportBottomY, fillTopY);
                   if (shellBedrockY >= chunkMinY && shellBedrockY < chunkMaxY) {
@@ -1136,6 +1207,13 @@ public final class EarthChunkGenerator extends ChunkGenerator {
                               cursor.set(worldX, yx, worldZ);
                               chunk.setBlockState(cursor, mountainMassFill);
                            }
+                        }
+                     } else if (oceanSupport && sectionWriter != null) {
+                        sectionWriter.fillColumnConstant(localX, localZ, fillStartY, fillTopY, STONE_STATE);
+                     } else if (oceanSupport) {
+                        for (int yx = fillStartY; yx <= fillTopY; yx++) {
+                           cursor.set(worldX, yx, worldZ);
+                           chunk.setBlockState(cursor, STONE_STATE);
                         }
                      } else if (sectionWriter != null) {
                         sectionWriter.fillStoneColumnSpan(localX, localZ, fillStartY, fillTopY, deepslateStart, STONE_STATE, DEEPSLATE_STATE);
@@ -1377,6 +1455,17 @@ public final class EarthChunkGenerator extends ChunkGenerator {
          this.carveStructureClearanceVolumes(structures, chunk);
          endFullChunkProfiling(EarthChunkGenerator.FullChunkPhase.FILL_STRUCTURE_CLEARANCE, phaseStartNs);
       }
+   }
+
+   private static void validateExperimentalChunkBounds(EarthGeneratorSettings settings, ChunkPos pos) {
+      ExperimentalHeightSupport.validateHorizontalRangeOrThrow(
+         settings,
+         pos.getMinBlockX(),
+         pos.getMaxBlockX(),
+         pos.getMinBlockZ(),
+         pos.getMaxBlockZ(),
+         "chunk " + pos
+      );
    }
 
    private OsmQueryMode resolveFullChunkOsmQueryMode() {
@@ -3130,8 +3219,30 @@ public final class EarthChunkGenerator extends ChunkGenerator {
       return result;
    }
 
+   private int[] computeExperimentalCarverShellBottomYByColumn(ChunkAccess chunk, WaterSurfaceResolver.WaterChunkData waterData) {
+      int[] result = new int[CHUNK_AREA];
+      int minY = chunk.getMinY();
+
+      for (int localZ = 0; localZ < CHUNK_SIDE; localZ++) {
+         for (int localX = 0; localX < CHUNK_SIDE; localX++) {
+            int index = chunkIndex(localX, localZ);
+            int terrainSurface = waterData.terrainSurface(localX, localZ);
+            int waterSurface = waterData.waterSurface(localX, localZ);
+            int supportAnchorY = waterData.hasWater(localX, localZ) && waterSurface > terrainSurface ? waterSurface : terrainSurface;
+            boolean oceanSupport = waterData.hasWater(localX, localZ)
+               && waterData.isOcean(localX, localZ)
+               && waterSurface > terrainSurface;
+            result[index] = oceanSupport
+               ? Math.max(minY, terrainSurface - WaterSurfaceResolver.oceanFloorSupportBlocks())
+               : Math.max(minY, supportAnchorY - EarthGeneratorSettings.EXPERIMENTAL_TERRAIN_SHELL_DEPTH);
+         }
+      }
+
+      return result;
+   }
+
    private static boolean isReplaceableCaveBlock(BlockState state) {
-      return isSolidCaveAnchor(state) && !state.is(Blocks.BEDROCK);
+      return isSolidCaveAnchor(state) && !state.hasBlockEntity() && !state.is(Blocks.BEDROCK);
    }
 
    private static boolean isSolidCaveAnchor(BlockState state) {
@@ -3148,7 +3259,7 @@ public final class EarthChunkGenerator extends ChunkGenerator {
    }
 
    private void carveStructureClearanceVolumes(StructureManager structures, ChunkAccess chunk) {
-      if (this.settings.thinShellTerrain()) {
+      if (this.settings.suppressesUndergroundGenerationForTerrainShell()) {
          return;
       }
 
@@ -3190,6 +3301,10 @@ public final class EarthChunkGenerator extends ChunkGenerator {
                            for (int z = minZ; z <= maxZ; z++) {
                               for (int x = minX; x <= maxX; x++) {
                                  for (int y = minY; y <= maxY; y++) {
+                                    if (isInsideStructureCore(x, y, z, coreMinX, coreMaxX, coreMinY, coreMaxY, coreMinZ, coreMaxZ)) {
+                                       continue;
+                                    }
+
                                     double nx = axisDistanceNormalized(x, coreMinX, coreMaxX, 6);
                                     double nz = axisDistanceNormalized(z, coreMinZ, coreMaxZ, 6);
                                     double ny = axisDistanceNormalized(y, coreMinY, coreMaxY, 0, 4);
@@ -3199,7 +3314,7 @@ public final class EarthChunkGenerator extends ChunkGenerator {
                                        cursor.set(x, y, z);
                                        BlockState state = chunk.getBlockState(cursor);
                                        if (isReplaceableCaveBlock(state)) {
-                                          chunk.setBlockState(cursor, CAVE_AIR_STATE);
+                                          setChunkBlockStateDiscardingBlockEntity(chunk, cursor, CAVE_AIR_STATE);
                                        }
                                     }
                                  }
@@ -3212,6 +3327,12 @@ public final class EarthChunkGenerator extends ChunkGenerator {
             }
          }
       }
+   }
+
+   private static boolean isInsideStructureCore(
+      int x, int y, int z, int coreMinX, int coreMaxX, int coreMinY, int coreMaxY, int coreMinZ, int coreMaxZ
+   ) {
+      return x >= coreMinX && x <= coreMaxX && y >= coreMinY && y <= coreMaxY && z >= coreMinZ && z <= coreMaxZ;
    }
 
    private double structureClearanceNoiseJitter(int x, int y, int z) {
@@ -4321,7 +4442,7 @@ public final class EarthChunkGenerator extends ChunkGenerator {
       int surface = column.terrainSurface();
       int surfaceIndex = surface - minY;
 
-      if (this.settings.thinShellTerrain()) {
+      if (this.settings.usesTerrainShell()) {
          int supportIndex = surfaceIndex - 1;
          if (supportIndex >= 0 && supportIndex < states.length) {
             states[supportIndex] = BEDROCK_STATE;
@@ -4616,8 +4737,28 @@ public final class EarthChunkGenerator extends ChunkGenerator {
    }
 
    private int resolveThinShellSupportBottomY(
-      int localX, int localZ, int worldX, int worldZ, int surface, int[] terrainSurfaces, int chunkMinY
+      int localX,
+      int localZ,
+      int worldX,
+      int worldZ,
+      int surface,
+      int supportAnchorY,
+      int[] terrainSurfaces,
+      int chunkMinY,
+      boolean oceanSupport
    ) {
+      if (this.settings.experimentalIncreaseHeight()) {
+         if (oceanSupport) {
+            return Math.max(chunkMinY, surface - WaterSurfaceResolver.oceanFloorSupportBlocks());
+         }
+
+         int supportBottom = supportAnchorY - EarthGeneratorSettings.EXPERIMENTAL_TERRAIN_SHELL_DEPTH;
+         if (surface < supportAnchorY) {
+            supportBottom = Math.min(supportBottom, surface - WaterSurfaceResolver.oceanFloorSupportBlocks());
+         }
+         return Math.max(chunkMinY, supportBottom);
+      }
+
       int minNeighborSurface = surface;
       for (int direction = 0; direction < 4; direction++) {
          int dx = direction == 0 ? 1 : direction == 1 ? -1 : 0;
@@ -4636,7 +4777,11 @@ public final class EarthChunkGenerator extends ChunkGenerator {
          }
       }
 
-      return Math.max(chunkMinY, minNeighborSurface - 1);
+      int supportBottom = minNeighborSurface - 1;
+      if (surface < supportAnchorY) {
+         supportBottom = Math.min(supportBottom, surface - WaterSurfaceResolver.oceanFloorSupportBlocks());
+      }
+      return Math.max(chunkMinY, supportBottom);
    }
 
    private int sampleSurfaceHeightLocalOnly(int blockX, int blockZ) {
@@ -4647,7 +4792,30 @@ public final class EarthChunkGenerator extends ChunkGenerator {
       return this.sampleSurfaceHeightMemoryOnly(blockX, blockZ, this.settings.worldScale());
    }
 
+   private TerrainPreloadPackage.Sample samplePreloadedTerrain(int blockX, int blockZ) {
+      return this.preloadedTerrain.sample(blockX, blockZ, this.settings.worldScale());
+   }
+
+   private TerrainPreloadPackage.Sample samplePreloadedTerrain(int blockX, int blockZ, double previewResolutionMeters) {
+      return this.preloadedTerrain.sample(blockX, blockZ, previewResolutionMeters);
+   }
+
+   private int samplePreloadedCoverClass(int blockX, int blockZ) {
+      TerrainPreloadPackage.Sample preloaded = this.samplePreloadedTerrain(blockX, blockZ);
+      return preloaded == null ? Integer.MIN_VALUE : preloaded.coverClass();
+   }
+
+   private int samplePreloadedCoverClass(int blockX, int blockZ, double previewResolutionMeters) {
+      TerrainPreloadPackage.Sample preloaded = this.samplePreloadedTerrain(blockX, blockZ, previewResolutionMeters);
+      return preloaded == null ? Integer.MIN_VALUE : preloaded.coverClass();
+   }
+
    private int sampleSurfaceHeight(int blockX, int blockZ, double previewResolutionMeters) {
+      TerrainPreloadPackage.Sample preloaded = this.samplePreloadedTerrain(blockX, blockZ, previewResolutionMeters);
+      if (preloaded != null) {
+         return preloaded.terrainHeight();
+      }
+
       boolean oceanZoom = this.useOceanZoom(blockX, blockZ, previewResolutionMeters);
       double elevation = ELEVATION_SOURCE.samplePreviewElevationMeters(
          blockX, blockZ, this.settings.worldScale(), oceanZoom, this.settings.demSelection(), previewResolutionMeters
@@ -4656,6 +4824,11 @@ public final class EarthChunkGenerator extends ChunkGenerator {
    }
 
    private int sampleSurfaceHeightLocalOnly(int blockX, int blockZ, double previewResolutionMeters) {
+      TerrainPreloadPackage.Sample preloaded = this.samplePreloadedTerrain(blockX, blockZ, previewResolutionMeters);
+      if (preloaded != null) {
+         return preloaded.terrainHeight();
+      }
+
       boolean oceanZoom = this.useOceanZoomLocalOnly(blockX, blockZ, previewResolutionMeters);
       double elevation = ELEVATION_SOURCE.samplePreviewElevationMetersLocalOnly(
          blockX, blockZ, this.settings.worldScale(), oceanZoom, this.settings.demSelection(), previewResolutionMeters
@@ -4664,6 +4837,11 @@ public final class EarthChunkGenerator extends ChunkGenerator {
    }
 
    private int sampleSurfaceHeightMemoryOnly(int blockX, int blockZ, double previewResolutionMeters) {
+      TerrainPreloadPackage.Sample preloaded = this.samplePreloadedTerrain(blockX, blockZ, previewResolutionMeters);
+      if (preloaded != null) {
+         return preloaded.terrainHeight();
+      }
+
       boolean oceanZoom = this.useOceanZoomMemoryOnly(blockX, blockZ, previewResolutionMeters);
       double elevation = ELEVATION_SOURCE.samplePreviewElevationMetersMemoryOnly(
          blockX, blockZ, this.settings.worldScale(), oceanZoom, this.settings.demSelection(), previewResolutionMeters
@@ -4676,9 +4854,9 @@ public final class EarthChunkGenerator extends ChunkGenerator {
    }
 
    private int scaleElevationToHeight(double elevation) {
-      double heightScale = elevation >= 0.0 ? this.settings.terrestrialHeightScale() : this.settings.oceanicHeightScale();
-      double scaled = elevation * heightScale / this.settings.worldScale();
-      int offset = this.settings.heightOffset();
+      double heightScale = elevation >= 0.0 ? this.settings.effectiveTerrestrialHeightScale() : this.settings.effectiveOceanicHeightScale();
+      double scaled = elevation * heightScale / this.settings.effectiveVerticalWorldScale();
+      int offset = this.settings.effectiveHeightOffset();
       int height = elevation >= 0.0 ? Mth.ceil(scaled) : Mth.floor(scaled);
       return height + offset;
    }
@@ -4729,20 +4907,39 @@ public final class EarthChunkGenerator extends ChunkGenerator {
    }
 
    private int sampleCoverClassForBaseTerrain(int worldX, int worldZ) {
+      int preloaded = this.samplePreloadedCoverClass(worldX, worldZ);
+      if (preloaded != Integer.MIN_VALUE) {
+         return preloaded;
+      }
+
       return LAND_COVER_SOURCE.sampleCoverClassLocalOnly(worldX, worldZ, this.settings.worldScale(), this.settings.worldScale());
    }
 
    private int sampleCoverClassForExactTerrain(int worldX, int worldZ) {
+      int preloaded = this.samplePreloadedCoverClass(worldX, worldZ);
+      if (preloaded != Integer.MIN_VALUE) {
+         return preloaded;
+      }
+
       return NON_BLOCKING_TERRAIN_INPUTS
          ? this.sampleCoverClassForBaseTerrain(worldX, worldZ)
          : LAND_COVER_SOURCE.sampleCoverClass(worldX, worldZ, this.settings.worldScale());
    }
 
    private int sampleCoverClassForTerrainShell(int worldX, int worldZ) {
+      int preloaded = this.samplePreloadedCoverClass(worldX, worldZ);
+      if (preloaded != Integer.MIN_VALUE) {
+         return preloaded;
+      }
+
       return LAND_COVER_SOURCE.sampleCoverClassMemoryOnly(worldX, worldZ, this.settings.worldScale(), this.settings.worldScale());
    }
 
    private int sampleVisualCoverClassForBaseTerrain(int worldX, int worldZ, int rawCoverClass) {
+      if (this.samplePreloadedTerrain(worldX, worldZ) != null) {
+         return rawCoverClass;
+      }
+
       double worldScale = this.settings.worldScale();
       return worldScale > 0.0 && worldScale < 10.0
          ? LAND_COVER_SOURCE.sampleVisualCoverClassLocalOnly(worldX, worldZ, worldScale, worldScale)
@@ -4756,6 +4953,10 @@ public final class EarthChunkGenerator extends ChunkGenerator {
    }
 
    private int sampleVisualCoverClassForTerrainShell(int worldX, int worldZ, int rawCoverClass) {
+      if (this.samplePreloadedTerrain(worldX, worldZ) != null) {
+         return rawCoverClass;
+      }
+
       double worldScale = this.settings.worldScale();
       return worldScale > 0.0 && worldScale < 10.0
          ? LAND_COVER_SOURCE.sampleVisualCoverClassMemoryOnly(worldX, worldZ, worldScale, worldScale)
@@ -4786,17 +4987,19 @@ public final class EarthChunkGenerator extends ChunkGenerator {
    }
 
    public long sampleLodSnowSlopeShape(int worldX, int worldZ) {
-      return this.sampleLodSurfaceShape(worldX, worldZ);
+      return this.sampleLodSurfaceShape(worldX, worldZ, this.settings.worldScale());
    }
 
-   public long sampleLodSurfaceShape(int worldX, int worldZ) {
-      int step = 4;
-      double scale = this.settings.worldScale();
-      int center = this.sampleSurfaceHeight(worldX, worldZ, scale);
-      int east = this.sampleSurfaceHeight(worldX + step, worldZ, scale);
-      int west = this.sampleSurfaceHeight(worldX - step, worldZ, scale);
-      int north = this.sampleSurfaceHeight(worldX, worldZ - step, scale);
-      int south = this.sampleSurfaceHeight(worldX, worldZ + step, scale);
+   public long sampleLodSurfaceShape(int worldX, int worldZ, double previewResolutionMeters) {
+      double worldScale = this.settings.worldScale();
+      int step = worldScale > 0.0 && Double.isFinite(previewResolutionMeters)
+         ? Math.max(4, Mth.ceil(previewResolutionMeters / worldScale))
+         : 4;
+      int center = this.sampleSurfaceHeight(worldX, worldZ, previewResolutionMeters);
+      int east = this.sampleSurfaceHeight(worldX + step, worldZ, previewResolutionMeters);
+      int west = this.sampleSurfaceHeight(worldX - step, worldZ, previewResolutionMeters);
+      int north = this.sampleSurfaceHeight(worldX, worldZ - step, previewResolutionMeters);
+      int south = this.sampleSurfaceHeight(worldX, worldZ + step, previewResolutionMeters);
       int slopeDiff = Math.max(
          Math.max(Math.abs(east - center), Math.abs(west - center)),
          Math.max(Math.abs(north - center), Math.abs(south - center))
@@ -4857,9 +5060,14 @@ public final class EarthChunkGenerator extends ChunkGenerator {
          int surface = Mth.clamp(cachedSurface == Integer.MIN_VALUE ? waterData.terrainSurface(localX, localZ) : cachedSurface, minY, maxY);
          int waterSurface = Mth.clamp(waterData.waterSurface(localX, localZ), minY, maxY);
          boolean hasWater = waterData.hasWater(localX, localZ);
+         int minimumTerrainY = hasWater && waterData.isOcean(localX, localZ)
+            ? Math.min(maxY, minY + WaterSurfaceResolver.oceanFloorSupportBlocks())
+            : minY;
          return !hasWater
             ? new EarthChunkGenerator.ColumnHeights(surface, surface, false)
-            : new EarthChunkGenerator.ColumnHeights(Mth.clamp(waterData.terrainSurface(localX, localZ), minY, maxY), waterSurface, true);
+            : new EarthChunkGenerator.ColumnHeights(
+               Mth.clamp(waterData.terrainSurface(localX, localZ), minimumTerrainY, maxY), waterSurface, true
+            );
       }
    }
 
@@ -4966,7 +5174,7 @@ public final class EarthChunkGenerator extends ChunkGenerator {
          top = ThinShellSurfaceOre.resolve(top, this.settings.oreDistribution(), underwater, snowCovered, worldX, surface, worldZ);
          long blockWriteStartNs = beginFullChunkProfiling();
          cursor.set(worldX, surface, worldZ);
-         chunk.setBlockState(cursor, top);
+         setChunkBlockStateDiscardingBlockEntity(chunk, cursor, top);
          profiler.blockWriteNs += elapsedFullChunkProfilingSince(blockWriteStartNs);
       }
    }
@@ -5047,7 +5255,7 @@ public final class EarthChunkGenerator extends ChunkGenerator {
                long blockWriteStartNs = beginFullChunkProfiling();
                for (int y = surface; y >= bottom; y--) {
                   cursor.set(worldX, y, worldZ);
-                  chunk.setBlockState(cursor, y == surface ? top : filler);
+                  setChunkBlockStateDiscardingBlockEntity(chunk, cursor, y == surface ? top : filler);
                }
                profiler.blockWriteNs += elapsedFullChunkProfilingSince(blockWriteStartNs);
             }
@@ -5209,7 +5417,7 @@ public final class EarthChunkGenerator extends ChunkGenerator {
       for (int y = surface; y >= bottom; y--) {
          cursor.set(worldX, y, worldZ);
          BlockState state = y == surface ? top : badlandsBand(y, offset);
-         chunk.setBlockState(cursor, state);
+         setChunkBlockStateDiscardingBlockEntity(chunk, cursor, state);
       }
    }
 
@@ -5270,7 +5478,11 @@ public final class EarthChunkGenerator extends ChunkGenerator {
    }
 
    public boolean hasOvertureSandAt(int worldX, int worldZ) {
-      return OSM_SAND_SOURCE.containsSand(worldX, worldZ, this.settings.worldScale(), this.resolveFullChunkOsmQueryMode());
+      return this.hasOvertureSandAt(worldX, worldZ, this.resolveFullChunkOsmQueryMode());
+   }
+
+   public boolean hasOvertureSandAt(int worldX, int worldZ, OsmQueryMode queryMode) {
+      return OSM_SAND_SOURCE.containsSand(worldX, worldZ, this.settings.worldScale(), queryMode);
    }
 
    private MountainSurfaceRules.ApproximateSurface classifyMountainSurface(
@@ -5619,6 +5831,36 @@ public final class EarthChunkGenerator extends ChunkGenerator {
       boolean snowLikeTerrain,
       OsmQueryMode mountainOsmQueryMode
    ) {
+      return this.resolveUltraFastLodSurface(
+         biome,
+         worldX,
+         worldZ,
+         surface,
+         underwater,
+         rawCoverClass,
+         visualCoverClass,
+         slopeDiff,
+         convexity,
+         snowLikeTerrain,
+         mountainOsmQueryMode,
+         true
+      );
+   }
+
+   public EarthChunkGenerator.LodSurface resolveUltraFastLodSurface(
+      Holder<Biome> biome,
+      int worldX,
+      int worldZ,
+      int surface,
+      boolean underwater,
+      int rawCoverClass,
+      int visualCoverClass,
+      int slopeDiff,
+      int convexity,
+      boolean snowLikeTerrain,
+      OsmQueryMode mountainOsmQueryMode,
+      boolean allowOsmSand
+   ) {
       int effectiveCoverClass = this.resolveEffectiveCoverClassForTerrain(rawCoverClass);
       int surfaceCoverClass = this.resolveSurfaceCoverClassForTerrain(effectiveCoverClass, visualCoverClass);
       EarthChunkGenerator.SurfacePalette palette;
@@ -5644,7 +5886,9 @@ public final class EarthChunkGenerator extends ChunkGenerator {
          }
       }
 
-      palette = this.applyOvertureSandPaletteOverride(palette, worldX, worldZ, underwater);
+      if (allowOsmSand) {
+         palette = this.applyOvertureSandPaletteOverride(palette, worldX, worldZ, underwater, mountainOsmQueryMode);
+      }
       BlockState top = underwater ? palette.underwaterTop() : palette.top();
       BlockState filler = this.resolveLodSurfaceFiller(
          palette, top, underwater, biome, surfaceCoverClass, surface, slopeDiff, convexity, worldX, worldZ, snowLikeTerrain, mountainOsmQueryMode
@@ -6291,7 +6535,7 @@ public final class EarthChunkGenerator extends ChunkGenerator {
       int[] refinedConvexities = refinement.convexities();
       int[] refinedSurfaceCoverClasses = refinement.surfaceCoverClasses();
       Holder<Biome>[] refinedBiomes = refinement.context().biomeCache();
-      boolean thinShellTerrain = this.settings.thinShellTerrain();
+      boolean thinShellTerrain = this.settings.usesTerrainShell();
 
       for (int localZ = 0; localZ < CHUNK_SIDE; localZ++) {
          int worldZ = chunkMinZ + localZ;
@@ -6304,9 +6548,36 @@ public final class EarthChunkGenerator extends ChunkGenerator {
             int newSurface = refinedTerrainSurfaces[index];
             int oldTop = shellWaterFlags[index] ? Math.max(oldSurface, shellWaterSurfaces[index]) : oldSurface;
             int newTop = refinedWaterFlags[index] ? Math.max(newSurface, refinedWaterSurfaces[index]) : newSurface;
-            int rewriteBottom = Mth.clamp(Math.min(oldSurface, newSurface) - 4, chunkMinY, chunkMaxY);
+            int oldSupportBottom = thinShellTerrain
+               ? this.resolveThinShellSupportBottomY(
+                  localX,
+                  localZ,
+                  worldX,
+                  worldZ,
+                  oldSurface,
+                  oldTop,
+                  shellTerrainSurfaces,
+                  chunkMinY,
+                  shell.waterFlags()[index] && shell.oceanFlags()[index] && shell.waterSurfaces()[index] > oldSurface
+               )
+               : oldSurface;
+            int newSupportBottom = thinShellTerrain
+               ? this.resolveThinShellSupportBottomY(
+                  localX,
+                  localZ,
+                  worldX,
+                  worldZ,
+                  newSurface,
+                  newTop,
+                  refinedTerrainSurfaces,
+                  chunkMinY,
+                  refinedWaterFlags[index] && refinement.oceanFlags()[index] && refinedWaterSurfaces[index] > newSurface
+               )
+               : newSurface;
+            int rewriteBottom = Mth.clamp(Math.min(Math.min(oldSurface, newSurface), Math.min(oldSupportBottom, newSupportBottom)) - 4, chunkMinY, chunkMaxY);
             int rewriteTop = Mth.clamp(Math.max(oldTop, newTop) + 2, chunkMinY, chunkMaxY);
             boolean refinedUnderwater = refinedWaterFlags[index] && refinedWaterSurfaces[index] > newSurface;
+            boolean refinedOceanSupport = refinedUnderwater && refinement.oceanFlags()[index];
             BlockState mountainMassFill = refinedUnderwater
                ? null
                : this.resolveMountainMassFillBlock(
@@ -6331,32 +6602,40 @@ public final class EarthChunkGenerator extends ChunkGenerator {
 
             for (int y = rewriteBottom; y <= rewriteTop; y++) {
                cursor.set(worldX, y, worldZ);
-               chunk.setBlockState(cursor, AIR_STATE);
+               setChunkBlockStateDiscardingBlockEntity(chunk, cursor, AIR_STATE);
             }
 
             if (thinShellTerrain) {
-               int supportBottomY = this.resolveThinShellSupportBottomY(localX, localZ, worldX, worldZ, newSurface, refinedTerrainSurfaces, chunkMinY);
+               int supportBottomY = newSupportBottom;
                int fillTopY = Math.min(chunkMaxY - 1, newSurface - 1);
                int bedrockY = Math.min(supportBottomY, fillTopY);
                if (bedrockY >= chunkMinY && bedrockY < chunkMaxY) {
                   cursor.set(worldX, bedrockY, worldZ);
-                  chunk.setBlockState(cursor, BEDROCK_STATE);
+                  setChunkBlockStateDiscardingBlockEntity(chunk, cursor, BEDROCK_STATE);
                }
                for (int y = bedrockY + 1; y <= fillTopY; y++) {
                   cursor.set(worldX, y, worldZ);
-                  chunk.setBlockState(cursor, mountainMassFill != null ? mountainMassFill : y < this.minY + 64 ? DEEPSLATE_STATE : STONE_STATE);
+                  setChunkBlockStateDiscardingBlockEntity(
+                     chunk,
+                     cursor,
+                     mountainMassFill != null
+                        ? mountainMassFill
+                        : refinedOceanSupport ? STONE_STATE : y < this.minY + 64 ? DEEPSLATE_STATE : STONE_STATE
+                  );
                }
             } else {
                for (int y = rewriteBottom; y <= newSurface; y++) {
                   cursor.set(worldX, y, worldZ);
-                  chunk.setBlockState(cursor, mountainMassFill != null ? mountainMassFill : y < this.minY + 64 ? DEEPSLATE_STATE : STONE_STATE);
+                  setChunkBlockStateDiscardingBlockEntity(
+                     chunk, cursor, mountainMassFill != null ? mountainMassFill : y < this.minY + 64 ? DEEPSLATE_STATE : STONE_STATE
+                  );
                }
             }
 
             if (refinedWaterFlags[index] && newSurface < refinedWaterSurfaces[index]) {
                for (int y = newSurface + 1; y <= refinedWaterSurfaces[index]; y++) {
                   cursor.set(worldX, y, worldZ);
-                  chunk.setBlockState(cursor, WATER_STATE);
+                  setChunkBlockStateDiscardingBlockEntity(chunk, cursor, WATER_STATE);
                }
             }
 
@@ -6497,6 +6776,29 @@ public final class EarthChunkGenerator extends ChunkGenerator {
          includeBuildingsPrefetch,
          previewResolutionMeters,
          allowInlineExecution
+      );
+   }
+
+   public CompletableFuture<Void> prefetchForArea(
+      int minBlockX,
+      int minBlockZ,
+      int maxBlockX,
+      int maxBlockZ,
+      boolean includeRoadsPrefetch,
+      boolean includeDetailedWaterPrefetch,
+      boolean includeBuildingsPrefetch,
+      double previewResolutionMeters
+   ) {
+      return TellusWorldgenSources.prefetchForArea(
+         minBlockX,
+         minBlockZ,
+         maxBlockX,
+         maxBlockZ,
+         this.settings,
+         includeRoadsPrefetch,
+         includeDetailedWaterPrefetch,
+         includeBuildingsPrefetch,
+         previewResolutionMeters
       );
    }
 
@@ -7025,7 +7327,7 @@ public final class EarthChunkGenerator extends ChunkGenerator {
       int chunkMinZ = chunk.getPos().getMinBlockZ();
       int flags = this.detailApplyFlags(level);
       MutableBlockPos cursor = new MutableBlockPos();
-      boolean thinShellTerrain = this.settings.thinShellTerrain();
+      boolean thinShellTerrain = this.settings.usesTerrainShell();
 
       for (int index = 0; index < CHUNK_AREA; index++) {
          int flattenedSurface = prepared.flattenedTerrainSurface(index);
@@ -8605,52 +8907,42 @@ public final class EarthChunkGenerator extends ChunkGenerator {
       int[] chunkRoadDeckY,
       EarthChunkGenerator.PreparedChunkBuildings preparedBuildings
    ) {
-      EarthChunkGenerator.RoadCrossingAnchor anchor = findCrossingAnchor(localX, localZ, chunkRoadClass, chunkRoadMode, chunkRoadDeckY);
+      RoadCrossingLayout.Anchor anchor = RoadCrossingLayout.findAnchor(
+         localX,
+         localZ,
+         chunkRoadClass,
+         chunkRoadMode,
+         (byte)(RoadMode.TUNNEL.ordinal() + 1),
+         CHUNK_SIDE,
+         OSM_CROSSING_SCAN_RADIUS
+      );
       if (anchor == null) {
          return;
       }
 
-      int axisStepX = anchor.horizontal() ? 1 : 0;
-      int axisStepZ = anchor.horizontal() ? 0 : 1;
-      int crossStepX = anchor.horizontal() ? 0 : 1;
-      int crossStepZ = anchor.horizontal() ? 1 : 0;
-      for (int stripe = -OSM_CROSSING_STRIPE_RADIUS; stripe <= OSM_CROSSING_STRIPE_RADIUS; stripe++) {
-         if (Math.floorMod(stripe + OSM_CROSSING_STRIPE_RADIUS, 2) != 0) {
+      for (RoadCrossingLayout.Cell cell : RoadCrossingLayout.markedCells(
+         anchor,
+         chunkRoadClass,
+         chunkRoadMode,
+         (byte)(RoadMode.TUNNEL.ordinal() + 1),
+         CHUNK_SIDE,
+         OSM_CROSSING_HALF_SPAN,
+         OSM_CROSSING_STRIPE_RADIUS
+      )) {
+         int targetX = cell.localX();
+         int targetZ = cell.localZ();
+         int deckY = chunkRoadDeckY[cell.index()];
+         if (deckY < chunkMinY || deckY > chunkMaxY) {
             continue;
          }
 
-         int stripeX = anchor.localX() + axisStepX * stripe;
-         int stripeZ = anchor.localZ() + axisStepZ * stripe;
-         if (stripeX < 0 || stripeX > CHUNK_MASK || stripeZ < 0 || stripeZ > CHUNK_MASK) {
+         if (preparedBuildings != null && preparedBuildings.intersectsRoad(targetX, targetZ, deckY)) {
             continue;
          }
 
-         int stripeIndex = chunkIndex(stripeX, stripeZ);
-         if (!isRoadPointRoadCell(stripeIndex, chunkRoadClass, chunkRoadMode)) {
-            continue;
-         }
-
-         for (int across = -OSM_CROSSING_HALF_SPAN; across <= OSM_CROSSING_HALF_SPAN; across++) {
-            int targetX = stripeX + crossStepX * across;
-            int targetZ = stripeZ + crossStepZ * across;
-            if (targetX < 0 || targetX > CHUNK_MASK || targetZ < 0 || targetZ > CHUNK_MASK) {
-               continue;
-            }
-
-            int index = chunkIndex(targetX, targetZ);
-            int deckY = chunkRoadDeckY[index];
-            if (!isRoadPointRoadCell(index, chunkRoadClass, chunkRoadMode) || deckY < chunkMinY || deckY > chunkMaxY) {
-               continue;
-            }
-
-            if (preparedBuildings != null && preparedBuildings.intersectsRoad(targetX, targetZ, deckY)) {
-               continue;
-            }
-
-            cursor.set(chunkMinX + targetX, deckY, chunkMinZ + targetZ);
-            if (isRoadDeckState(blockStateAt(level, chunk, cursor))) {
-               this.setChunkBlock(level, chunk, cursor, ROAD_MARKING_STATE);
-            }
+         cursor.set(chunkMinX + targetX, deckY, chunkMinZ + targetZ);
+         if (isRoadDeckState(blockStateAt(level, chunk, cursor))) {
+            this.setChunkBlock(level, chunk, cursor, ROAD_MARKING_STATE);
          }
       }
    }
@@ -8893,54 +9185,6 @@ public final class EarthChunkGenerator extends ChunkGenerator {
       return true;
    }
 
-   private static EarthChunkGenerator.RoadCrossingAnchor findCrossingAnchor(
-      int localX, int localZ, byte[] chunkRoadClass, byte[] chunkRoadMode, int[] chunkRoadDeckY
-   ) {
-      int minX = Math.max(0, localX - OSM_CROSSING_SCAN_RADIUS);
-      int maxX = Math.min(CHUNK_MASK, localX + OSM_CROSSING_SCAN_RADIUS);
-      int minZ = Math.max(0, localZ - OSM_CROSSING_SCAN_RADIUS);
-      int maxZ = Math.min(CHUNK_MASK, localZ + OSM_CROSSING_SCAN_RADIUS);
-      EarthChunkGenerator.RoadCrossingAnchor best = null;
-      int bestScore = Integer.MIN_VALUE;
-      int bestDistanceSq = Integer.MAX_VALUE;
-      int bestBoundary = -1;
-
-      for (int z = minZ; z <= maxZ; z++) {
-         for (int x = minX; x <= maxX; x++) {
-            int index = chunkIndex(x, z);
-            if (!isRoadPointRoadCell(index, chunkRoadClass, chunkRoadMode)) {
-               continue;
-            }
-
-            int horizontalRun = roadRunLength(x, z, 1, 0, chunkRoadClass, chunkRoadMode);
-            int verticalRun = roadRunLength(x, z, 0, 1, chunkRoadClass, chunkRoadMode);
-            boolean horizontal = horizontalRun >= verticalRun;
-            int dominance = Math.abs(horizontalRun - verticalRun);
-            int axisRun = Math.max(horizontalRun, verticalRun);
-            int boundary = roadBoundaryScore(x, z, chunkRoadClass);
-            int dx = x - localX;
-            int dz = z - localZ;
-            int distanceSq = dx * dx + dz * dz;
-            int score = dominance * 32 + axisRun * 2 + boundary * 8 - distanceSq;
-            if (boundary <= 0) {
-               score -= 12;
-            }
-            if (horizontalRun >= 8 && verticalRun >= 8) {
-               score -= 48;
-            }
-
-            if (score > bestScore || score == bestScore && (distanceSq < bestDistanceSq || distanceSq == bestDistanceSq && boundary > bestBoundary)) {
-               bestScore = score;
-               bestDistanceSq = distanceSq;
-               bestBoundary = boundary;
-               best = new EarthChunkGenerator.RoadCrossingAnchor(x, z, chunkRoadDeckY[index], index, horizontal);
-            }
-         }
-      }
-
-      return best;
-   }
-
    private static EarthChunkGenerator.RoadLightAnchor findNearestRoadPointAnchor(
       int localX, int localZ, byte[] chunkRoadClass, byte[] chunkRoadMode, int[] chunkRoadDeckY, boolean preferBoundary
    ) {
@@ -8979,35 +9223,6 @@ public final class EarthChunkGenerator extends ChunkGenerator {
       }
 
       return preferBoundary && bestBoundary <= 0 ? null : best;
-   }
-
-   private static int roadRunLength(int localX, int localZ, int stepX, int stepZ, byte[] chunkRoadClass, byte[] chunkRoadMode) {
-      int length = 1;
-      length += roadRunLengthOneSide(localX, localZ, stepX, stepZ, chunkRoadClass, chunkRoadMode);
-      length += roadRunLengthOneSide(localX, localZ, -stepX, -stepZ, chunkRoadClass, chunkRoadMode);
-      return length;
-   }
-
-   private static int roadRunLengthOneSide(int localX, int localZ, int stepX, int stepZ, byte[] chunkRoadClass, byte[] chunkRoadMode) {
-      byte roadClass = chunkRoadClass[chunkIndex(localX, localZ)];
-      byte roadMode = chunkRoadMode[chunkIndex(localX, localZ)];
-      int length = 0;
-      for (int offset = 1; offset <= 4; offset++) {
-         int x = localX + stepX * offset;
-         int z = localZ + stepZ * offset;
-         if (x < 0 || x > CHUNK_MASK || z < 0 || z > CHUNK_MASK) {
-            break;
-         }
-
-         int index = chunkIndex(x, z);
-         if (chunkRoadClass[index] != roadClass || chunkRoadMode[index] != roadMode) {
-            break;
-         }
-
-         length++;
-      }
-
-      return length;
    }
 
    private static boolean isRoadPointRoadCell(int index, byte[] chunkRoadClass, byte[] chunkRoadMode) {
@@ -9401,9 +9616,16 @@ public final class EarthChunkGenerator extends ChunkGenerator {
 
    private void setChunkBlock(WorldGenLevel level, ChunkAccess chunk, MutableBlockPos cursor, BlockState state) {
       if (level == null) {
-         chunk.setBlockState(cursor, state);
+         setChunkBlockStateDiscardingBlockEntity(chunk, cursor, state);
       } else {
          level.setBlock(cursor, state, this.detailApplyFlags(level));
+      }
+   }
+
+   private static void setChunkBlockStateDiscardingBlockEntity(ChunkAccess chunk, BlockPos pos, BlockState state) {
+      chunk.setBlockState(pos, state);
+      if (!state.hasBlockEntity()) {
+         chunk.removeBlockEntity(pos);
       }
    }
 
@@ -9478,6 +9700,11 @@ public final class EarthChunkGenerator extends ChunkGenerator {
    }
 
    private boolean isKnownOceanLandMask(int worldX, int worldZ) {
+      TerrainPreloadPackage.Sample preloaded = this.samplePreloadedTerrain(worldX, worldZ);
+      if (preloaded != null) {
+         return preloaded.landMaskKnown() && !preloaded.land();
+      }
+
       TellusLandMaskSource.LandMaskSample sample = LAND_MASK_SOURCE.sampleLandMask(worldX, worldZ, this.settings.worldScale());
       return sample.known() && !sample.land();
    }
@@ -9498,7 +9725,9 @@ public final class EarthChunkGenerator extends ChunkGenerator {
                   ),
                   "adaptedCarverNoiseSettings"
                );
-               cached = new TellusVanillaCarverRunner(this.biomeSource, blockRegistry, adaptedCarverNoiseSettings, this.minY, this.height);
+               cached = new TellusVanillaCarverRunner(
+                  this.biomeSource, blockRegistry, adaptedCarverNoiseSettings, this.minY, this.height, this.settings.experimentalIncreaseHeight()
+               );
                this.tellusCarverRunner = cached;
             }
 
@@ -9508,10 +9737,20 @@ public final class EarthChunkGenerator extends ChunkGenerator {
    }
 
    public int sampleCoverClass(int worldX, int worldZ) {
+      int preloaded = this.samplePreloadedCoverClass(worldX, worldZ);
+      if (preloaded != Integer.MIN_VALUE) {
+         return preloaded;
+      }
+
       return LAND_COVER_SOURCE.sampleCoverClass(worldX, worldZ, this.settings.worldScale());
    }
 
    public int sampleCoverClass(int worldX, int worldZ, double previewResolutionMeters) {
+      int preloaded = this.samplePreloadedCoverClass(worldX, worldZ, previewResolutionMeters);
+      if (preloaded != Integer.MIN_VALUE) {
+         return preloaded;
+      }
+
       return LAND_COVER_SOURCE.sampleCoverClass(worldX, worldZ, this.settings.worldScale(), previewResolutionMeters);
    }
 
@@ -9525,6 +9764,10 @@ public final class EarthChunkGenerator extends ChunkGenerator {
    }
 
    public int sampleVisualCoverClass(int worldX, int worldZ, int rawCoverClass, double previewResolutionMeters) {
+      if (this.samplePreloadedTerrain(worldX, worldZ, previewResolutionMeters) != null) {
+         return rawCoverClass;
+      }
+
       double worldScale = this.settings.worldScale();
       return shouldSampleVisualCover(worldScale, previewResolutionMeters, rawCoverClass)
          ? LAND_COVER_SOURCE.sampleVisualCoverClass(worldX, worldZ, worldScale, previewResolutionMeters)
@@ -9550,31 +9793,80 @@ public final class EarthChunkGenerator extends ChunkGenerator {
 
    public int resolveLodTerrainSurface(int worldX, int worldZ, int coverClass, double previewResolutionMeters) {
       int surface = this.sampleSurfaceHeight(worldX, worldZ, previewResolutionMeters);
-      int effectiveCoverClass = this.resolveEffectiveCoverClassForTerrain(coverClass);
-      return this.repairAnomalousSurfaceHeight(worldX, worldZ, surface, effectiveCoverClass, this.minY, this.minY + this.height - 1);
+      return Mth.clamp(surface, this.minY, this.minY + this.height - 1);
+   }
+
+   public void repairLodTerrainSurfaceGrid(int[] surfaces, int[] coverClasses, int width) {
+      if (surfaces.length != coverClasses.length) {
+         throw new IllegalArgumentException("Mismatched LOD terrain and cover grids");
+      }
+
+      boolean[] repairMask = new boolean[surfaces.length];
+      for (int index = 0; index < surfaces.length; index++) {
+         int effectiveCoverClass = this.resolveEffectiveCoverClassForTerrain(coverClasses[index]);
+         repairMask[index] = this.shouldRepairTerrainAnomaly(effectiveCoverClass, surfaces[index], false);
+      }
+
+      TerrainAnomalyRepair.repairHeightGrid(
+         surfaces, repairMask, width, this.minY, this.minY + this.height - 1
+      );
+   }
+
+   public boolean resolveLodMapterhornLandOverride(int worldX, int worldZ, double previewResolutionMeters) {
+      TerrainPreloadPackage.Sample preloaded = this.samplePreloadedTerrain(worldX, worldZ, previewResolutionMeters);
+      if (preloaded != null) {
+         return preloaded.mapterhornLandOverride();
+      }
+
+      return ELEVATION_SOURCE.sampleResolvedPreviewElevationMeters(
+         worldX, worldZ, this.settings.worldScale(), false, this.settings.demSelection(), previewResolutionMeters
+      ).mapterhornLandOverride();
    }
 
    public int resolveLodOceanTerrainSurface(int worldX, int worldZ, int waterSurface, double previewResolutionMeters) {
+      TerrainPreloadPackage.Sample preloaded = this.samplePreloadedTerrain(worldX, worldZ, previewResolutionMeters);
+      if (preloaded != null && preloaded.oceanElevationSelected()) {
+         int surface = this.clampOceanTerrainSurface(preloaded.terrainHeight(), waterSurface);
+         return this.repairAnomalousSurfaceHeight(worldX, worldZ, surface, ESA_WATER, this.minY, this.minY + this.height - 1, true);
+      }
+
       double elevation = ELEVATION_SOURCE.samplePreviewOceanElevationMeters(
          worldX, worldZ, this.settings.worldScale(), this.settings.demSelection(), previewResolutionMeters
       );
       int surface = Double.isNaN(elevation)
          ? this.fallbackLodOceanTerrainSurface(worldX, worldZ, waterSurface, previewResolutionMeters)
-         : Math.min(this.scaleElevationToHeight(elevation), waterSurface - 1);
+         : this.clampOceanTerrainSurface(this.scaleElevationToHeight(elevation), waterSurface);
       return this.repairAnomalousSurfaceHeight(worldX, worldZ, surface, ESA_WATER, this.minY, this.minY + this.height - 1, true);
    }
 
    private int fallbackLodOceanTerrainSurface(int worldX, int worldZ, int waterSurface, double previewResolutionMeters) {
+      TerrainPreloadPackage.Sample preloaded = this.samplePreloadedTerrain(worldX, worldZ, previewResolutionMeters);
+      if (preloaded != null) {
+         return this.clampOceanTerrainSurface(preloaded.terrainHeight(), waterSurface);
+      }
+
       double fallbackElevation = ELEVATION_SOURCE.samplePreviewElevationMeters(
          worldX, worldZ, this.settings.worldScale(), false, this.settings.demSelection(), previewResolutionMeters
       );
       if (Double.isFinite(fallbackElevation) && fallbackElevation < 0.0) {
-         return Math.min(this.scaleElevationToHeight(fallbackElevation), waterSurface - 1);
+         return this.clampOceanTerrainSurface(this.scaleElevationToHeight(fallbackElevation), waterSurface);
       }
 
-      return waterSurface - WaterSurfaceResolver.fallbackOceanDepthBlocks(
-         worldX, worldZ, this.settings.worldScale(), this.settings.oceanicHeightScale()
+      return this.clampOceanTerrainSurface(
+         waterSurface - WaterSurfaceResolver.fallbackOceanDepthBlocks(
+            worldX, worldZ, this.settings.worldScale(), this.settings.effectiveOceanicHeightScale()
+         ),
+         waterSurface
       );
+   }
+
+   private int clampOceanTerrainSurface(int terrainSurface, int waterSurface) {
+      int clamped = Math.min(terrainSurface, waterSurface - 1);
+      if (this.settings.experimentalIncreaseHeight()) {
+         clamped = Math.max(clamped, this.minY + WaterSurfaceResolver.oceanFloorSupportBlocks());
+      }
+
+      return clamped;
    }
 
    int resolveLodMangroveWaterSurface(int worldX, int worldZ, int maxY) {
@@ -9592,6 +9884,10 @@ public final class EarthChunkGenerator extends ChunkGenerator {
    public int resolveDryOsmTerrainCoverClass(int worldX, int worldZ, int coverClass, boolean hasWater) {
       if (!this.isDryOsmEsaWater(coverClass, hasWater)) {
          return coverClass;
+      }
+
+      if (this.samplePreloadedTerrain(worldX, worldZ) != null) {
+         return MountainSurfaceRules.ESA_BARE;
       }
 
       int nearest = LAND_COVER_SOURCE.sampleNearestLandCoverClassLocalOnly(
@@ -9647,14 +9943,19 @@ public final class EarthChunkGenerator extends ChunkGenerator {
    private WaterSurfaceResolver.WaterColumnData normalizeResolvedWaterColumn(
       int worldX, int worldZ, int coverClass, int minY, int maxY, WaterSurfaceResolver.WaterColumnData column
    ) {
-      int terrainSurface = Mth.clamp(column.terrainSurface(), minY, maxY);
-      terrainSurface = this.repairAnomalousSurfaceHeight(worldX, worldZ, terrainSurface, coverClass, minY, maxY, column.hasWater());
+      int minimumTerrainY = column.hasWater() && column.isOcean()
+         ? Math.min(maxY, minY + WaterSurfaceResolver.oceanFloorSupportBlocks())
+         : minY;
+      int terrainSurface = Mth.clamp(column.terrainSurface(), minimumTerrainY, maxY);
+      terrainSurface = this.repairAnomalousSurfaceHeight(
+         worldX, worldZ, terrainSurface, coverClass, minimumTerrainY, maxY, column.hasWater()
+      );
       if (!column.hasWater()) {
          return new WaterSurfaceResolver.WaterColumnData(false, false, terrainSurface, terrainSurface);
       } else {
          int waterSurface = Mth.clamp(column.waterSurface(), minY, maxY);
          if (terrainSurface >= waterSurface) {
-            terrainSurface = Math.max(minY, waterSurface - 1);
+            terrainSurface = Math.max(minimumTerrainY, waterSurface - 1);
          }
 
          return new WaterSurfaceResolver.WaterColumnData(true, column.isOcean(), terrainSurface, waterSurface);
@@ -9662,13 +9963,16 @@ public final class EarthChunkGenerator extends ChunkGenerator {
    }
 
    private EarthChunkGenerator.ColumnHeights columnHeightsFromWaterColumn(WaterSurfaceResolver.WaterColumnData column, int minY, int maxY) {
-      int terrainSurface = Mth.clamp(column.terrainSurface(), minY, maxY);
+      int minimumTerrainY = column.hasWater() && column.isOcean()
+         ? Math.min(maxY, minY + WaterSurfaceResolver.oceanFloorSupportBlocks())
+         : minY;
+      int terrainSurface = Mth.clamp(column.terrainSurface(), minimumTerrainY, maxY);
       if (!column.hasWater()) {
          return new EarthChunkGenerator.ColumnHeights(terrainSurface, terrainSurface, false);
       } else {
          int waterSurface = Mth.clamp(column.waterSurface(), minY, maxY);
          if (terrainSurface >= waterSurface) {
-            terrainSurface = Math.max(minY, waterSurface - 1);
+            terrainSurface = Math.max(minimumTerrainY, waterSurface - 1);
          }
 
          return new EarthChunkGenerator.ColumnHeights(terrainSurface, waterSurface, true);
@@ -9811,7 +10115,9 @@ public final class EarthChunkGenerator extends ChunkGenerator {
          );
          endLodSurfaceProfiling(profiler, "generator.slopeOverride", phaseStart);
          phaseStart = beginLodSurfaceProfiling(profiler);
-         EarthChunkGenerator.SurfacePalette sandResolved = this.applyOvertureSandPaletteOverride(resolved, worldX, worldZ, underwater);
+         EarthChunkGenerator.SurfacePalette sandResolved = this.applyOvertureSandPaletteOverride(
+            resolved, worldX, worldZ, underwater, mountainOsmQueryMode
+         );
          endLodSurfaceProfiling(profiler, "generator.overtureSand", phaseStart);
          return sandResolved;
       }
@@ -9872,7 +10178,15 @@ public final class EarthChunkGenerator extends ChunkGenerator {
    private EarthChunkGenerator.SurfacePalette applyOvertureSandPaletteOverride(
       EarthChunkGenerator.SurfacePalette palette, int worldX, int worldZ, boolean underwater
    ) {
-      if (palette == null || underwater || !this.hasOvertureSandAt(worldX, worldZ)) {
+      return this.applyOvertureSandPaletteOverride(
+         palette, worldX, worldZ, underwater, this.resolveFullChunkOsmQueryMode()
+      );
+   }
+
+   private EarthChunkGenerator.SurfacePalette applyOvertureSandPaletteOverride(
+      EarthChunkGenerator.SurfacePalette palette, int worldX, int worldZ, boolean underwater, OsmQueryMode queryMode
+   ) {
+      if (palette == null || underwater || !this.hasOvertureSandAt(worldX, worldZ, queryMode)) {
          return palette;
       } else {
          return EarthChunkGenerator.SurfacePalette.beach();
@@ -10477,7 +10791,7 @@ public final class EarthChunkGenerator extends ChunkGenerator {
    }
 
    private boolean isRemaSnowTerrain(int worldZ) {
-      return this.remaSnowEnabled && worldZ >= this.remaSnowBoundaryZ;
+      return false;
    }
 
    private EarthChunkGenerator.SurfacePalette selectBaseSurfacePalette(Holder<Biome> biome, int worldX, int worldZ, int surface, int coverClass) {
@@ -10726,7 +11040,7 @@ public final class EarthChunkGenerator extends ChunkGenerator {
          flags |= 32;
       }
 
-      if (settings.thinShellTerrain()) {
+      if (settings.suppressesUndergroundGenerationForTerrainShell()) {
          flags |= 64;
       }
 
@@ -10738,7 +11052,7 @@ public final class EarthChunkGenerator extends ChunkGenerator {
    }
 
    private static boolean shouldKeepCarverId(String path, EarthGeneratorSettings settings) {
-      if (settings.thinShellTerrain()) {
+      if (settings.suppressesUndergroundGenerationForTerrainShell()) {
          return false;
       }
 
@@ -10750,7 +11064,7 @@ public final class EarthChunkGenerator extends ChunkGenerator {
    }
 
    private static boolean shouldKeepFeatureId(String path, EarthGeneratorSettings settings) {
-      if (settings.thinShellTerrain() && isThinShellUndergroundFeatureId(path)) {
+      if (settings.suppressesUndergroundGenerationForTerrainShell() && isThinShellUndergroundFeatureId(path)) {
          return false;
       } else if (path.equals("freeze_top_layer") || path.equals("snow_and_freeze")) {
          return false;
@@ -10799,7 +11113,7 @@ public final class EarthChunkGenerator extends ChunkGenerator {
    }
 
    private boolean isStructureEnabled(String path) {
-      if (this.settings.thinShellTerrain() && isThinShellUndergroundStructureId(path)) {
+      if (this.settings.suppressesUndergroundGenerationForTerrainShell() && isThinShellUndergroundStructureId(path)) {
          return false;
       } else if (path.startsWith("village")) {
          return this.settings.addVillages();
@@ -10906,7 +11220,7 @@ public final class EarthChunkGenerator extends ChunkGenerator {
          int terrainSurface = column.terrainSurface();
          boolean inOceanColumn = column.hasWater() && column.isOcean() && column.waterSurface() > terrainSurface;
          boolean tooShallow = centerY > terrainSurface - 20;
-         if (inOceanColumn || tooShallow) {
+         if (this.settings.experimentalIncreaseHeight() || inOceanColumn || tooShallow) {
             int minTargetY = Math.max(this.minY + 20, chunkMinY + 20);
             int maxTargetY = Math.min(chunkMaxY - 20, terrainSurface - 20);
             if (maxTargetY > minTargetY) {
@@ -10982,6 +11296,63 @@ public final class EarthChunkGenerator extends ChunkGenerator {
       }
    }
 
+   private void retargetAncientCityStarts(RegistryAccess registryAccess, ChunkAccess chunk) {
+      Map<Structure, StructureStart> starts = chunk.getAllStarts();
+      if (!starts.isEmpty()) {
+         Registry<Structure> registry = registryAccess.lookupOrThrow(Registries.STRUCTURE);
+         Structure ancientCity = Objects.requireNonNull((Structure)registry.getValueOrThrow(BuiltinStructures.ANCIENT_CITY), "ancientCity");
+         int chunkMinY = chunk.getMinY();
+         int chunkMaxY = chunkMinY + chunk.getHeight() - 1;
+
+         for (Entry<Structure, StructureStart> entry : starts.entrySet()) {
+            Structure structure = Objects.requireNonNull(entry.getKey(), "structure");
+            if (structure == ancientCity) {
+               StructureStart start = entry.getValue();
+               if (start != null && start.isValid()) {
+                  BoundingBox box = start.getBoundingBox();
+                  BlockPos center = box.getCenter();
+                  int centerX = center.getX();
+                  int centerY = center.getY();
+                  int centerZ = center.getZ();
+                  int terrainSurface = this.resolveAuxWaterColumn(centerX, centerZ).terrainSurface();
+                  int requiredTopY = terrainSurface - 24;
+                  if (this.settings.experimentalIncreaseHeight() || box.maxY() > requiredTopY) {
+                     int minAllowedOffset = chunkMinY + 8 - box.minY();
+                     int maxAllowedOffset = chunkMaxY - 8 - box.maxY();
+                     if (maxAllowedOffset >= minAllowedOffset) {
+                        int minTargetY = Math.max(this.minY + 16, chunkMinY + 16);
+                        int maxTargetY = Math.min(chunkMaxY - 16, terrainSurface - 48);
+                        if (maxTargetY > minTargetY) {
+                           long seed = seedFromCoords(centerX, 23, centerZ) ^ this.worldSeed ^ 7099176517079344131L;
+                           int targetDepth = 92 + seededRandomInt(seed, 29);
+                           int targetCenterY = Mth.clamp(terrainSurface - targetDepth, minTargetY, maxTargetY);
+                           int offsetY = targetCenterY - centerY;
+                           int buryOffset = requiredTopY - box.maxY();
+                           if (offsetY > buryOffset) {
+                              offsetY = buryOffset;
+                           }
+
+                           offsetY = Mth.clamp(offsetY, minAllowedOffset, maxAllowedOffset);
+                           if (offsetY != 0 && (Math.abs(offsetY) >= 4 || box.maxY() + offsetY > requiredTopY)) {
+                              List<StructurePiece> movedPieces = new ArrayList<>(start.getPieces().size());
+
+                              for (StructurePiece piece : start.getPieces()) {
+                                 piece.move(0, offsetY, 0);
+                                 movedPieces.add(piece);
+                              }
+
+                              StructureStart moved = new StructureStart(structure, start.getChunkPos(), start.getReferences(), new PiecesContainer(movedPieces));
+                              chunk.setStartForStructure(structure, moved);
+                           }
+                        }
+                     }
+                  }
+               }
+            }
+         }
+      }
+   }
+
    private void retargetTrialChamberStarts(RegistryAccess registryAccess, ChunkAccess chunk) {
       Map<Structure, StructureStart> starts = chunk.getAllStarts();
       if (!starts.isEmpty()) {
@@ -11003,7 +11374,7 @@ public final class EarthChunkGenerator extends ChunkGenerator {
                   WaterSurfaceResolver.WaterColumnData column = this.resolveAuxWaterColumn(centerX, centerZ);
                   int terrainSurface = column.terrainSurface();
                   int requiredTopY = terrainSurface - 26;
-                  if (box.maxY() > requiredTopY) {
+                  if (this.settings.experimentalIncreaseHeight() || box.maxY() > requiredTopY) {
                      int minAllowedOffset = chunkMinY + 26 - box.minY();
                      int maxAllowedOffset = chunkMaxY - 26 - box.maxY();
                      if (maxAllowedOffset >= minAllowedOffset) {
@@ -11170,7 +11541,7 @@ public final class EarthChunkGenerator extends ChunkGenerator {
 	      int roll = random.nextInt(200);
       if (roll >= 33) {
          cursor.set(worldX, surface, worldZ);
-         chunk.setBlockState(cursor, SNOW_BLOCK_STATE);
+         setChunkBlockStateDiscardingBlockEntity(chunk, cursor, SNOW_BLOCK_STATE);
       } else {
          int depth = 1 + random.nextInt(5);
 
@@ -11181,14 +11552,14 @@ public final class EarthChunkGenerator extends ChunkGenerator {
             }
 
             cursor.set(worldX, y, worldZ);
-            chunk.setBlockState(cursor, POWDER_SNOW_STATE);
+            setChunkBlockStateDiscardingBlockEntity(chunk, cursor, POWDER_SNOW_STATE);
          }
       }
    }
 
    private static void applyThinShellSnowCover(ChunkAccess chunk, MutableBlockPos cursor, int worldX, int worldZ, int surface) {
       cursor.set(worldX, surface, worldZ);
-      chunk.setBlockState(cursor, SNOW_BLOCK_STATE);
+      setChunkBlockStateDiscardingBlockEntity(chunk, cursor, SNOW_BLOCK_STATE);
    }
 
 	   private static void applySnowCover(
@@ -12482,6 +12853,7 @@ public final class EarthChunkGenerator extends ChunkGenerator {
    private static final class TerrainRefinementManager {
       private final Map<Long, EarthChunkGenerator.TerrainRefinementJob> jobs = new ConcurrentHashMap<>();
       private final ConcurrentLinkedQueue<Long> readyQueue = new ConcurrentLinkedQueue<>();
+      private final Map<Long, Integer> oceanRetryAttempts = new ConcurrentHashMap<>();
 
       private void schedule(EarthChunkGenerator generator, EarthChunkGenerator.TerrainShellBuildResult shell) {
          long chunkKey = shell.chunkKey();
@@ -12518,11 +12890,27 @@ public final class EarthChunkGenerator extends ChunkGenerator {
             try {
                job.refinement = generator.buildPreparedTerrainRefinement(shell);
             } catch (RuntimeException error) {
+               if (error instanceof OceanCoverageUnavailableException
+                  || error.getCause() instanceof OceanCoverageUnavailableException) {
+                  int attempt = this.oceanRetryAttempts.merge(chunkKey, 1, Integer::sum);
+                  long delaySeconds = oceanCoverageRetryDelaySeconds(attempt);
+                  job.state = EarthChunkGenerator.TerrainRefinementJobState.QUEUED;
+                  CompletableFuture.runAsync(
+                     () -> {
+                        if (this.jobs.get(chunkKey) == job) {
+                           this.schedule(generator, shell);
+                        }
+                     },
+                     CompletableFuture.delayedExecutor(delaySeconds, TimeUnit.SECONDS)
+                  );
+                  return;
+               }
                job.state = EarthChunkGenerator.TerrainRefinementJobState.FAILED;
                Tellus.LOGGER.debug("Failed to build terrain refinement for {}", shell.pos(), error);
                this.jobs.remove(chunkKey, job);
                return;
             }
+            this.oceanRetryAttempts.remove(chunkKey);
 
             AtomicBoolean staleAfterBuild = new AtomicBoolean();
             this.jobs.compute(chunkKey, (key, current) -> {
@@ -12600,6 +12988,13 @@ public final class EarthChunkGenerator extends ChunkGenerator {
                Tellus.LOGGER.debug("Failed to apply terrain refinement for {}", chunk.getPos(), error);
             }
          }
+      }
+
+      private static long oceanCoverageRetryDelaySeconds(int attempt) {
+         if (attempt <= 0) {
+            return 0L;
+         }
+         return attempt <= 5 ? 1L << (attempt - 1) : 60L;
       }
    }
 
@@ -13003,6 +13398,7 @@ public final class EarthChunkGenerator extends ChunkGenerator {
       STRUCTURES_IGLOOS("igloos"),
       STRUCTURES_STRONGHOLDS("strongholds"),
       STRUCTURES_MINESHAFTS("mineshafts"),
+      STRUCTURES_ANCIENT_CITIES("ancientCities"),
       STRUCTURES_TRIAL_CHAMBERS("trialChambers"),
       STRUCTURES_OCEAN_MONUMENTS("monuments"),
       STRUCTURES_OSM_COLLISIONS("osmCollision"),
@@ -13067,22 +13463,31 @@ public final class EarthChunkGenerator extends ChunkGenerator {
 
    private static final class FullChunkPerf {
       private static final boolean ENABLED = Boolean.parseBoolean(System.getProperty("tellus.debug.fullChunkPerf", "false"));
+      private static final boolean TRACE_ENABLED = Boolean.parseBoolean(System.getProperty("tellus.chunkgen.timing", "false"));
+      private static final long TRACE_THRESHOLD_NS = TimeUnit.MILLISECONDS.toNanos(
+         intProperty("tellus.chunkgen.timingThresholdMs", 0, 0, 600000)
+      );
       private static final long LOG_INTERVAL_NS = TimeUnit.SECONDS.toNanos(15L);
       private static final AtomicLong NEXT_LOG_AT_NS = new AtomicLong(System.nanoTime() + LOG_INTERVAL_NS);
       private static final EarthChunkGenerator.FullChunkPhase[] PHASES = EarthChunkGenerator.FullChunkPhase.values();
       private static final LongAdder[] TOTAL_NS = createCounters();
       private static final LongAdder[] CALLS = createCounters();
+      private static final ThreadLocal<EarthChunkGenerator.FullChunkTrace> ACTIVE_TRACE = new ThreadLocal<>();
 
       private static long now() {
-         return ENABLED ? System.nanoTime() : 0L;
+         return ENABLED || TRACE_ENABLED ? System.nanoTime() : 0L;
       }
 
       private static long elapsedSince(long startNs) {
-         return ENABLED && startNs != 0L ? System.nanoTime() - startNs : 0L;
+         return (ENABLED || TRACE_ENABLED) && startNs != 0L ? System.nanoTime() - startNs : 0L;
       }
 
       private static void record(EarthChunkGenerator.FullChunkPhase phase, long totalNs) {
-         if (ENABLED && phase != null) {
+         if (phase == null) {
+            return;
+         }
+
+         if (ENABLED) {
             int index = phase.ordinal();
             CALLS[index].increment();
             if (totalNs > 0L) {
@@ -13091,12 +13496,48 @@ public final class EarthChunkGenerator extends ChunkGenerator {
 
             maybeLog();
          }
+
+         EarthChunkGenerator.FullChunkTrace trace = ACTIVE_TRACE.get();
+         if (trace != null) {
+            trace.record(phase, totalNs);
+         }
       }
 
       private static void recordCount(EarthChunkGenerator.FullChunkPhase phase, int count) {
-         if (ENABLED && phase != null && count > 0) {
-            CALLS[phase.ordinal()].add(count);
-            maybeLog();
+         if (phase != null && count > 0) {
+            if (ENABLED) {
+               CALLS[phase.ordinal()].add(count);
+               maybeLog();
+            }
+
+            EarthChunkGenerator.FullChunkTrace trace = ACTIVE_TRACE.get();
+            if (trace != null) {
+               trace.recordCount(phase, count);
+            }
+         }
+      }
+
+      private static EarthChunkGenerator.FullChunkTrace beginTrace(String stage, ChunkPos pos) {
+         if (!TRACE_ENABLED) {
+            return null;
+         } else {
+            EarthChunkGenerator.FullChunkTrace trace = new EarthChunkGenerator.FullChunkTrace(stage, pos, ACTIVE_TRACE.get());
+            ACTIVE_TRACE.set(trace);
+            return trace;
+         }
+      }
+
+      private static void finishTrace(EarthChunkGenerator.FullChunkTrace trace, String status, Throwable throwable) {
+         if (trace != null) {
+            try {
+               trace.log(status, throwable);
+            } finally {
+               if (trace.previous() == null) {
+                  ACTIVE_TRACE.remove();
+               } else {
+                  ACTIVE_TRACE.set(trace.previous());
+               }
+            }
          }
       }
 
@@ -13138,6 +13579,7 @@ public final class EarthChunkGenerator extends ChunkGenerator {
             EarthChunkGenerator.FullChunkPhase.STRUCTURES_IGLOOS,
             EarthChunkGenerator.FullChunkPhase.STRUCTURES_STRONGHOLDS,
             EarthChunkGenerator.FullChunkPhase.STRUCTURES_MINESHAFTS,
+            EarthChunkGenerator.FullChunkPhase.STRUCTURES_ANCIENT_CITIES,
             EarthChunkGenerator.FullChunkPhase.STRUCTURES_TRIAL_CHAMBERS,
             EarthChunkGenerator.FullChunkPhase.STRUCTURES_OCEAN_MONUMENTS,
             EarthChunkGenerator.FullChunkPhase.STRUCTURES_OSM_COLLISIONS
@@ -13265,6 +13707,89 @@ public final class EarthChunkGenerator extends ChunkGenerator {
 
       private static String toMillis(long nanos) {
          return nanos <= 0L ? "0.00" : String.format(Locale.ROOT, "%.2f", nanos / 1000000.0);
+      }
+   }
+
+   private static final class FullChunkTrace {
+      private final String stage;
+      private final ChunkPos pos;
+      private final EarthChunkGenerator.FullChunkTrace previous;
+      private final long startNs = System.nanoTime();
+      private final LinkedHashMap<EarthChunkGenerator.FullChunkPhase, Long> phaseNanos = new LinkedHashMap<>();
+      private final LinkedHashMap<EarthChunkGenerator.FullChunkPhase, Long> counts = new LinkedHashMap<>();
+
+      private FullChunkTrace(String stage, ChunkPos pos, EarthChunkGenerator.FullChunkTrace previous) {
+         this.stage = stage;
+         this.pos = pos;
+         this.previous = previous;
+      }
+
+      private EarthChunkGenerator.FullChunkTrace previous() {
+         return this.previous;
+      }
+
+      private void record(EarthChunkGenerator.FullChunkPhase phase, long nanos) {
+         if (nanos > 0L) {
+            this.phaseNanos.merge(phase, nanos, Long::sum);
+         }
+      }
+
+      private void recordCount(EarthChunkGenerator.FullChunkPhase phase, int count) {
+         if (count > 0) {
+            this.counts.merge(phase, (long)count, Long::sum);
+         }
+      }
+
+      private void log(String status, Throwable throwable) {
+         long totalNs = System.nanoTime() - this.startNs;
+         if (!"failed".equals(status) && totalNs < EarthChunkGenerator.FullChunkPerf.TRACE_THRESHOLD_NS) {
+            return;
+         }
+
+         StringBuilder builder = new StringBuilder(256);
+         builder.append("Full chunk timing status=").append(status);
+         builder.append(" stage=").append(this.stage);
+         builder.append(" chunk=[").append(this.pos.x()).append(", ").append(this.pos.z()).append(']');
+         builder.append(" total=").append(formatMillis(totalNs));
+         if (!this.phaseNanos.isEmpty()) {
+            builder.append(" phases={");
+            boolean first = true;
+            for (Map.Entry<EarthChunkGenerator.FullChunkPhase, Long> entry : this.phaseNanos.entrySet()) {
+               if (!first) {
+                  builder.append(", ");
+               }
+
+               builder.append(entry.getKey().logId()).append('=').append(formatMillis(entry.getValue()));
+               first = false;
+            }
+
+            builder.append('}');
+         }
+
+         if (!this.counts.isEmpty()) {
+            builder.append(" counts={");
+            boolean first = true;
+            for (Map.Entry<EarthChunkGenerator.FullChunkPhase, Long> entry : this.counts.entrySet()) {
+               if (!first) {
+                  builder.append(", ");
+               }
+
+               builder.append(entry.getKey().logId()).append('=').append(entry.getValue());
+               first = false;
+            }
+
+            builder.append('}');
+         }
+
+         if (throwable == null) {
+            Tellus.LOGGER.info(builder.toString());
+         } else {
+            Tellus.LOGGER.warn(builder.toString(), throwable);
+         }
+      }
+
+      private static String formatMillis(long nanos) {
+         return String.format(Locale.ROOT, "%.3fms", (double)nanos / 1000000.0);
       }
    }
 
@@ -13595,9 +14120,6 @@ public final class EarthChunkGenerator extends ChunkGenerator {
    }
 
    private record RoadLightAnchor(int localX, int localZ, int baseY, int index) {
-   }
-
-   private record RoadCrossingAnchor(int localX, int localZ, int baseY, int index, boolean horizontal) {
    }
 
    private static final class PreparedChunkBuildings {

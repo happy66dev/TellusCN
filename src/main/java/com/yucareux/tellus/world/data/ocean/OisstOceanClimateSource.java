@@ -8,6 +8,7 @@ import com.yucareux.tellus.cache.TellusCacheDomain;
 import com.yucareux.tellus.cache.TellusCacheFiles;
 import com.yucareux.tellus.cache.TellusCacheHandle;
 import com.yucareux.tellus.cache.TellusCacheRegistry;
+import com.yucareux.tellus.integration.distant_horizons.managed.ManagedTerrainNetworkPolicy;
 import com.yucareux.tellus.worldgen.EarthProjection;
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -18,8 +19,11 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Locale;
+import java.util.LinkedHashSet;
+import java.util.Set;
 import java.util.concurrent.ExecutionException;
-import net.fabricmc.loader.api.FabricLoader;
+import java.util.function.BiConsumer;
+import com.yucareux.tellus.platform.TellusPlatform;
 import net.minecraft.util.Mth;
 
 public final class OisstOceanClimateSource implements TellusCacheHandle {
@@ -41,7 +45,7 @@ public final class OisstOceanClimateSource implements TellusCacheHandle {
    private final LoadingCache<OisstOceanClimateSource.CellKey, OisstOceanClimateSource.Sample> cache;
 
    public OisstOceanClimateSource() {
-      this.cacheRoot = FabricLoader.getInstance().getGameDir().resolve("tellus/cache/ocean-oisst-v21");
+      this.cacheRoot = TellusPlatform.gameDir().resolve("tellus/cache/ocean-oisst-v21");
       this.cache = CacheBuilder.newBuilder()
          .maximumSize(MAX_CACHE_CELLS)
          .build(new CacheLoader<OisstOceanClimateSource.CellKey, OisstOceanClimateSource.Sample>() {
@@ -68,12 +72,67 @@ public final class OisstOceanClimateSource implements TellusCacheHandle {
          return fallbackForLatitude(lat);
       }
 
+      if (ManagedTerrainNetworkPolicy.isCacheOnly()) {
+         OisstOceanClimateSource.Sample cached = this.cache.getIfPresent(key);
+         if (cached == null) {
+            cached = this.readCachedSample(key);
+            if (cached != null) {
+               this.cache.put(key, cached);
+            }
+         }
+         return cached == null ? fallbackForLatitude(lat) : cached;
+      }
+
       try {
          return this.cache.get(key);
       } catch (ExecutionException error) {
          Tellus.LOGGER.debug("Failed to sample NOAA OISST v2.1 cell {}", key, error);
          return fallbackForLatitude(lat);
       }
+   }
+
+   public boolean preloadAreaInputs(
+      int minBlockX,
+      int minBlockZ,
+      int maxBlockX,
+      int maxBlockZ,
+      double worldScale,
+      int completedUnits,
+      BiConsumer<Integer, String> progress
+   ) {
+      if (worldScale <= 0.0) {
+         return true;
+      }
+      double blocksPerDegree = EarthProjection.blocksPerDegree(worldScale);
+      int step = Math.max(16, (int)Math.floor(blocksPerDegree * GRID_DEGREES * 0.8));
+      Set<OisstOceanClimateSource.CellKey> cells = new LinkedHashSet<>();
+      for (long z = minBlockZ; z <= (long)maxBlockZ + step; z += step) {
+         double sampleZ = Math.min(maxBlockZ, z);
+         double latitude = EarthProjection.blockZToLat(sampleZ, worldScale);
+         for (long x = minBlockX; x <= (long)maxBlockX + step; x += step) {
+            double sampleX = Math.min(maxBlockX, x);
+            OisstOceanClimateSource.CellKey key = cellKeyForLatLon(latitude, sampleX / blocksPerDegree);
+            if (key != null) {
+               cells.add(key);
+            }
+         }
+      }
+
+      boolean available = true;
+      int finished = 0;
+      for (OisstOceanClimateSource.CellKey key : cells) {
+         try {
+            OisstOceanClimateSource.Sample sample = this.cache.get(key);
+            available &= sample.available();
+         } catch (ExecutionException | RuntimeException error) {
+            available = false;
+         }
+         finished++;
+         if (progress != null) {
+            progress.accept(completedUnits + finished, "Ocean climate " + finished + "/" + cells.size());
+         }
+      }
+      return available;
    }
 
    private OisstOceanClimateSource.Sample loadSample(OisstOceanClimateSource.CellKey key) {

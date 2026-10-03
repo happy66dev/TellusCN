@@ -7,6 +7,7 @@ import java.util.Locale;
 import java.util.Objects;
 import net.minecraft.core.Holder;
 import net.minecraft.core.HolderGetter;
+import net.minecraft.core.HolderLookup;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.util.Mth;
 import net.minecraft.world.level.biome.Biome;
@@ -218,11 +219,18 @@ final class RandomBiomeMixer {
 
    @SafeVarargs
    private static void addLandById(HolderGetter<Biome> lookup, String id, List<Holder<Biome>> all, List<Holder<Biome>>... pools) {
-      addLand(lookup, BiomeClassification.toBiomeKey(id), all, pools);
+      ResourceKey<Biome> key = BiomeClassification.toBiomeKey(id);
+      if (containsBiome(lookup, key)) {
+         addLand(lookup, key, all, pools);
+      }
    }
 
    private static void addOcean(HolderGetter<Biome> lookup, ResourceKey<Biome> key, List<Holder<Biome>> pool) {
       resolveOptional(lookup, key).ifPresent(biome -> addUnique(pool, biome));
+   }
+
+   private static boolean containsBiome(HolderGetter<Biome> lookup, ResourceKey<Biome> key) {
+      return lookup instanceof HolderLookup<?> holderLookup && holderLookup.listElementIds().anyMatch(key::equals);
    }
 
    private static java.util.Optional<Holder<Biome>> resolveOptional(HolderGetter<Biome> lookup, ResourceKey<Biome> key) {

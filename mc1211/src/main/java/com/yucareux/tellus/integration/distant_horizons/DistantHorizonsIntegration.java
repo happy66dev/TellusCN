@@ -4,6 +4,7 @@ import com.mojang.logging.LogUtils;
 import com.seibel.distanthorizons.api.DhApi;
 import com.seibel.distanthorizons.api.enums.worldGeneration.EDhApiDistantGeneratorMode;
 import com.seibel.distanthorizons.api.interfaces.block.IDhApiBlockStateWrapper;
+import com.seibel.distanthorizons.api.interfaces.override.worldGenerator.IDhApiWorldGenerator;
 import com.seibel.distanthorizons.api.interfaces.world.IDhApiLevelWrapper;
 import com.seibel.distanthorizons.api.methods.events.DhApiEventRegister;
 import com.seibel.distanthorizons.api.methods.events.abstractEvents.DhApiBlockColorOverrideEvent;
@@ -13,8 +14,10 @@ import com.seibel.distanthorizons.api.methods.events.abstractEvents.DhApiLevelUn
 import com.seibel.distanthorizons.api.methods.events.sharedParameterObjects.DhApiEventParam;
 import com.seibel.distanthorizons.api.objects.DhApiResult;
 import com.yucareux.tellus.worldgen.EarthBiomeSource;
+import com.yucareux.tellus.integration.distant_horizons.managed.ManagedTerrainCompatibility;
 import com.yucareux.tellus.worldgen.EarthChunkGenerator;
 import com.yucareux.tellus.worldgen.EarthGeneratorSettings;
+import java.lang.reflect.Method;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import net.fabricmc.loader.api.FabricLoader;
@@ -45,6 +48,10 @@ public final class DistantHorizonsIntegration {
    private static final int FLOWERING_AZALEA_LEAVES_TEXTURE_COLOR = 0x646F3D;
    private static final Block PALE_OAK_LEAVES_BLOCK = blockByField("PALE_OAK_LEAVES");
    private static final Map<String, EarthChunkGenerator> TELLUS_GENERATORS_BY_DIMENSION = new ConcurrentHashMap<>();
+   private static final DistantHorizonsRuntimeConfigGuard DIRECT_LOD_CONFIG_GUARD = DistantHorizonsRuntimeConfigGuard.reflective(
+      Boolean.parseBoolean(System.getProperty("tellus.dhForceNSizedGeneration", "true"))
+   );
+   private static volatile Integer dhMaxWorldYSize;
 
    private DistantHorizonsIntegration() {
    }
@@ -68,6 +75,11 @@ public final class DistantHorizonsIntegration {
    }
 
    public static void bootstrap() {
+      boolean gateAvailable = generationGateAvailable();
+      ManagedTerrainCompatibility.setDistantHorizonsCompatibility(true, gateAvailable);
+      if (!gateAvailable) {
+         LOGGER.warn("Tellus-managed terrain downloads are unavailable with this Distant Horizons build; worlds will use the legacy download path");
+      }
       if (checkApiVersion()) {
          DhApiEventRegister.on(DhApiLevelLoadEvent.class, new DhApiLevelLoadEvent() {
             public void onLevelLoad(DhApiEventParam<DhApiLevelLoadEvent.EventParam> param) {
@@ -83,22 +95,37 @@ public final class DistantHorizonsIntegration {
       }
    }
 
+   private static boolean generationGateAvailable() {
+      try {
+         IDhApiWorldGenerator.class.getMethod("getGenerationAvailability", int.class, int.class, int.class, byte.class);
+         return true;
+      } catch (NoSuchMethodException | LinkageError error) {
+         return false;
+      }
+   }
+
    private static void onLevelLoad(IDhApiLevelWrapper levelWrapper) {
       if (levelWrapper.getWrappedMcObject() instanceof ServerLevel level && level.getChunkSource().getGenerator() instanceof EarthChunkGenerator generator) {
          EarthGeneratorSettings settings = generator.settings();
+         TELLUS_GENERATORS_BY_DIMENSION.put(levelWrapper.getDimensionName(), generator);
          if (settings.voxyChunkPregenEnabled() && FabricLoader.getInstance().isModLoaded(VOXY_MOD_ID)) {
             LOGGER.info("Voxy pregen enabled; skipping Tellus Distant Horizons integration override");
             return;
          }
 
          EDhApiDistantGeneratorMode dhGeneratorMode = currentDistantGeneratorMode();
+         LOGGER.info(
+            "Tellus DH LOD setup dimension={} renderMode={} generatorMode={}",
+            levelWrapper.getDimensionName(),
+            settings.distantHorizonsRenderMode().id(),
+            dhGeneratorMode
+         );
          if (dhGeneratorMode == EDhApiDistantGeneratorMode.PRE_EXISTING_ONLY) {
             LOGGER.info("Distant Horizons generator mode set to pre-existing only; skipping Tellus generator override");
             return;
          }
 
-         TELLUS_GENERATORS_BY_DIMENSION.put(levelWrapper.getDimensionName(), generator);
-         if (shouldUseChunkLodGenerator(settings, dhGeneratorMode)) {
+         if (shouldUseChunkLodGenerator(generator, dhGeneratorMode)) {
             if (settings.distantHorizonsRenderMode() == EarthGeneratorSettings.DistantHorizonsRenderMode.DETAILED) {
                LOGGER.info("Distant Horizons render mode set to detailed; using chunk-based generator");
             } else {
@@ -109,22 +136,89 @@ public final class DistantHorizonsIntegration {
             DhApiResult<Void> result = DhApi.worldGenOverrides.registerWorldGeneratorOverride(levelWrapper, chunkGenerator);
             if (!result.success) {
                LOGGER.warn("Failed to register Tellus chunk LOD generator: {}", result.message);
+            } else {
+               LOGGER.info("Registered Tellus DH LOD generator path=chunk timingEnabled={}", TellusChunkLodGenerator.isTimingEnabled());
             }
 
             return;
          }
 
-         TellusLodGenerator lodGenerator = new TellusLodGenerator(levelWrapper, generator);
-         DhApiResult<Void> result = DhApi.worldGenOverrides.registerWorldGeneratorOverride(levelWrapper, lodGenerator);
-         if (!result.success) {
-            LOGGER.warn("Failed to register Tellus LOD generator: {}", result.message);
+         String dimensionName = levelWrapper.getDimensionName();
+         boolean acquiredRuntimeConfig = DIRECT_LOD_CONFIG_GUARD.acquire(dimensionName);
+         boolean registered = false;
+         try {
+            TellusLodGenerator lodGenerator = new TellusLodGenerator(levelWrapper, generator);
+            DhApiResult<Void> result = DhApi.worldGenOverrides.registerWorldGeneratorOverride(levelWrapper, lodGenerator);
+            registered = result.success;
+            if (!registered) {
+               LOGGER.warn("Failed to register Tellus LOD generator: {}", result.message);
+            } else {
+               LOGGER.info("Registered Tellus DH LOD generator path=direct timingEnabled={}", TellusLodGenerator.isTimingEnabled());
+            }
+         } finally {
+            if (!registered && acquiredRuntimeConfig) {
+               DIRECT_LOD_CONFIG_GUARD.release(dimensionName);
+            }
          }
       }
    }
 
    private static void onLevelUnload(IDhApiLevelWrapper levelWrapper) {
-      if (levelWrapper.getWrappedMcObject() instanceof ServerLevel level && level.getChunkSource().getGenerator() instanceof EarthChunkGenerator) {
-         TELLUS_GENERATORS_BY_DIMENSION.remove(levelWrapper.getDimensionName());
+      String dimensionName = levelWrapper.getDimensionName();
+      DIRECT_LOD_CONFIG_GUARD.release(dimensionName);
+      TELLUS_GENERATORS_BY_DIMENSION.remove(dimensionName);
+   }
+
+   public static boolean shouldSkipChunkBackedUpdates(Object dhLevel) {
+      String dimensionName = dimensionNameFromDhLevel(dhLevel);
+      if (dimensionName == null) {
+         return false;
+      }
+
+      EarthChunkGenerator generator = TELLUS_GENERATORS_BY_DIMENSION.get(dimensionName);
+      return generator != null && generator.settings().experimentalIncreaseHeight() && !supportsExperimentalGeneratorHeight(generator);
+   }
+
+   public static boolean supportsExperimentalGeneratorHeight(EarthChunkGenerator generator) {
+      EarthGeneratorSettings settings = generator.settings();
+      return !settings.experimentalIncreaseHeight() || distantHorizonsMaxWorldYSize() >= generator.getGenDepth();
+   }
+
+   private static int distantHorizonsMaxWorldYSize() {
+      Integer cachedMax = dhMaxWorldYSize;
+      if (cachedMax != null) {
+         return cachedMax;
+      }
+
+      int detectedMax = 6095;
+      try {
+         Class<?> renderDataPointUtil = Class.forName("com.seibel.distanthorizons.core.util.RenderDataPointUtil");
+         detectedMax = renderDataPointUtil.getField("MAX_WORLD_Y_SIZE").getInt(null);
+      } catch (ReflectiveOperationException | RuntimeException | LinkageError error) {
+         LOGGER.debug("Failed to read Distant Horizons render Y range", error);
+      }
+
+      dhMaxWorldYSize = detectedMax;
+      return detectedMax;
+   }
+
+   private static String dimensionNameFromDhLevel(Object dhLevel) {
+      if (dhLevel == null) {
+         return null;
+      }
+
+      try {
+         Method getLevelWrapper = dhLevel.getClass().getMethod("getLevelWrapper");
+         Object levelWrapper = getLevelWrapper.invoke(dhLevel);
+         if (levelWrapper == null) {
+            return null;
+         }
+
+         Method getDimensionName = levelWrapper.getClass().getMethod("getDimensionName");
+         Object dimensionName = getDimensionName.invoke(levelWrapper);
+         return dimensionName instanceof String name ? name : null;
+      } catch (ReflectiveOperationException | RuntimeException | LinkageError error) {
+         return null;
       }
    }
 
@@ -272,7 +366,12 @@ public final class DistantHorizonsIntegration {
       }
    }
 
-   private static boolean shouldUseChunkLodGenerator(EarthGeneratorSettings settings, EDhApiDistantGeneratorMode dhGeneratorMode) {
+   private static boolean shouldUseChunkLodGenerator(EarthChunkGenerator generator, EDhApiDistantGeneratorMode dhGeneratorMode) {
+      EarthGeneratorSettings settings = generator.settings();
+      if (settings.experimentalIncreaseHeight() && !supportsExperimentalGeneratorHeight(generator)) {
+         return false;
+      }
+
       return settings.distantHorizonsRenderMode() == EarthGeneratorSettings.DistantHorizonsRenderMode.DETAILED
          || dhGeneratorMode == EDhApiDistantGeneratorMode.INTERNAL_SERVER;
    }

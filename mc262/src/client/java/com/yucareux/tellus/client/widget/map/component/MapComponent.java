@@ -14,6 +14,10 @@ public interface MapComponent {
       return false;
    }
 
+   default boolean onMouseDragged(SlippyMap map, SlippyMapPoint mouse, int button, double dragX, double dragY) {
+      return false;
+   }
+
    default boolean onMouseReleased(SlippyMap map, SlippyMapPoint mouse, int button) {
       return false;
    }

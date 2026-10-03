@@ -1,6 +1,5 @@
 package com.yucareux.tellus.client.preview;
 
-import com.yucareux.tellus.world.data.elevation.Gebco2026ElevationSource;
 import com.yucareux.tellus.world.data.elevation.TellusElevationSource;
 import com.yucareux.tellus.worldgen.EarthGeneratorSettings;
 import java.util.Locale;
@@ -22,13 +21,13 @@ import net.minecraft.util.Mth;
 public final class TerrainPreviewWidget extends AbstractWidget implements AutoCloseable {
    private static final float DEFAULT_ROTATION_X = (float)Math.toRadians(18.0);
    private static final float DEFAULT_ROTATION_Y = (float)Math.toRadians(18.0);
-   private static final float DEFAULT_ZOOM = 1.4F;
+   private static final float DEFAULT_CAMERA_DISTANCE = 1.9F;
    private static final float MIN_ROTATION_X = (float)Math.toRadians(0.0);
    private static final float MAX_ROTATION_X = (float)Math.toRadians(80.0);
-   private static final float MIN_ZOOM = 0.5F;
-   private static final float MAX_ZOOM = 4.0F;
+   private static final float MIN_CAMERA_DISTANCE = 0.9F;
+   private static final float MAX_CAMERA_DISTANCE = 6.0F;
    private static final float ROTATION_SPEED = 0.01F;
-   private static final float ZOOM_SPEED = 0.1F;
+   private static final float CAMERA_DOLLY_SPEED = 0.2F;
    private static final float AUTO_ROTATION_SPEED = -0.0022F;
    private static final long AUTO_RESUME_DELAY_MS = 1200L;
    private static final int MODE_BUTTON_WIDTH = 36;
@@ -58,11 +57,6 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
    private static final int LOADING_BAR_BORDER = -13816531;
    private static final int LOADING_BAR_FILL = -12599473;
    private static final int LOADING_TEXT = -1;
-   private static final int GEBCO_WARNING_BG = 0xCC100000;
-   private static final int GEBCO_WARNING_BORDER = 0xFFFF5555;
-   private static final int GEBCO_WARNING_TITLE = 0xFFFF5555;
-   private static final int GEBCO_WARNING_DETAIL = 0xFFFF8888;
-   private static final long GEBCO_WARNING_DURATION_MS = 5000L;
    private final TerrainPreview preview;
    private final boolean ownsPreview;
    private final Button modeButton;
@@ -76,11 +70,9 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
    private boolean infoPanelVisible;
    private float rotationX = DEFAULT_ROTATION_X;
    private float rotationY = DEFAULT_ROTATION_Y;
-   private float zoom = DEFAULT_ZOOM;
+   private float cameraDistance = DEFAULT_CAMERA_DISTANCE;
    private TerrainPreviewWidget.RenderMode renderMode = TerrainPreviewWidget.RenderMode.FULL_DETAIL;
    private long lastInteractionTime;
-   private long gebcoWarningOutageId = -1L;
-   private long gebcoWarningUntilMs;
 
    public TerrainPreviewWidget(int x, int y, int width, int height) {
       this(x, y, width, height, new TerrainPreview(), true);
@@ -131,13 +123,13 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
    }
 
    public TerrainPreviewWidget.ViewState getViewState() {
-      return new TerrainPreviewWidget.ViewState(this.rotationX, this.rotationY, this.zoom, this.renderMode);
+      return new TerrainPreviewWidget.ViewState(this.rotationX, this.rotationY, this.cameraDistance, this.renderMode);
    }
 
    public void setViewState(TerrainPreviewWidget.ViewState state) {
       this.rotationX = Mth.clamp(state.rotationX(), MIN_ROTATION_X, MAX_ROTATION_X);
       this.rotationY = state.rotationY();
-      this.zoom = Mth.clamp(state.zoom(), MIN_ZOOM, MAX_ZOOM);
+      this.cameraDistance = Mth.clamp(state.cameraDistance(), MIN_CAMERA_DISTANCE, MAX_CAMERA_DISTANCE);
       this.renderMode = state.renderMode();
       this.updateModeButtonLabel();
    }
@@ -157,9 +149,9 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
       int contentY = this.getY() + inset;
       int contentWidth = Math.max(1, this.width - inset * 2);
       int contentHeight = Math.max(1, this.height - inset * 2);
-      this.preview.render(graphics, contentX, contentY, contentWidth, contentHeight, this.rotationX, this.rotationY, this.zoom, this.renderMode);
+      this.preview
+         .render(graphics, contentX, contentY, contentWidth, contentHeight, this.rotationX, this.rotationY, this.cameraDistance, this.renderMode);
       this.renderLoadingOverlay(graphics, contentX, contentY, contentWidth, contentHeight);
-      this.renderGebcoWarning(graphics, contentX, contentY, contentWidth, contentHeight);
       this.renderModeButton(graphics, mouseX, mouseY, delta);
       this.renderInfoButton(graphics, mouseX, mouseY, delta);
       this.renderInfoPanel(graphics, mouseX, mouseY, delta);
@@ -245,7 +237,9 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
          || this.fullscreenAction != null && this.fullscreenButton.isMouseOver(mouseX, mouseY)) {
          return false;
       } else if (this.isMouseOver(mouseX, mouseY)) {
-         this.zoom = Mth.clamp(this.zoom + (float)verticalAmount * ZOOM_SPEED, MIN_ZOOM, MAX_ZOOM);
+         this.cameraDistance = Mth.clamp(
+            this.cameraDistance - (float)verticalAmount * CAMERA_DOLLY_SPEED, MIN_CAMERA_DISTANCE, MAX_CAMERA_DISTANCE
+         );
          this.lastInteractionTime = System.currentTimeMillis();
          return true;
       } else {
@@ -320,38 +314,6 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
             }
          }
       }
-   }
-
-   private void renderGebcoWarning(GuiGraphics graphics, int x, int y, int width, int height) {
-      EarthGeneratorSettings settings = this.preview.getLastSettings();
-      if ((settings != null && !settings.demSelection().gebco2026Enabled()) || !Gebco2026ElevationSource.isRemoteUnavailable()) {
-         this.gebcoWarningOutageId = -1L;
-         this.gebcoWarningUntilMs = 0L;
-         return;
-      }
-
-      long outageId = Gebco2026ElevationSource.remoteOutageId();
-      long now = System.currentTimeMillis();
-      if (this.gebcoWarningOutageId != outageId) {
-         this.gebcoWarningOutageId = outageId;
-         this.gebcoWarningUntilMs = now + GEBCO_WARNING_DURATION_MS;
-      } else if (now >= this.gebcoWarningUntilMs) {
-         return;
-      }
-
-      Font font = Minecraft.getInstance().font;
-      Component title = Component.translatable("tellus.warning.gebco.preview.title");
-      Component detail = Component.translatable("tellus.warning.gebco.preview.fallback");
-      int padding = 7;
-      int panelWidth = Math.min(width - 12, Math.max(font.width(title), font.width(detail)) + padding * 2);
-      int panelHeight = 31;
-      int panelX = x + (width - panelWidth) / 2;
-      int panelY = y + (height - panelHeight) / 2;
-      graphics.fill(panelX, panelY, panelX + panelWidth, panelY + panelHeight, GEBCO_WARNING_BG);
-      graphics.renderOutline(panelX, panelY, panelWidth, panelHeight, GEBCO_WARNING_BORDER);
-      int centerX = panelX + panelWidth / 2;
-      graphics.drawCenteredString(font, title, centerX, panelY + 6, GEBCO_WARNING_TITLE);
-      graphics.drawCenteredString(font, detail, centerX, panelY + 17, GEBCO_WARNING_DETAIL);
    }
 
    private static float displayedProgress(TerrainPreview.PreviewStatus status) {
@@ -628,11 +590,11 @@ public final class TerrainPreviewWidget extends AbstractWidget implements AutoCl
    }
 
    @Environment(EnvType.CLIENT)
-   public record ViewState(float rotationX, float rotationY, float zoom, TerrainPreviewWidget.RenderMode renderMode) {
-      public ViewState(float rotationX, float rotationY, float zoom, TerrainPreviewWidget.RenderMode renderMode) {
+   public record ViewState(float rotationX, float rotationY, float cameraDistance, TerrainPreviewWidget.RenderMode renderMode) {
+      public ViewState(float rotationX, float rotationY, float cameraDistance, TerrainPreviewWidget.RenderMode renderMode) {
          this.rotationX = rotationX;
          this.rotationY = rotationY;
-         this.zoom = zoom;
+         this.cameraDistance = cameraDistance;
          this.renderMode = Objects.requireNonNull(renderMode, "renderMode");
       }
    }

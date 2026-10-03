@@ -87,6 +87,43 @@ public final class TellusEndpointConfig {
    }
 
    /**
+    * 获取 Overture base 主题数据的候选地址列表
+    *
+    * 说明：上游把陆地表覆盖改用 Overture 的 base 主题 PMTiles，而 base 主题
+    * 与沙地共用同一个 base.pmtiles 压缩包，因此这里直接复用沙地的镜像路由，
+    * 不额外假设 CDN 上存在新的路径。镜像未启用时只返回官方地址。
+    *
+    * @param officialUrl 官方默认的 base 主题瓦片地址
+    * @return 优先地址在前、官方地址兜底的候选列表
+    */
+   public static List<String> getOvertureBaseCandidates(String officialUrl) {
+      // 复用沙地端点：两者指向同一个 base.pmtiles 压缩包
+      return getEndpointCandidates("tellus.overture.sand.endpoint", officialUrl);
+   }
+
+   /**
+    * 获取 Overture 水域数据的候选地址列表
+    *
+    * @param officialUrl 官方默认的水域瓦片地址
+    * @return 优先地址在前、官方地址兜底的候选列表
+    */
+   public static List<String> getOvertureWaterCandidates(String officialUrl) {
+      // 复用通用候选逻辑，JVM 参数 key 固定为水域端点
+      return getEndpointCandidates("tellus.overture.water.endpoint", officialUrl);
+   }
+
+   /**
+    * 获取 Overture 沙地数据的候选地址列表
+    *
+    * @param officialUrl 官方默认的沙地瓦片地址
+    * @return 优先地址在前、官方地址兜底的候选列表
+    */
+   public static List<String> getOvertureSandCandidates(String officialUrl) {
+      // 复用通用候选逻辑，JVM 参数 key 固定为沙地端点
+      return getEndpointCandidates("tellus.overture.sand.endpoint", officialUrl);
+   }
+
+   /**
     * 根据系统属性 key 获取对应的镜像端点
     */
    private static String getMirrorEndpoint(String systemPropertyKey) {

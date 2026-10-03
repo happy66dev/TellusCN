@@ -1,10 +1,17 @@
 package com.yucareux.tellus.client.preview;
 
+import com.mojang.blaze3d.PrimitiveTopology;
+import com.mojang.blaze3d.pipeline.BlendFunction;
+import com.mojang.blaze3d.pipeline.ColorTargetState;
+import com.mojang.blaze3d.pipeline.DepthStencilState;
 import com.mojang.blaze3d.pipeline.RenderPipeline;
+import com.mojang.blaze3d.platform.CompareOp;
+import com.mojang.blaze3d.vertex.DefaultVertexFormat;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import com.yucareux.tellus.Tellus;
 import com.yucareux.tellus.mixin.client.GuiGraphicsAccessor;
 import com.yucareux.tellus.world.data.cover.TellusLandCoverSource;
+import com.yucareux.tellus.world.data.elevation.ElevationGridRepair;
 import com.yucareux.tellus.world.data.elevation.TellusElevationSource;
 import com.yucareux.tellus.world.data.elevation.TellusElevationSource.DemUsage;
 import com.yucareux.tellus.world.data.elevation.TellusElevationSource.ElevationDiagnostic;
@@ -30,7 +37,9 @@ import com.yucareux.tellus.worldgen.building.TellusBuildingStyles;
 import com.yucareux.tellus.worldgen.EarthGeneratorSettings;
 import com.yucareux.tellus.worldgen.MountainSurfaceRules;
 import com.yucareux.tellus.worldgen.EarthProjection;
+import com.yucareux.tellus.worldgen.OceanCoverageUnavailableException;
 import com.yucareux.tellus.worldgen.TellusWorldgenSources;
+import com.yucareux.tellus.worldgen.WaterSurfaceResolver;
 import com.yucareux.tellus.worldgen.arnis.ArnisBuildingRules;
 import it.unimi.dsi.fastutil.ints.IntArrayList;
 import java.util.ArrayDeque;
@@ -55,9 +64,10 @@ import net.fabricmc.api.Environment;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.navigation.ScreenRectangle;
 import net.minecraft.client.gui.render.TextureSetup;
-import net.minecraft.client.renderer.RenderPipelines;
+import net.minecraft.client.renderer.BindGroupLayouts;
 import net.minecraft.client.renderer.state.gui.GuiElementRenderState;
 import net.minecraft.client.renderer.state.gui.GuiRenderState;
+import net.minecraft.resources.Identifier;
 import net.minecraft.util.Mth;
 import net.minecraft.util.Util;
 import org.joml.Matrix3x2f;
@@ -67,35 +77,43 @@ import org.joml.Vector3f;
 
 @Environment(EnvType.CLIENT)
 public final class TerrainPreview implements AutoCloseable {
-   private static final int PREVIEW_GRID_SIZE = 257;
-   private static final double PREVIEW_RADIUS_BLOCKS = 256.0;
+   private static final int PREVIEW_GRID_SIZE = 513;
+   private static final double PREVIEW_REFERENCE_RADIUS_BLOCKS = 256.0;
+   private static final double PREVIEW_RADIUS_BLOCKS = 512.0;
+   private static final float PREVIEW_TREE_HEIGHT_SCALE = (float)(PREVIEW_REFERENCE_RADIUS_BLOCKS / PREVIEW_RADIUS_BLOCKS);
+   private static final float PREVIEW_CAMERA_FOV_DEGREES = 36.0F;
    private static final int PREVIEW_INFO_PROVIDER_GRID_SIZE = 25;
    private static final int PREVIEW_OSM_MARGIN_BLOCKS = 32;
    private static final int PREVIEW_ELEVATION_PREFETCH_RADIUS = 1;
+   private static final int PREVIEW_ELEVATION_MAX_ATTEMPTS = 3;
    private static final int PREVIEW_LAND_COVER_PREFETCH_RADIUS = 1;
    private static final int PREVIEW_LAND_MASK_PREFETCH_RADIUS = 1;
    private static final int PREVIEW_OSM_PREFETCH_RADIUS = 1;
    private static final long PREVIEW_WATER_OVERLAY_UNITS = 24576L;
    private static final long PREVIEW_ROAD_OVERLAY_UNITS = 32768L;
    private static final long PREVIEW_BUILDING_OVERLAY_UNITS = 24576L;
-   private static final String ACTIVITY_DOWNLOAD_ELEVATION = "Sampling elevation data";
-   private static final String ACTIVITY_DOWNLOAD_LAND_COVER = "Sampling land cover";
-   private static final String ACTIVITY_DOWNLOAD_CLIMATE = "Sampling climate data";
+   private static final String ACTIVITY_DOWNLOAD_ELEVATION = "Sampling elevation and water mask";
+   private static final String ACTIVITY_DOWNLOAD_LAND_COVER = "Sampling land-cover classes";
+   private static final String ACTIVITY_DOWNLOAD_CLIMATE = "Sampling climate classes";
    private static final String ACTIVITY_BUILD_HEIGHTS = "Normalizing terrain heights";
    private static final String ACTIVITY_BUILD_CENTER = "Centering terrain";
    private static final String ACTIVITY_BUILD_COLORS = "Coloring terrain";
-   private static final String ACTIVITY_BUILD_TREES = "Applying vegetation markers";
+   private static final String ACTIVITY_BUILD_TREES = "Placing preview trees";
    private static final String ACTIVITY_BUILD_HEIGHT_OFFSETS = "Applying feature heights";
    private static final String ACTIVITY_BUILD_INFO = "Summarizing DEM coverage";
-   private static final String ACTIVITY_OSM_WATER_FETCH = "Loading OSM water";
-   private static final String ACTIVITY_OSM_WATER_RASTER = "Rasterizing OSM water";
+   private static final String ACTIVITY_OSM_WATER_FETCH = "Loading Overture water";
+   private static final String ACTIVITY_OSM_WATER_RASTER = "Rasterizing Overture water";
    private static final String ACTIVITY_OSM_ROADS_FETCH = "Loading OSM roads";
    private static final String ACTIVITY_OSM_ROADS_RASTER = "Rasterizing OSM roads";
    private static final String ACTIVITY_OSM_BUILDINGS_FETCH = "Loading OSM buildings";
    private static final String ACTIVITY_OSM_BUILDINGS_RASTER = "Rasterizing OSM buildings";
+   private static final long STATUS_PUBLISH_INTERVAL_MS = 80L;
    private static final int ESA_NO_DATA = 0;
    private static final int ESA_WATER = 80;
    private static final double PREVIEW_INLAND_WATER_DEPTH_BLOCKS = 6.0;
+   private static final double PREVIEW_OCEAN_LINEAR_DEPTH_BLOCKS = 48.0;
+   private static final double PREVIEW_OCEAN_DEPTH_COMPRESSION_BLOCKS = 24.0;
+   private static final double PREVIEW_OCEAN_MAX_DEPTH_BLOCKS = 128.0;
    private static final int PREVIEW_FLAT_WATER_COLOR = waterColorForDepth(PREVIEW_INLAND_WATER_DEPTH_BLOCKS);
    private static final int PREVIEW_ROAD_MARKING_COLOR = 0xF2F4F1;
    private static final int PREVIEW_ROAD_PAVED_DARK_COLOR = 0x34393B;
@@ -111,10 +129,54 @@ public final class TerrainPreview implements AutoCloseable {
    private static final int PREVIEW_ROAD_WOOD_COLOR = 0x8B6A43;
    private static final int PREVIEW_ROAD_CONCRETE_COLOR = 0xA4A7A2;
    private static final int BUILDING_PREVIEW_COLOR = 10000536;
-   private static final Vector3f LIGHT_DIR = new Vector3f(-0.4F, 0.8F, -0.4F).normalize();
-   private static final ThreadLocal<TerrainPreview.PreviewQuadScratch> PREVIEW_QUAD_SCRATCH = ThreadLocal.withInitial(
-      TerrainPreview.PreviewQuadScratch::new
-   );
+   private static final int PREVIEW_SKY_TOP_COLOR = 0xFF83B4CC;
+   private static final int PREVIEW_SKY_HORIZON_COLOR = 0xFFC5D3C2;
+   private static final int PREVIEW_SKY_GROUND_COLOR = 0xFF66745F;
+   private static final int PREVIEW_FOG_COLOR = 0xC5D3C2;
+   private static final int PREVIEW_TREE_TRUNK_COLOR = 0x6B4A2D;
+   private static final int PREVIEW_TREE_LEAF_COLOR = 0x4C9141;
+   private static final int PREVIEW_STONE_FILL_COLOR = 0x73787B;
+   private static final int PREVIEW_STONE_BOTTOM_COLOR = 0x4B5053;
+   private static final int PREVIEW_DEEP_WATER_VOLUME_COLOR = 0x0A416B;
+   private static final int PREVIEW_CLOUD_TOP_COLOR = 0xB8F4F5F2;
+   private static final int PREVIEW_CLOUD_SIDE_COLOR = 0xA4D8DEDE;
+   private static final int PREVIEW_CLOUD_BOTTOM_COLOR = 0x8CC1C9CA;
+   private static final Identifier PREVIEW_SUN_TEXTURE = Identifier.fromNamespaceAndPath("minecraft", "textures/environment/celestial/sun.png");
+   private static final int PREVIEW_SUN_REFLECTION_COLOR = 0xFFF0BC;
+   private static final float PREVIEW_SUN_X = 0.0F;
+   private static final float PREVIEW_SUN_Y = -0.1F;
+   private static final float PREVIEW_SUN_Z = -1.0F;
+   private static final int PREVIEW_CLOUD_GRID_SIZE = 40;
+   private static final float PREVIEW_CLOUD_MIN = -0.98F;
+   private static final float PREVIEW_CLOUD_MAX = 0.98F;
+   private static final double PREVIEW_CLOUD_CLEARANCE_BLOCKS = 96.0;
+   private static final float PREVIEW_SOLID_BASE_DEPTH_CELLS = 8.0F;
+   private static final float PREVIEW_VERTICAL_CELL_RATIO = 0.7F;
+   private static final int PREVIEW_SHADOW_STEPS = 28;
+   private static final Vector3f LIGHT_DIR = new Vector3f(-0.48F, 0.78F, -0.4F).normalize();
+   private static final RenderPipeline PREVIEW_SUN_PIPELINE = RenderPipeline.builder()
+      .withLocation("pipeline/tellus_preview_sun")
+      .withBindGroupLayout(BindGroupLayouts.GLOBALS)
+      .withBindGroupLayout(BindGroupLayouts.MATRICES_PROJECTION)
+      .withVertexShader("core/position_tex_color")
+      .withFragmentShader("core/position_tex_color")
+      .withBindGroupLayout(BindGroupLayouts.SAMPLER0)
+      .withColorTargetState(new ColorTargetState(BlendFunction.OVERLAY))
+      .withVertexBinding(0, DefaultVertexFormat.POSITION_TEX_COLOR)
+      .withPrimitiveTopology(PrimitiveTopology.QUADS)
+      .build();
+   private static final RenderPipeline PREVIEW_PIPELINE = RenderPipeline.builder()
+      .withLocation("pipeline/tellus_terrain_preview")
+      .withBindGroupLayout(BindGroupLayouts.GLOBALS)
+      .withBindGroupLayout(BindGroupLayouts.MATRICES_PROJECTION)
+      .withVertexShader("core/gui")
+      .withFragmentShader("core/gui")
+      .withColorTargetState(new ColorTargetState(BlendFunction.TRANSLUCENT))
+      .withVertexBinding(0, DefaultVertexFormat.POSITION_COLOR)
+      .withPrimitiveTopology(PrimitiveTopology.QUADS)
+      .withDepthStencilState(new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL, true))
+      .withCull(false)
+      .build();
    private final TellusElevationSource elevationSource = new TellusElevationSource();
    private final TellusLandCoverSource landCoverSource = new TellusLandCoverSource();
    private final TellusKoppenSource koppenSource = new TellusKoppenSource();
@@ -125,7 +187,7 @@ public final class TerrainPreview implements AutoCloseable {
    private final ExecutorService executor;
    private final AtomicInteger requestId = new AtomicInteger();
    private final AtomicReference<TerrainPreview.PreviewStatus> status = new AtomicReference<>(
-      new TerrainPreview.PreviewStatus(TerrainPreview.PreviewStage.COMPLETE, 1.0F, null)
+      new TerrainPreview.PreviewStatus(TerrainPreview.PreviewStage.COMPLETE, 1.0F, null, null)
    );
    private final AtomicReference<TerrainPreview.PreviewInfo> info = new AtomicReference<>();
    private Future<TerrainPreview.PreviewMesh> pending;
@@ -200,29 +262,68 @@ public final class TerrainPreview implements AutoCloseable {
       int height,
       float rotationX,
       float rotationY,
-      float zoom,
+      float cameraDistance,
       TerrainPreviewWidget.RenderMode renderMode
    ) {
-      TerrainPreview.PreviewMesh preview = this.mesh;
-      if (preview != null && width > 0 && height > 0) {
-         Matrix4f modelView = buildModelView(rotationX, rotationY);
-         Matrix4f projection = buildProjection(width, height, zoom);
-         Matrix3x2f pose = new Matrix3x2f(graphics.pose());
-         ScreenRectangle rawBounds = new ScreenRectangle(x, y, width, height);
-         ScreenRectangle bounds = rawBounds.transformAxisAligned(pose);
-         GuiRenderState renderState = ((GuiGraphicsAccessor)graphics).tellus$getGuiRenderState();
-         renderState.addGuiElement(new TerrainPreview.TerrainPreviewRenderState(preview, renderMode, modelView, projection, pose, rawBounds, bounds));
+      if (width <= 0 || height <= 0) {
+         return;
       }
+
+      renderPreviewSky(graphics, x, y, width, height);
+      renderPreviewSun(graphics, x, y, width, height, rotationX, rotationY);
+      TerrainPreview.PreviewMesh preview = this.mesh;
+      if (preview == null) {
+         return;
+      }
+
+      Matrix4f modelView = buildModelView(rotationX, rotationY, cameraDistance);
+      Matrix4f projection = buildProjection(width, height);
+      Matrix3x2f pose = new Matrix3x2f(graphics.pose());
+      ScreenRectangle rawBounds = new ScreenRectangle(x, y, width, height);
+      ScreenRectangle bounds = rawBounds.transformAxisAligned(pose);
+      GuiRenderState renderState = ((GuiGraphicsAccessor)graphics).tellus$getGuiRenderState();
+      renderState.addGuiElement(new TerrainPreview.TerrainPreviewRenderState(preview, renderMode, modelView, projection, pose, rawBounds, bounds));
    }
 
-   private static Matrix4f buildProjection(int width, int height, float zoom) {
+   private static void renderPreviewSky(GuiGraphicsExtractor graphics, int x, int y, int width, int height) {
+      int horizonY = y + Math.max(1, Math.round(height * 0.72F));
+      graphics.fillGradient(x, y, x + width, horizonY, PREVIEW_SKY_TOP_COLOR, PREVIEW_SKY_HORIZON_COLOR);
+      graphics.fillGradient(x, horizonY, x + width, y + height, PREVIEW_SKY_HORIZON_COLOR, PREVIEW_SKY_GROUND_COLOR);
+   }
+
+   private static void renderPreviewSun(
+      GuiGraphicsExtractor graphics, int x, int y, int width, int height, float rotationX, float rotationY
+   ) {
+      Vector3f viewDirection = new Vector3f(PREVIEW_SUN_X, PREVIEW_SUN_Y, PREVIEW_SUN_Z).normalize();
+      new Matrix4f().identity().rotateX(rotationX).rotateY(rotationY).transformDirection(viewDirection);
+      float depth = -viewDirection.z;
+      if (depth <= 0.01F) {
+         return;
+      }
+
+      float tanHalfFov = (float)Math.tan(Math.toRadians(PREVIEW_CAMERA_FOV_DEGREES * 0.5F));
       float aspect = (float)width / height;
-      float effectiveFov = Mth.clamp(50.0F / Math.max(zoom, 0.01F), 15.0F, 120.0F);
-      return new Matrix4f().setPerspective((float)Math.toRadians(effectiveFov), aspect, 0.05F, 100.0F);
+      float normalizedX = viewDirection.x / (depth * tanHalfFov * aspect);
+      float normalizedY = viewDirection.y / (depth * tanHalfFov);
+      int sunSize = Math.max(1, Math.min(Math.min(width, height), Mth.clamp(Math.round(Math.min(width, height) * 0.11F), 24, 72)));
+      int sunX = x + Math.round((normalizedX * 0.5F + 0.5F) * width) - sunSize / 2;
+      int sunY = y + Math.round((0.5F - normalizedY * 0.5F) * height) - sunSize / 2;
+      if (sunX + sunSize <= x || sunX >= x + width || sunY + sunSize <= y || sunY >= y + height) {
+         return;
+      }
+
+      graphics.enableScissor(x, y, x + width, y + height);
+      graphics.blit(PREVIEW_SUN_PIPELINE, PREVIEW_SUN_TEXTURE, sunX, sunY, 0.0F, 0.0F, sunSize, sunSize, 32, 32);
+      graphics.disableScissor();
    }
 
-   private static Matrix4f buildModelView(float rotationX, float rotationY) {
-      return new Matrix4f().identity().translate(0.0F, 0.0F, -2.35F).rotateX(rotationX).rotateY(rotationY);
+   private static Matrix4f buildProjection(int width, int height) {
+      float aspect = (float)width / height;
+      return new Matrix4f().setPerspective((float)Math.toRadians(PREVIEW_CAMERA_FOV_DEGREES), aspect, 0.05F, 100.0F);
+   }
+
+   private static Matrix4f buildModelView(float rotationX, float rotationY, float cameraDistance) {
+      return new Matrix4f().identity().translate(0.0F, 0.0F, -cameraDistance).rotateX(rotationX).rotateY(rotationY);
    }
 
    private TerrainPreview.PreviewMesh buildMesh(EarthGeneratorSettings settings, int id) {
@@ -239,21 +340,24 @@ public final class TerrainPreview implements AutoCloseable {
       double[] blockHeights = new double[size * size];
       boolean[] esaWaterMask = new boolean[size * size];
       double[] elevations = new double[size * size];
+      boolean[] missingElevationMask = new boolean[size * size];
       boolean[] oceanFallbackMask = new boolean[size * size];
+      boolean[] mapterhornLandOverride = new boolean[size * size];
       int coverStride = 2;
       int coverSize = (size + coverStride - 1) / coverStride;
       int climateStride = 4;
       int climateSize = (size + climateStride - 1) / climateStride;
+      long gridArea = (long)size * size;
       long downloadDone = 0L;
       boolean roadsPreviewEnabled = settings.enableRoads() && settings.worldScale() > 0.0 && settings.worldScale() <= 15.0;
       boolean buildingsPreviewEnabled = settings.enableBuildings() && settings.worldScale() > 0.0 && settings.worldScale() <= 15.0 && this.osmBuildingSource.available();
       double worldScale = settings.worldScale();
       boolean useVisualCover = worldScale > 0.0 && worldScale < 10.0;
+      long terrainDownloadUnits = gridArea;
       long coverDownloadUnits = (long)coverSize * coverSize * (useVisualCover ? 2L : 1L);
-      long downloadTotal = (long)size * size + coverDownloadUnits + (long)climateSize * climateSize;
+      long climateDownloadUnits = (long)climateSize * climateSize;
+      long downloadTotal = terrainDownloadUnits + coverDownloadUnits + climateDownloadUnits;
       boolean waterPreviewEnabled = settings.enableWater() && worldScale > 0.0 && this.osmWaterSource.available();
-      boolean remaSnowEnabled = TellusElevationSource.usesPolarDem(settings.demSelection()) && worldScale > 0.0;
-      double remaSnowBoundaryZ = remaSnowEnabled ? TellusElevationSource.remaBoundaryBlockZ(worldScale) : Double.POSITIVE_INFINITY;
       double blocksPerDegree = EarthProjection.blocksPerDegree(worldScale);
       double centerX = settings.spawnLongitude() * blocksPerDegree;
       double centerZ = EarthProjection.latToBlockZ(settings.spawnLatitude(), worldScale);
@@ -264,12 +368,12 @@ public final class TerrainPreview implements AutoCloseable {
       double minWorldZ = centerZ - radius;
       double maxWorldX = centerX + radius;
       double maxWorldZ = centerZ + radius;
-      int seaLevel = settings.resolveSeaLevel();
+      int seaLevel = settings.effectiveHeightOffset();
       float[] xCoords = buildAxisCoordinates(size);
       this.queueBasePreviewPrefetch(centerX, centerZ, worldScale, settings.demSelection(), previewResolutionMeters);
       this.queueOsmPreviewPrefetch(centerX, centerZ, worldScale, minWorldX, minWorldZ, maxWorldX, maxWorldZ, waterPreviewEnabled, roadsPreviewEnabled, buildingsPreviewEnabled);
 
-      TerrainPreview.DownloadNetworkTracker downloadTracker = new TerrainPreview.DownloadNetworkTracker();
+      TerrainPreview.DownloadStageProgress downloadProgress = new TerrainPreview.DownloadStageProgress(id, downloadTotal);
       int[] coverClasses = new int[coverSize * coverSize];
       int[] visualCoverClasses = new int[coverSize * coverSize];
       byte[] climateGroups = new byte[climateSize * climateSize];
@@ -279,57 +383,115 @@ public final class TerrainPreview implements AutoCloseable {
       int minSurfaceY = Integer.MAX_VALUE;
       int maxSurfaceY = Integer.MIN_VALUE;
 
-      DownloadProgressReporter.Scope scope = DownloadProgressReporter.push(downloadTracker);
+      DownloadProgressReporter.Scope scope = DownloadProgressReporter.push(downloadProgress);
       try {
-         for (int z = 0; z < size; z++) {
-            if (this.shouldAbortRequest(id)) {
-               return null;
+         long terrainSampleDone = 0L;
+         int missingElevationCount = 0;
+         for (int attempt = 0; attempt < PREVIEW_ELEVATION_MAX_ATTEMPTS; attempt++) {
+            if (attempt > 0) {
+               this.elevationSource.retryMissingTiles();
             }
+            Arrays.fill(elevations, Double.NaN);
+            Arrays.fill(missingElevationMask, false);
+            Arrays.fill(mapterhornLandOverride, false);
+            Arrays.fill(esaWaterMask, false);
+            Arrays.fill(oceanFallbackMask, false);
+            downloadDone = 0L;
+            terrainSampleDone = 0L;
+            missingElevationCount = 0;
+            downloadProgress.updateSamples(downloadDone, terrainSampleDone, terrainDownloadUnits, ACTIVITY_DOWNLOAD_ELEVATION, "Terrain samples");
 
-            double blockZ = centerZ - radius + z * step;
-
-            for (int x = 0; x < size; x++) {
+            for (int z = 0; z < size; z++) {
                if (this.shouldAbortRequest(id)) {
                   return null;
                }
 
-               double blockX = centerX - radius + x * step;
-               int idx = x + z * size;
-               TellusLandMaskSource.LandMaskSample landMaskSample = this.landMaskSource.sampleLandMask(blockX, blockZ, worldScale);
-               int pointCoverClass = landMaskSample.known() && landMaskSample.land()
-                  ? ESA_NO_DATA
-                  : this.landCoverSource.sampleCoverClass(blockX, blockZ, worldScale, previewResolutionMeters);
-               boolean oceanZoom = !settings.enableWater() && useOceanZoom(landMaskSample);
-               double elevation = this.elevationSource.samplePreviewElevationMeters(
-                  blockX,
-                  blockZ,
-                  worldScale,
-                  oceanZoom,
-                  settings.demSelection(),
-                  previewResolutionMeters
-               );
-               if (this.shouldAbortRequest(id)) {
-                  return null;
+               double blockZ = centerZ - radius + z * step;
+
+               for (int x = 0; x < size; x++) {
+                  if (this.shouldAbortRequest(id)) {
+                     return null;
+                  }
+
+                  double blockX = centerX - radius + x * step;
+                  int idx = x + z * size;
+                  TellusLandMaskSource.LandMaskSample landMaskSample = this.landMaskSource.sampleLandMask(blockX, blockZ, worldScale);
+                  int pointCoverClass = landMaskSample.known() && landMaskSample.land()
+                     ? ESA_NO_DATA
+                     : this.landCoverSource.sampleCoverClass(blockX, blockZ, worldScale, previewResolutionMeters);
+                  boolean oceanZoom = useOceanZoom(landMaskSample);
+                  TellusElevationSource.ResolvedElevationSample elevationSample = this.elevationSource.sampleResolvedPreviewElevationMeters(
+                     blockX,
+                     blockZ,
+                     worldScale,
+                     oceanZoom,
+                     settings.demSelection(),
+                     previewResolutionMeters
+                  );
+                  double elevation = elevationSample.elevationMeters();
+                  mapterhornLandOverride[idx] = elevationSample.mapterhornLandOverride();
+                  if (this.shouldAbortRequest(id)) {
+                     return null;
+                  }
+
+                  if (!Double.isFinite(elevation)) {
+                     missingElevationMask[idx] = true;
+                     missingElevationCount++;
+                  } else {
+                     int surfaceY = scaledSurfaceY(elevation, settings);
+                     elevations[idx] = elevation;
+                     blockHeights[idx] = surfaceY;
+                     esaWaterMask[idx] = !settings.enableWater()
+                        && pointCoverClass == ESA_WATER
+                        && !(oceanZoom && elevationSample.mapterhornLandOverride());
+                     oceanFallbackMask[idx] = !settings.enableWater()
+                        && isPreviewOceanFallback(
+                           landMaskSample, surfaceY, pointCoverClass, seaLevel, elevationSample.mapterhornLandOverride()
+                        );
+                  }
+                  downloadDone++;
+                  terrainSampleDone++;
+                  if ((downloadDone & 255L) == 0L) {
+                     downloadProgress.updateSamples(downloadDone, terrainSampleDone, terrainDownloadUnits, ACTIVITY_DOWNLOAD_ELEVATION, "Terrain samples");
+                  }
                }
 
-               int surfaceY = scaledSurfaceY(elevation, settings);
-               elevations[idx] = elevation;
-               blockHeights[idx] = surfaceY;
-               esaWaterMask[idx] = !settings.enableWater() && pointCoverClass == ESA_WATER;
-               oceanFallbackMask[idx] = !settings.enableWater()
-                  && isPreviewOceanFallback(landMaskSample, surfaceY, pointCoverClass, seaLevel);
-               minElevation = Math.min(minElevation, elevation);
-               maxElevation = Math.max(maxElevation, elevation);
-               minSurfaceY = Math.min(minSurfaceY, surfaceY);
-               maxSurfaceY = Math.max(maxSurfaceY, surfaceY);
-               if ((++downloadDone & 255L) == 0L) {
-                  this.updateDownloadStatus(id, downloadDone, downloadTotal, downloadTracker, ACTIVITY_DOWNLOAD_ELEVATION);
-               }
+               downloadProgress.updateSamples(downloadDone, terrainSampleDone, terrainDownloadUnits, ACTIVITY_DOWNLOAD_ELEVATION, "Terrain samples");
             }
-
-            this.updateDownloadStatus(id, downloadDone, downloadTotal, downloadTracker, ACTIVITY_DOWNLOAD_ELEVATION);
+            if (missingElevationCount == 0) {
+               break;
+            }
          }
 
+         if (missingElevationCount > 0) {
+            if (!ElevationGridRepair.repairMissing(elevations, missingElevationMask, size, size)) {
+               Tellus.LOGGER.warn("Terrain preview elevation unavailable for the complete preview area after {} attempts", PREVIEW_ELEVATION_MAX_ATTEMPTS);
+               this.updateStatus(id, TerrainPreview.PreviewStage.COMPLETE, 1.0F);
+               return null;
+            }
+            Tellus.LOGGER.warn(
+               "Repaired {} unavailable terrain preview elevation samples after {} download attempts",
+               missingElevationCount,
+               PREVIEW_ELEVATION_MAX_ATTEMPTS
+            );
+         }
+
+         minElevation = Double.POSITIVE_INFINITY;
+         maxElevation = Double.NEGATIVE_INFINITY;
+         minSurfaceY = Integer.MAX_VALUE;
+         maxSurfaceY = Integer.MIN_VALUE;
+         for (int idx = 0; idx < elevations.length; idx++) {
+            double elevation = elevations[idx];
+            int surfaceY = scaledSurfaceY(elevation, settings);
+            blockHeights[idx] = surfaceY;
+            minElevation = Math.min(minElevation, elevation);
+            maxElevation = Math.max(maxElevation, elevation);
+            minSurfaceY = Math.min(minSurfaceY, surfaceY);
+            maxSurfaceY = Math.max(maxSurfaceY, surfaceY);
+         }
+
+         long coverSampleDone = 0L;
+         downloadProgress.updateSamples(downloadDone, coverSampleDone, coverDownloadUnits, ACTIVITY_DOWNLOAD_LAND_COVER, "Land-cover samples");
          for (int z = 0; z < coverSize; z++) {
             if (this.shouldAbortRequest(id)) {
                return null;
@@ -360,8 +522,10 @@ public final class TerrainPreview implements AutoCloseable {
                   return null;
                }
 
-               if ((++downloadDone & 255L) == 0L) {
-                  this.updateDownloadStatus(id, downloadDone, downloadTotal, downloadTracker, ACTIVITY_DOWNLOAD_LAND_COVER);
+               downloadDone++;
+               coverSampleDone++;
+               if ((downloadDone & 255L) == 0L) {
+                  downloadProgress.updateSamples(downloadDone, coverSampleDone, coverDownloadUnits, ACTIVITY_DOWNLOAD_LAND_COVER, "Land-cover samples");
                }
 
                if (useVisualCover && !replacedDryEsaWater) {
@@ -370,15 +534,19 @@ public final class TerrainPreview implements AutoCloseable {
                      return null;
                   }
 
-                  if ((++downloadDone & 255L) == 0L) {
-                     this.updateDownloadStatus(id, downloadDone, downloadTotal, downloadTracker, ACTIVITY_DOWNLOAD_LAND_COVER);
+                  downloadDone++;
+                  coverSampleDone++;
+                  if ((downloadDone & 255L) == 0L) {
+                     downloadProgress.updateSamples(downloadDone, coverSampleDone, coverDownloadUnits, ACTIVITY_DOWNLOAD_LAND_COVER, "Land-cover samples");
                   }
                }
             }
 
-            this.updateDownloadStatus(id, downloadDone, downloadTotal, downloadTracker, ACTIVITY_DOWNLOAD_LAND_COVER);
+            downloadProgress.updateSamples(downloadDone, coverSampleDone, coverDownloadUnits, ACTIVITY_DOWNLOAD_LAND_COVER, "Land-cover samples");
          }
 
+         long climateSampleDone = 0L;
+         downloadProgress.updateSamples(downloadDone, climateSampleDone, climateDownloadUnits, ACTIVITY_DOWNLOAD_CLIMATE, "Climate samples");
          for (int z = 0; z < climateSize; z++) {
             if (this.shouldAbortRequest(id)) {
                return null;
@@ -402,15 +570,17 @@ public final class TerrainPreview implements AutoCloseable {
 
                climateGroups[idx] = climateGroup(koppen);
                climateBasedBuiltUpCoverClasses[idx] = (byte)climateBasedBuiltUpPreviewCoverClass(koppen);
-               if ((++downloadDone & 255L) == 0L) {
-                  this.updateDownloadStatus(id, downloadDone, downloadTotal, downloadTracker, ACTIVITY_DOWNLOAD_CLIMATE);
+               downloadDone++;
+               climateSampleDone++;
+               if ((downloadDone & 255L) == 0L) {
+                  downloadProgress.updateSamples(downloadDone, climateSampleDone, climateDownloadUnits, ACTIVITY_DOWNLOAD_CLIMATE, "Climate samples");
                }
             }
 
-            this.updateDownloadStatus(id, downloadDone, downloadTotal, downloadTracker, ACTIVITY_DOWNLOAD_CLIMATE);
+            downloadProgress.updateSamples(downloadDone, climateSampleDone, climateDownloadUnits, ACTIVITY_DOWNLOAD_CLIMATE, "Climate samples");
          }
 
-         this.updateDownloadStatus(id, downloadTotal, downloadTotal, downloadTracker, ACTIVITY_DOWNLOAD_CLIMATE);
+         downloadProgress.finish(ACTIVITY_DOWNLOAD_CLIMATE, "Climate samples");
       } finally {
          scope.close();
       }
@@ -423,7 +593,6 @@ public final class TerrainPreview implements AutoCloseable {
       float[] heights = new float[size * size];
       float min = Float.POSITIVE_INFINITY;
       float max = Float.NEGATIVE_INFINITY;
-      long gridArea = (long)size * size;
       long treeOverlayUnits = gridArea;
       long heightOffsetUnits = gridArea;
       long infoUnits = (long)PREVIEW_INFO_PROVIDER_GRID_SIZE * PREVIEW_INFO_PROVIDER_GRID_SIZE;
@@ -435,7 +604,9 @@ public final class TerrainPreview implements AutoCloseable {
          + (roadsPreviewEnabled ? PREVIEW_ROAD_OVERLAY_UNITS : 0L)
          + (buildingsPreviewEnabled ? PREVIEW_BUILDING_OVERLAY_UNITS : 0L);
       long buildDone = 0L;
-      this.updateStatus(id, TerrainPreview.PreviewStage.LOADING, 0.0F, ACTIVITY_BUILD_HEIGHTS);
+      this.updateStatus(
+         id, TerrainPreview.PreviewStage.LOADING, 0.0F, ACTIVITY_BUILD_HEIGHTS, formatCountProgress("Height rows", 0L, size)
+      );
 
       for (int i = 0; i < blockHeights.length; i++) {
          float value = (float)((previewBlockHeights[i] - settings.heightOffset()) / radius * 0.7F);
@@ -448,7 +619,7 @@ public final class TerrainPreview implements AutoCloseable {
             }
 
             buildDone += size;
-            this.updateBuildStatus(id, buildDone, buildTotal, ACTIVITY_BUILD_HEIGHTS);
+            this.updateBuildStatus(id, buildDone, buildTotal, ACTIVITY_BUILD_HEIGHTS, formatCountProgress("Height rows", (i + 1) / size, size));
          }
       }
 
@@ -462,16 +633,21 @@ public final class TerrainPreview implements AutoCloseable {
             }
 
             buildDone += size;
-            this.updateBuildStatus(id, buildDone, buildTotal, ACTIVITY_BUILD_CENTER);
+            this.updateBuildStatus(id, buildDone, buildTotal, ACTIVITY_BUILD_CENTER, formatCountProgress("Center rows", (ix + 1) / size, size));
          }
       }
 
-      this.updateBuildStatus(id, buildDone, buildTotal, ACTIVITY_BUILD_COLORS);
+      this.updateBuildStatus(id, buildDone, buildTotal, ACTIVITY_BUILD_COLORS, formatCountProgress("Color rows", 0L, size));
       float[] terrainHeights = heights.clone();
       float[] detailHeights = heights.clone();
       int[] terrainColors = new int[size * size];
       int[] detailColors = new int[size * size];
       float[] detailHeightOffsets = new float[size * size];
+      int[] waterColors = new int[size * size];
+      Arrays.fill(waterColors, -1);
+      float[] waterSurfaceHeights = terrainHeights.clone();
+      float previewSeaSurfaceHeight = (float)((seaLevel - settings.heightOffset()) / radius * 0.7F) - center;
+      List<TerrainPreview.PreviewTree> previewTrees = new ArrayList<>();
 
       for (int z = 0; z < size; z++) {
          if (this.shouldAbortRequest(id)) {
@@ -515,27 +691,43 @@ public final class TerrainPreview implements AutoCloseable {
                oceanFallbackMask[idx],
                !waterPreviewEnabled,
                settings.enableWater(),
-               remaSnowEnabled && blockZ >= remaSnowBoundaryZ,
+               false,
                (int)Math.round(blockX),
                (int)Math.round(blockZ)
             );
             terrainColors[idx] = color;
             detailColors[idx] = color;
+            int surfaceCoverClass = MountainSurfaceRules.resolveSurfaceCoverClass(rawCoverClass, visualCoverClass);
+            double waterDepth = previewWaterDepthBlocks(
+               surfaceCoverClass,
+               esaWaterMask[idx],
+               previewBlockHeights[idx],
+               seaLevel,
+               oceanFallbackMask[idx],
+               !waterPreviewEnabled
+            );
+            if (waterDepth >= 0.0) {
+               waterColors[idx] = color;
+               if (oceanFallbackMask[idx]) {
+                  waterSurfaceHeights[idx] = previewSeaSurfaceHeight;
+               }
+            }
          }
 
          buildDone += size;
-         this.updateBuildStatus(id, buildDone, buildTotal, ACTIVITY_BUILD_COLORS);
+         this.updateBuildStatus(id, buildDone, buildTotal, ACTIVITY_BUILD_COLORS, formatCountProgress("Color rows", z + 1L, size));
       }
 
       TerrainPreview.PreviewInfo placeholderInfo = previewInfoPlaceholder(minElevation, maxElevation, minSurfaceY, maxSurfaceY);
-      this.publishInterimMesh(id, size, terrainHeights, terrainColors, detailHeights, detailColors, xCoords, placeholderInfo);
+      this.publishInterimMesh(
+         id, size, terrainHeights, terrainColors, detailHeights, detailColors, waterColors, waterSurfaceHeights, xCoords, placeholderInfo
+      );
 
-      if (!this.overlayTreePreviewMarkers(
+      if (!this.buildPreviewTrees(
          id,
          buildTotal,
          buildDone,
          detailColors,
-         detailHeightOffsets,
          coverClasses,
          visualCoverClasses,
          coverSize,
@@ -543,7 +735,8 @@ public final class TerrainPreview implements AutoCloseable {
          settings,
          minWorldX,
          minWorldZ,
-         step
+         step,
+         previewTrees
       )) {
          return null;
       }
@@ -554,9 +747,16 @@ public final class TerrainPreview implements AutoCloseable {
             id,
             buildTotal,
             buildDone,
+            terrainHeights,
             terrainColors,
+            detailHeights,
             detailColors,
             detailHeightOffsets,
+            waterColors,
+            waterSurfaceHeights,
+            previewSeaSurfaceHeight,
+            previewBlockHeights,
+            mapterhornLandOverride,
             settings,
             minWorldX,
             minWorldZ,
@@ -643,6 +843,7 @@ public final class TerrainPreview implements AutoCloseable {
          blockHeights,
          esaWaterMask,
          oceanFallbackMask,
+         mapterhornLandOverride,
          elevations,
          coverClasses,
          visualCoverClasses,
@@ -654,7 +855,19 @@ public final class TerrainPreview implements AutoCloseable {
          previewInfo
       );
       this.updateStatus(id, TerrainPreview.PreviewStage.COMPLETE, 1.0F);
-      return new TerrainPreview.PreviewMesh(size, 1, terrainHeights, terrainColors, detailHeights, detailColors, xCoords, previewInfo);
+      return preparePreviewMesh(new TerrainPreview.PreviewMesh(
+         size,
+         1,
+         terrainHeights,
+         terrainColors,
+         detailHeights,
+         detailColors,
+         waterColors,
+         waterSurfaceHeights,
+         xCoords,
+         filterPreviewTrees(previewTrees, detailColors),
+         previewInfo
+      ));
    }
 
    private TerrainPreview.PreviewMesh buildMeshFromSnapshot(EarthGeneratorSettings settings, int id, TerrainPreview.PreviewBaseSnapshot snapshot) {
@@ -667,8 +880,6 @@ public final class TerrainPreview implements AutoCloseable {
       boolean roadsPreviewEnabled = settings.enableRoads() && worldScale > 0.0 && worldScale <= 15.0;
       boolean buildingsPreviewEnabled = settings.enableBuildings() && worldScale > 0.0 && worldScale <= 15.0 && this.osmBuildingSource.available();
       boolean waterPreviewEnabled = settings.enableWater() && worldScale > 0.0 && this.osmWaterSource.available();
-      boolean remaSnowEnabled = TellusElevationSource.usesPolarDem(settings.demSelection()) && worldScale > 0.0;
-      double remaSnowBoundaryZ = remaSnowEnabled ? TellusElevationSource.remaBoundaryBlockZ(worldScale) : Double.POSITIVE_INFINITY;
       this.queueOsmPreviewPrefetch(
          snapshot.centerX(),
          snapshot.centerZ(),
@@ -687,8 +898,8 @@ public final class TerrainPreview implements AutoCloseable {
          + (roadsPreviewEnabled ? PREVIEW_ROAD_OVERLAY_UNITS : 0L)
          + (buildingsPreviewEnabled ? PREVIEW_BUILDING_OVERLAY_UNITS : 0L);
       long buildDone = 0L;
-      this.updateStatus(id, TerrainPreview.PreviewStage.LOADING, 0.0F, ACTIVITY_BUILD_COLORS);
-      int seaLevel = settings.resolveSeaLevel();
+      this.updateStatus(id, TerrainPreview.PreviewStage.LOADING, 0.0F, ACTIVITY_BUILD_COLORS, formatCountProgress("Color rows", 0L, size));
+      int seaLevel = settings.effectiveHeightOffset();
       double[] previewBlockHeights = previewDisplayBlockHeights(snapshot.blockHeights(), snapshot.oceanFallbackMask(), settings);
       TerrainPreview.PreviewHeightData previewHeightData = buildPreviewHeightData(previewBlockHeights, settings);
       float[] terrainHeights = previewHeightData.heights().clone();
@@ -696,6 +907,12 @@ public final class TerrainPreview implements AutoCloseable {
       int[] terrainColors = new int[size * size];
       int[] detailColors = new int[size * size];
       float[] detailHeightOffsets = new float[size * size];
+      int[] waterColors = new int[size * size];
+      Arrays.fill(waterColors, -1);
+      float[] waterSurfaceHeights = terrainHeights.clone();
+      float previewSeaSurfaceHeight = (float)((seaLevel - settings.heightOffset()) / snapshot.radius() * 0.7F)
+         - previewHeightData.center();
+      List<TerrainPreview.PreviewTree> previewTrees = new ArrayList<>();
 
       for (int z = 0; z < size; z++) {
          if (this.shouldAbortRequest(id)) {
@@ -739,26 +956,51 @@ public final class TerrainPreview implements AutoCloseable {
                snapshot.oceanFallbackMask()[idx],
                !waterPreviewEnabled,
                settings.enableWater(),
-               remaSnowEnabled && blockZ >= remaSnowBoundaryZ,
+               false,
                (int)Math.round(blockX),
                (int)Math.round(blockZ)
             );
             terrainColors[idx] = color;
             detailColors[idx] = color;
+            int surfaceCoverClass = MountainSurfaceRules.resolveSurfaceCoverClass(rawCoverClass, visualCoverClass);
+            double waterDepth = previewWaterDepthBlocks(
+               surfaceCoverClass,
+               snapshot.esaWaterMask()[idx],
+               previewBlockHeights[idx],
+               seaLevel,
+               snapshot.oceanFallbackMask()[idx],
+               !waterPreviewEnabled
+            );
+            if (waterDepth >= 0.0) {
+               waterColors[idx] = color;
+               if (snapshot.oceanFallbackMask()[idx]) {
+                  waterSurfaceHeights[idx] = previewSeaSurfaceHeight;
+               }
+            }
          }
 
          buildDone += size;
-         this.updateBuildStatus(id, buildDone, buildTotal, ACTIVITY_BUILD_COLORS);
+         this.updateBuildStatus(id, buildDone, buildTotal, ACTIVITY_BUILD_COLORS, formatCountProgress("Color rows", z + 1L, size));
       }
 
-      this.publishInterimMesh(id, size, terrainHeights, terrainColors, detailHeights, detailColors, snapshot.xCoords(), snapshot.info());
+      this.publishInterimMesh(
+         id,
+         size,
+         terrainHeights,
+         terrainColors,
+         detailHeights,
+         detailColors,
+         waterColors,
+         waterSurfaceHeights,
+         snapshot.xCoords(),
+         snapshot.info()
+      );
 
-      if (!this.overlayTreePreviewMarkers(
+      if (!this.buildPreviewTrees(
          id,
          buildTotal,
          buildDone,
          detailColors,
-         detailHeightOffsets,
          snapshot.coverClasses(),
          snapshot.visualCoverClasses(),
          snapshot.coverSize(),
@@ -766,7 +1008,8 @@ public final class TerrainPreview implements AutoCloseable {
          settings,
          snapshot.minWorldX(),
          snapshot.minWorldZ(),
-         snapshot.step()
+         snapshot.step(),
+         previewTrees
       )) {
          return null;
       }
@@ -777,9 +1020,16 @@ public final class TerrainPreview implements AutoCloseable {
             id,
             buildTotal,
             buildDone,
+            terrainHeights,
             terrainColors,
+            detailHeights,
             detailColors,
             detailHeightOffsets,
+            waterColors,
+            waterSurfaceHeights,
+            previewSeaSurfaceHeight,
+            previewBlockHeights,
+            snapshot.mapterhornLandOverride(),
             settings,
             snapshot.minWorldX(),
             snapshot.minWorldZ(),
@@ -845,9 +1095,19 @@ public final class TerrainPreview implements AutoCloseable {
       }
 
       this.updateStatus(id, TerrainPreview.PreviewStage.COMPLETE, 1.0F);
-      return new TerrainPreview.PreviewMesh(
-         size, 1, terrainHeights, terrainColors, detailHeights, detailColors, snapshot.xCoords(), snapshot.info()
-      );
+      return preparePreviewMesh(new TerrainPreview.PreviewMesh(
+         size,
+         1,
+         terrainHeights,
+         terrainColors,
+         detailHeights,
+         detailColors,
+         waterColors,
+         waterSurfaceHeights,
+         snapshot.xCoords(),
+         filterPreviewTrees(previewTrees, detailColors),
+         snapshot.info()
+      ));
    }
 
    private boolean canReuseBaseSnapshot(EarthGeneratorSettings settings, TerrainPreview.PreviewBaseSnapshot snapshot) {
@@ -919,10 +1179,10 @@ public final class TerrainPreview implements AutoCloseable {
    }
 
    public static int scaledSurfaceY(double elevation, EarthGeneratorSettings settings) {
-      double scale = elevation >= 0.0 ? settings.terrestrialHeightScale() : settings.oceanicHeightScale();
-      double scaled = elevation * scale / settings.worldScale();
+      double scale = elevation >= 0.0 ? settings.effectiveTerrestrialHeightScale() : settings.effectiveOceanicHeightScale();
+      double scaled = elevation * scale / settings.effectiveVerticalWorldScale();
       int base = elevation >= 0.0 ? Mth.ceil(scaled) : Mth.floor(scaled);
-      return base + settings.heightOffset();
+      return base + settings.effectiveHeightOffset();
    }
 
    private void publishInterimMesh(
@@ -932,6 +1192,8 @@ public final class TerrainPreview implements AutoCloseable {
       int[] terrainColors,
       float[] detailHeights,
       int[] detailColors,
+      int[] waterColors,
+      float[] waterSurfaceHeights,
       float[] xCoords,
       TerrainPreview.PreviewInfo info
    ) {
@@ -943,7 +1205,10 @@ public final class TerrainPreview implements AutoCloseable {
             terrainColors.clone(),
             detailHeights.clone(),
             detailColors.clone(),
+            waterColors.clone(),
+            waterSurfaceHeights.clone(),
             xCoords,
+            new TerrainPreview.PreviewTree[0],
             info
          );
          this.info.set(info);
@@ -966,20 +1231,45 @@ public final class TerrainPreview implements AutoCloseable {
       return new TerrainPreview.PreviewInfo(List.of(), List.of(), 0, minElevation, maxElevation, minSurfaceY, maxSurfaceY);
    }
 
+   private static TerrainPreview.PreviewMesh preparePreviewMesh(TerrainPreview.PreviewMesh mesh) {
+      mesh.geometryFor(TerrainPreviewWidget.RenderMode.TERRAIN_ONLY);
+      mesh.geometryFor(TerrainPreviewWidget.RenderMode.FULL_DETAIL);
+      return mesh;
+   }
+
    private static double[] previewDisplayBlockHeights(double[] rawBlockHeights, boolean[] oceanFallbackMask, EarthGeneratorSettings settings) {
       if (!settings.enableWater()) {
          return rawBlockHeights;
       } else {
          double[] displayHeights = rawBlockHeights.clone();
-         int seaLevel = settings.resolveSeaLevel();
+         int seaLevel = settings.effectiveHeightOffset();
 
          for (int i = 0; i < displayHeights.length; i++) {
             if (oceanFallbackMask[i] && displayHeights[i] >= seaLevel) {
                displayHeights[i] = seaLevel - 1;
             }
+
+            if (displayHeights[i] < seaLevel) {
+               displayHeights[i] = seaLevel - previewOceanDisplayDepth(seaLevel - displayHeights[i]);
+            }
          }
 
          return displayHeights;
+      }
+   }
+
+   private static double previewOceanDisplayDepth(double depthBlocks) {
+      if (!(depthBlocks > 0.0)) {
+         return 0.0;
+      } else if (!Double.isFinite(depthBlocks)) {
+         return PREVIEW_OCEAN_MAX_DEPTH_BLOCKS;
+      } else if (depthBlocks <= PREVIEW_OCEAN_LINEAR_DEPTH_BLOCKS) {
+         return depthBlocks;
+      } else {
+         double compressed = PREVIEW_OCEAN_LINEAR_DEPTH_BLOCKS
+            + Math.log1p((depthBlocks - PREVIEW_OCEAN_LINEAR_DEPTH_BLOCKS) / PREVIEW_OCEAN_DEPTH_COMPRESSION_BLOCKS)
+               * PREVIEW_OCEAN_DEPTH_COMPRESSION_BLOCKS;
+         return Math.min(PREVIEW_OCEAN_MAX_DEPTH_BLOCKS, compressed);
       }
    }
 
@@ -1063,7 +1353,13 @@ public final class TerrainPreview implements AutoCloseable {
          }
 
          progressDone += providerGridSize;
-         this.updateBuildStatus(id, buildBaseDone + progressDone, buildTotal, ACTIVITY_BUILD_INFO);
+         this.updateBuildStatus(
+            id,
+            buildBaseDone + progressDone,
+            buildTotal,
+            ACTIVITY_BUILD_INFO,
+            formatCountProgress("Coverage samples", progressDone, (long)providerGridSize * providerGridSize)
+         );
       }
 
       List<TerrainPreview.PreviewProviderShare> primaryProviders = new ArrayList<>(primaryCounts.size());
@@ -1145,12 +1441,11 @@ public final class TerrainPreview implements AutoCloseable {
       return (int)Math.round((neighborAverage - center) * 4.0 / scaledStep);
    }
 
-   private boolean overlayTreePreviewMarkers(
+   private boolean buildPreviewTrees(
       int requestId,
       long buildTotal,
       long buildBaseDone,
       int[] colors,
-      float[] heightOffsets,
       int[] coverClasses,
       int[] visualCoverClasses,
       int coverSize,
@@ -1158,65 +1453,63 @@ public final class TerrainPreview implements AutoCloseable {
       EarthGeneratorSettings settings,
       double minWorldX,
       double minWorldZ,
-      double step
+      double step,
+      List<TerrainPreview.PreviewTree> trees
    ) {
       if (!(settings.worldScale() <= 0.0) && !(settings.worldScale() > 60.0) && !(step <= 0.0)) {
          int size = PREVIEW_GRID_SIZE;
          float density = treeMarkerDensity(settings.worldScale());
          if (!(density <= 0.0F)) {
             float treeHeight = treePreviewHeight(settings.worldScale());
-            boolean expandedMarkers = settings.worldScale() <= 12.0;
 
-            for (int z = 0; z < size; z++) {
+            for (int z = 1; z < size - 1; z++) {
                if (this.shouldAbortRequest(requestId)) {
                   return false;
                }
 
                int coverZ = Math.min(coverSize - 1, z / coverStride);
 
-               for (int x = 0; x < size; x++) {
+               for (int x = 1; x < size - 1; x++) {
                   int coverX = Math.min(coverSize - 1, x / coverStride);
                   int coverIdx = coverX + coverZ * coverSize;
                   if (MountainSurfaceRules.isTreeMarkerCoverClass(coverClasses[coverIdx], visualCoverClasses[coverIdx])) {
                      long blockX = Mth.floor(minWorldX + x * step);
                      long blockZ = Mth.floor(minWorldZ + z * step);
                      if (!(hashToUnitDouble(blockX, blockZ) > density)) {
-                        float centerBlend = 0.56F * (0.68F + (float)hashToUnitDouble(blockX, blockZ, 967164898L) * 0.32F);
-                        float centerHeight = treeHeight * (0.7F + (float)hashToUnitDouble(blockX, blockZ, 1837846289L) * 0.45F);
-                        paintTreePreviewPoint(colors, heightOffsets, size, x, z, centerBlend, centerHeight);
-                        float ringBlend = centerBlend * (0.5F + (float)hashToUnitDouble(blockX, blockZ, 3257595197L) * 0.2F);
-                        float ringHeight = centerHeight * (0.32F + (float)hashToUnitDouble(blockX, blockZ, 182545271L) * 0.2F);
-                        paintTreeCardinalLobe(colors, heightOffsets, size, x, z, 1, 0, blockX, blockZ, 1090592539L, ringBlend, ringHeight);
-                        paintTreeCardinalLobe(colors, heightOffsets, size, x, z, -1, 0, blockX, blockZ, 2553043431L, ringBlend, ringHeight);
-                        paintTreeCardinalLobe(colors, heightOffsets, size, x, z, 0, 1, blockX, blockZ, 1601858105L, ringBlend, ringHeight);
-                        paintTreeCardinalLobe(colors, heightOffsets, size, x, z, 0, -1, blockX, blockZ, 3074239821L, ringBlend, ringHeight);
-                        if (expandedMarkers) {
-                           float diagonalChance = 0.23F + (float)hashToUnitDouble(blockX, blockZ, 2765689601L) * 0.22F;
-                           float diagonalBlend = centerBlend * 0.44F;
-                           float diagonalHeight = centerHeight * 0.24F;
-                           paintTreeDiagonalLobe(
-                              colors, heightOffsets, size, x, z, 1, 1, blockX, blockZ, 3539041045L, diagonalChance, diagonalBlend, diagonalHeight
-                           );
-                           paintTreeDiagonalLobe(
-                              colors, heightOffsets, size, x, z, 1, -1, blockX, blockZ, 431787567L, diagonalChance, diagonalBlend, diagonalHeight
-                           );
-                           paintTreeDiagonalLobe(
-                              colors, heightOffsets, size, x, z, -1, 1, blockX, blockZ, 2120467777L, diagonalChance, diagonalBlend, diagonalHeight
-                           );
-                           paintTreeDiagonalLobe(
-                              colors, heightOffsets, size, x, z, -1, -1, blockX, blockZ, 1254269913L, diagonalChance, diagonalBlend, diagonalHeight
-                           );
-                        }
+                        int index = x + z * size;
+                        float height = treeHeight * (0.72F + (float)hashToUnitDouble(blockX, blockZ, 1837846289L) * 0.42F);
+                        float canopyScale = 0.82F + (float)hashToUnitDouble(blockX, blockZ, 3257595197L) * 0.38F;
+                        float trunkScale = 0.82F + (float)hashToUnitDouble(blockX, blockZ, 182545271L) * 0.3F;
+                        int leafColor = blendColor(PREVIEW_TREE_LEAF_COLOR, colors[index], 0.18F);
+                        trees.add(new TerrainPreview.PreviewTree(x, z, height, canopyScale, trunkScale, leafColor, colors[index]));
                      }
                   }
                }
 
-               this.updateBuildStatus(requestId, buildBaseDone + (long)(z + 1) * size, buildTotal, ACTIVITY_BUILD_TREES);
+               this.updateBuildStatus(
+                  requestId,
+                  buildBaseDone + (long)(z + 1) * size,
+                  buildTotal,
+                  ACTIVITY_BUILD_TREES,
+                  formatCountProgress("Tree rows", z + 1L, size)
+               );
             }
          }
       }
 
       return !this.shouldAbortRequest(requestId);
+   }
+
+   private static TerrainPreview.PreviewTree[] filterPreviewTrees(List<TerrainPreview.PreviewTree> candidates, int[] colors) {
+      List<TerrainPreview.PreviewTree> trees = new ArrayList<>(candidates.size());
+      for (TerrainPreview.PreviewTree tree : candidates) {
+         int index = tree.gridX() + tree.gridZ() * PREVIEW_GRID_SIZE;
+         if (index >= 0 && index < colors.length && colors[index] == tree.sourceColor()) {
+            trees.add(tree);
+         }
+      }
+
+      return trees.toArray(TerrainPreview.PreviewTree[]::new);
    }
 
    private boolean applyFeatureHeightOffsets(int requestId, long buildTotal, long buildBaseDone, float[] heights, float[] offsets, int rowSize) {
@@ -1225,6 +1518,7 @@ public final class TerrainPreview implements AutoCloseable {
          return !this.shouldAbortRequest(requestId);
       } else {
          int safeRowSize = Math.max(1, rowSize);
+         long totalRows = (count + (long)safeRowSize - 1L) / safeRowSize;
 
          for (int rowStart = 0; rowStart < count; rowStart += safeRowSize) {
             if (this.shouldAbortRequest(requestId)) {
@@ -1240,7 +1534,14 @@ public final class TerrainPreview implements AutoCloseable {
                }
             }
 
-            this.updateBuildStatus(requestId, buildBaseDone + rowEnd, buildTotal, ACTIVITY_BUILD_HEIGHT_OFFSETS);
+            long completedRows = (rowEnd + (long)safeRowSize - 1L) / safeRowSize;
+            this.updateBuildStatus(
+               requestId,
+               buildBaseDone + rowEnd,
+               buildTotal,
+               ACTIVITY_BUILD_HEIGHT_OFFSETS,
+               formatCountProgress("Feature rows", completedRows, totalRows)
+            );
          }
 
          return !this.shouldAbortRequest(requestId);
@@ -1257,64 +1558,15 @@ public final class TerrainPreview implements AutoCloseable {
       }
    }
 
-   private static void paintTreePreviewPoint(int[] colors, float[] heightOffsets, int size, int x, int z, float blend, float height) {
-      blendPreviewColor(colors, size, x, z, 2976308, blend);
-      setPreviewHeightOffset(heightOffsets, size, x, z, height);
-   }
-
-   private static void paintTreeCardinalLobe(
-      int[] colors, float[] heightOffsets, int size, int baseX, int baseZ, int dx, int dz, long blockX, long blockZ, long salt, float blend, float height
-   ) {
-      double chanceRoll = hashToUnitDouble(blockX, blockZ, salt);
-      if (!(chanceRoll < 0.2)) {
-         float lobeBlend = blend * (0.78F + (float)hashToUnitDouble(blockX + dx, blockZ + dz, salt ^ 23063L) * 0.34F);
-         float lobeHeight = height * (0.75F + (float)hashToUnitDouble(blockX + dx, blockZ + dz, salt ^ 39985L) * 0.35F);
-         paintTreePreviewPoint(colors, heightOffsets, size, baseX + dx, baseZ + dz, lobeBlend, lobeHeight);
-      }
-   }
-
-   private static void paintTreeDiagonalLobe(
-      int[] colors,
-      float[] heightOffsets,
-      int size,
-      int baseX,
-      int baseZ,
-      int dx,
-      int dz,
-      long blockX,
-      long blockZ,
-      long salt,
-      float chance,
-      float blend,
-      float height
-   ) {
-      if (!(hashToUnitDouble(blockX, blockZ, salt) >= chance)) {
-         float lobeBlend = blend * (0.8F + (float)hashToUnitDouble(blockX + dx, blockZ + dz, salt ^ 10001L) * 0.3F);
-         float lobeHeight = height * (0.7F + (float)hashToUnitDouble(blockX + dx, blockZ + dz, salt ^ 28215L) * 0.4F);
-         paintTreePreviewPoint(colors, heightOffsets, size, baseX + dx, baseZ + dz, lobeBlend, lobeHeight);
-      }
-   }
-
    private static float treePreviewHeight(double worldScale) {
+      float height;
       if (worldScale <= 8.0) {
-         return 0.034F;
+         height = 0.034F;
       } else {
-         return worldScale <= 25.0 ? 0.028F : 0.022F;
+         height = worldScale <= 25.0 ? 0.028F : 0.022F;
       }
-   }
 
-   private static void blendPreviewColor(int[] colors, int size, int x, int z, int targetColor, float amount) {
-      if (x >= 0 && z >= 0 && x < size && z < size) {
-         int idx = x + z * size;
-         colors[idx] = blendColor(colors[idx], targetColor, amount);
-      }
-   }
-
-   private static void setPreviewHeightOffset(float[] heightOffsets, int size, int x, int z, float height) {
-      if (!(height <= 0.0F) && x >= 0 && z >= 0 && x < size && z < size) {
-         int idx = x + z * size;
-         heightOffsets[idx] = Math.max(heightOffsets[idx], height);
-      }
+      return height * PREVIEW_TREE_HEIGHT_SCALE;
    }
 
    private static double hashToUnitDouble(long x, long z) {
@@ -1346,9 +1598,16 @@ public final class TerrainPreview implements AutoCloseable {
       int id,
       long buildTotal,
       long overlayBaseDone,
+      float[] terrainHeights,
       int[] terrainColors,
+      float[] detailHeights,
       int[] detailColors,
       float[] detailHeightOffsets,
+      int[] waterColors,
+      float[] waterSurfaceHeights,
+      float previewSeaSurfaceHeight,
+      double[] blockHeights,
+      boolean[] mapterhornLandOverride,
       EarthGeneratorSettings settings,
       double minWorldX,
       double minWorldZ,
@@ -1371,19 +1630,19 @@ public final class TerrainPreview implements AutoCloseable {
             @Override
             public void onRequestStarted(long expectedBytes) {
                networkTracker.onRequestStarted(expectedBytes);
-               overlayProgress.updateFetch(networkTracker.progress());
+               overlayProgress.updateFetch(networkTracker.progress(), networkTracker.detail());
             }
 
             @Override
             public void onBytesRead(int bytes) {
                networkTracker.onBytesRead(bytes);
-               overlayProgress.updateFetch(networkTracker.progress());
+               overlayProgress.updateFetch(networkTracker.progress(), networkTracker.detail());
             }
 
             @Override
             public void onRequestFinished() {
                networkTracker.onRequestFinished();
-               overlayProgress.updateFetch(networkTracker.progress());
+               overlayProgress.updateFetch(networkTracker.progress(), networkTracker.detail());
             }
          });
       try {
@@ -1400,13 +1659,29 @@ public final class TerrainPreview implements AutoCloseable {
          return false;
       }
 
-      overlayProgress.updateFetch(1.0F);
+      overlayProgress.updateFetch(1.0F, networkTracker.detail());
       if (features.isEmpty()) {
          overlayProgress.updateRaster(1.0F);
          overlayProgress.finish();
       } else {
          if (!this.overlayWaterPreviewColors(
-            id, terrainColors, detailColors, detailHeightOffsets, settings, minWorldX, minWorldZ, step, features, overlayProgress::updateRaster
+            id,
+            terrainHeights,
+            terrainColors,
+            detailHeights,
+            detailColors,
+            detailHeightOffsets,
+            waterColors,
+            waterSurfaceHeights,
+            previewSeaSurfaceHeight,
+            blockHeights,
+            mapterhornLandOverride,
+            settings,
+            minWorldX,
+            minWorldZ,
+            step,
+            features,
+            overlayProgress::updateRaster
          )) {
             return false;
          }
@@ -1449,19 +1724,19 @@ public final class TerrainPreview implements AutoCloseable {
             @Override
             public void onRequestStarted(long expectedBytes) {
                networkTracker.onRequestStarted(expectedBytes);
-               overlayProgress.updateFetch(networkTracker.progress());
+               overlayProgress.updateFetch(networkTracker.progress(), networkTracker.detail());
             }
 
             @Override
             public void onBytesRead(int bytes) {
                networkTracker.onBytesRead(bytes);
-               overlayProgress.updateFetch(networkTracker.progress());
+               overlayProgress.updateFetch(networkTracker.progress(), networkTracker.detail());
             }
 
             @Override
             public void onRequestFinished() {
                networkTracker.onRequestFinished();
-               overlayProgress.updateFetch(networkTracker.progress());
+               overlayProgress.updateFetch(networkTracker.progress(), networkTracker.detail());
             }
          });
       try {
@@ -1477,7 +1752,7 @@ public final class TerrainPreview implements AutoCloseable {
          return false;
       }
 
-      overlayProgress.updateFetch(1.0F);
+      overlayProgress.updateFetch(1.0F, networkTracker.detail());
       if (roads.isEmpty() && roadAreas.isEmpty()) {
          overlayProgress.updateRaster(1.0F);
          overlayProgress.finish();
@@ -1534,19 +1809,19 @@ public final class TerrainPreview implements AutoCloseable {
             @Override
             public void onRequestStarted(long expectedBytes) {
                networkTracker.onRequestStarted(expectedBytes);
-               overlayProgress.updateFetch(networkTracker.progress());
+               overlayProgress.updateFetch(networkTracker.progress(), networkTracker.detail());
             }
 
             @Override
             public void onBytesRead(int bytes) {
                networkTracker.onBytesRead(bytes);
-               overlayProgress.updateFetch(networkTracker.progress());
+               overlayProgress.updateFetch(networkTracker.progress(), networkTracker.detail());
             }
 
             @Override
             public void onRequestFinished() {
                networkTracker.onRequestFinished();
-               overlayProgress.updateFetch(networkTracker.progress());
+               overlayProgress.updateFetch(networkTracker.progress(), networkTracker.detail());
             }
          });
       try {
@@ -1561,7 +1836,7 @@ public final class TerrainPreview implements AutoCloseable {
          return false;
       }
 
-      overlayProgress.updateFetch(1.0F);
+      overlayProgress.updateFetch(1.0F, networkTracker.detail());
       if (features.isEmpty()) {
          overlayProgress.updateRaster(1.0F);
          overlayProgress.finish();
@@ -1580,9 +1855,16 @@ public final class TerrainPreview implements AutoCloseable {
 
    private boolean overlayWaterPreviewColors(
       int requestId,
+      float[] terrainHeights,
       int[] terrainColors,
+      float[] detailHeights,
       int[] detailColors,
       float[] detailHeightOffsets,
+      int[] waterColors,
+      float[] waterSurfaceHeights,
+      float previewSeaSurfaceHeight,
+      double[] blockHeights,
+      boolean[] mapterhornLandOverride,
       EarthGeneratorSettings settings,
       double minWorldX,
       double minWorldZ,
@@ -1604,6 +1886,10 @@ public final class TerrainPreview implements AutoCloseable {
       int area = size * size;
       byte[] waterKind = new byte[area];
       double worldScale = settings.worldScale();
+      int seaLevel = settings.effectiveHeightOffset();
+      double previewResolutionMeters = Math.max(worldScale, step * worldScale);
+      WaterSurfaceResolver waterResolver = TellusWorldgenSources.previewWaterResolver(settings);
+      boolean oceanProfileAvailable = true;
       double blocksPerDegree = EarthProjection.blocksPerDegree(worldScale);
       double[] sampleWorldX = new double[size];
       double[] sampleWorldZ = new double[size];
@@ -1647,11 +1933,34 @@ public final class TerrainPreview implements AutoCloseable {
          for (int x = 0; x < size; x++) {
             int idx = row + x;
             byte kind = waterKind[idx];
-            if (kind != 0) {
-               int color = PREVIEW_FLAT_WATER_COLOR;
+            if (kind != 0 && !(kind == 2 && mapterhornLandOverride[idx])) {
+               int terrainSurface = Math.min(Mth.floor(blockHeights[idx]), seaLevel - 1);
+               if (kind == 2 && oceanProfileAvailable) {
+                  try {
+                     terrainSurface = waterResolver.resolveOceanTerrainSurface(
+                        Mth.floor(sampleWorldX[x]), Mth.floor(sampleWorldZ[z]), seaLevel, previewResolutionMeters
+                     );
+                  } catch (OceanCoverageUnavailableException error) {
+                     oceanProfileAvailable = false;
+                     Tellus.LOGGER.debug("Ocean coast profile unavailable while building terrain preview", error);
+                  }
+               }
+
+               int color = kind == 2
+                  ? waterColorForDepth(Math.max(PREVIEW_INLAND_WATER_DEPTH_BLOCKS, seaLevel - terrainSurface))
+                  : PREVIEW_FLAT_WATER_COLOR;
                terrainColors[idx] = color;
                detailColors[idx] = color;
                detailHeightOffsets[idx] = 0.0F;
+               waterColors[idx] = color;
+               if (kind == 2) {
+                  blockHeights[idx] = terrainSurface;
+                  float profiledHeight = previewSeaSurfaceHeight
+                     - (float)((seaLevel - terrainSurface) / PREVIEW_RADIUS_BLOCKS * PREVIEW_VERTICAL_CELL_RATIO);
+                  terrainHeights[idx] = profiledHeight;
+                  detailHeights[idx] = profiledHeight;
+                  waterSurfaceHeights[idx] = previewSeaSurfaceHeight;
+               }
             }
          }
 
@@ -2502,23 +2811,29 @@ public final class TerrainPreview implements AutoCloseable {
       }
    }
 
-   private void updateDownloadStatus(
-      int id, long downloadDone, long downloadTotal, TerrainPreview.DownloadNetworkTracker tracker, String activity
-   ) {
-      float sampleProgress;
-      if (downloadTotal <= 0L) {
-         sampleProgress = 1.0F;
-      } else {
-         sampleProgress = Mth.clamp((float)downloadDone / (float)downloadTotal, 0.0F, 1.0F);
-      }
-
-      float networkProgress = tracker == null ? 0.0F : tracker.progress();
-      this.updateStatus(id, TerrainPreview.PreviewStage.DOWNLOADING, Math.max(sampleProgress, networkProgress), activity);
+   private void updateBuildStatus(int id, long buildDone, long buildTotal, String activity, String detail) {
+      float progress = buildTotal <= 0L ? 1.0F : Mth.clamp((float)buildDone / (float)buildTotal, 0.0F, 1.0F);
+      this.updateStatus(id, TerrainPreview.PreviewStage.LOADING, progress, activity, detail);
    }
 
-   private void updateBuildStatus(int id, long buildDone, long buildTotal, String activity) {
-      float progress = buildTotal <= 0L ? 1.0F : Mth.clamp((float)buildDone / (float)buildTotal, 0.0F, 1.0F);
-      this.updateStatus(id, TerrainPreview.PreviewStage.LOADING, progress, activity);
+   private static String formatCountProgress(String label, long done, long total) {
+      long safeTotal = Math.max(1L, total);
+      long safeDone = Math.max(0L, Math.min(done, safeTotal));
+      return String.format(Locale.ROOT, "%s %,d/%,d", label, safeDone, safeTotal);
+   }
+
+   private static String formatPercentProgress(String label, float progress) {
+      return String.format(Locale.ROOT, "%s %.0f%%", label, Mth.clamp(progress, 0.0F, 1.0F) * 100.0F);
+   }
+
+   private static String formatBytes(long bytes) {
+      if (bytes >= 1024L * 1024L) {
+         return String.format(Locale.ROOT, "%.1f MB", bytes / (1024.0 * 1024.0));
+      } else if (bytes >= 1024L) {
+         return String.format(Locale.ROOT, "%.1f KB", bytes / 1024.0);
+      } else {
+         return String.format(Locale.ROOT, "%d B", Math.max(0L, bytes));
+      }
    }
 
    private static byte climateGroup(String koppen) {
@@ -2666,8 +2981,15 @@ public final class TerrainPreview implements AutoCloseable {
    }
 
    private static boolean isPreviewOceanFallback(
-      TellusLandMaskSource.LandMaskSample landMaskSample, int surfaceY, int coverClass, int seaLevel
+      TellusLandMaskSource.LandMaskSample landMaskSample,
+      int surfaceY,
+      int coverClass,
+      int seaLevel,
+      boolean mapterhornLandOverride
    ) {
+      if (mapterhornLandOverride) {
+         return false;
+      }
       if (landMaskSample.known()) {
          return !landMaskSample.land();
       } else {
@@ -2792,12 +3114,16 @@ public final class TerrainPreview implements AutoCloseable {
    }
 
    private void updateStatus(int id, TerrainPreview.PreviewStage stage, float progress) {
-      this.updateStatus(id, stage, progress, null);
+      this.updateStatus(id, stage, progress, null, null);
    }
 
    private void updateStatus(int id, TerrainPreview.PreviewStage stage, float progress, String activity) {
+      this.updateStatus(id, stage, progress, activity, null);
+   }
+
+   private void updateStatus(int id, TerrainPreview.PreviewStage stage, float progress, String activity, String detail) {
       if (id == this.requestId.get()) {
-         this.status.set(new TerrainPreview.PreviewStatus(stage, Mth.clamp(progress, 0.0F, 1.0F), activity));
+         this.status.set(new TerrainPreview.PreviewStatus(stage, Mth.clamp(progress, 0.0F, 1.0F), activity, detail));
       }
    }
 
@@ -2844,6 +3170,96 @@ public final class TerrainPreview implements AutoCloseable {
             return this.knownBytesTotal > 0L ? Mth.clamp(byteProgress * 0.85F + requestProgress * 0.15F, 0.0F, 1.0F) : requestProgress;
          }
       }
+
+      private String detail() {
+         if (this.requestsStarted <= 0L) {
+            return null;
+         }
+
+         String requestDetail = String.format(Locale.ROOT, "Requests %,d/%,d", this.requestsCompleted, this.requestsStarted);
+         if (this.knownBytesTotal > 0L) {
+            return requestDetail + ", " + formatBytes(this.knownBytesRead) + "/" + formatBytes(this.knownBytesTotal);
+         } else {
+            return this.knownBytesRead > 0L ? requestDetail + ", " + formatBytes(this.knownBytesRead) : requestDetail;
+         }
+      }
+   }
+
+   @Environment(EnvType.CLIENT)
+   private final class DownloadStageProgress implements DownloadProgressReporter.Listener {
+      private final int requestId;
+      private final long sampleTotal;
+      private final TerrainPreview.DownloadNetworkTracker networkTracker = new TerrainPreview.DownloadNetworkTracker();
+      private long sampleDone;
+      private long phaseDone;
+      private long phaseTotal = 1L;
+      private long lastPublishMs;
+      private float emittedProgress;
+      private String activity;
+      private String phaseLabel;
+
+      private DownloadStageProgress(int requestId, long sampleTotal) {
+         this.requestId = requestId;
+         this.sampleTotal = Math.max(1L, sampleTotal);
+      }
+
+      @Override
+      public void onRequestStarted(long expectedBytes) {
+         this.networkTracker.onRequestStarted(expectedBytes);
+         this.publish(false);
+      }
+
+      @Override
+      public void onBytesRead(int bytes) {
+         this.networkTracker.onBytesRead(bytes);
+         this.publish(false);
+      }
+
+      @Override
+      public void onRequestFinished() {
+         this.networkTracker.onRequestFinished();
+         this.publish(false);
+      }
+
+      private void updateSamples(long sampleDone, long phaseDone, long phaseTotal, String activity, String phaseLabel) {
+         boolean phaseChanged = !Objects.equals(this.activity, activity) || !Objects.equals(this.phaseLabel, phaseLabel);
+         this.sampleDone = Math.max(this.sampleDone, sampleDone);
+         this.phaseDone = phaseDone;
+         this.phaseTotal = Math.max(1L, phaseTotal);
+         this.activity = activity;
+         this.phaseLabel = phaseLabel;
+         this.publish(phaseChanged);
+      }
+
+      private void finish(String activity, String phaseLabel) {
+         this.sampleDone = this.sampleTotal;
+         this.phaseDone = this.phaseTotal;
+         this.activity = activity;
+         this.phaseLabel = phaseLabel;
+         this.publish(true);
+      }
+
+      private void publish(boolean force) {
+         long now = System.currentTimeMillis();
+         float progress = Mth.clamp((float)this.sampleDone / (float)this.sampleTotal, 0.0F, 1.0F);
+         if (force || !(progress < this.emittedProgress + 0.0015F) || now - this.lastPublishMs >= STATUS_PUBLISH_INTERVAL_MS) {
+            this.lastPublishMs = now;
+            this.emittedProgress = Math.max(this.emittedProgress, progress);
+            TerrainPreview.this.updateStatus(
+               this.requestId, TerrainPreview.PreviewStage.DOWNLOADING, this.emittedProgress, this.activity, this.detail()
+            );
+         }
+      }
+
+      private String detail() {
+         String phaseDetail = this.phaseLabel == null ? null : formatCountProgress(this.phaseLabel, this.phaseDone, this.phaseTotal);
+         String networkDetail = this.networkTracker.detail();
+         if (phaseDetail == null) {
+            return networkDetail;
+         } else {
+            return networkDetail == null ? phaseDetail : phaseDetail + " | " + networkDetail;
+         }
+      }
    }
 
    @Environment(EnvType.CLIENT)
@@ -2861,6 +3277,7 @@ public final class TerrainPreview implements AutoCloseable {
       private float emittedStageProgress;
       private long lastPublishMs;
       private String activity;
+      private String detail;
 
       private OsmOverlayStageProgress(
          int requestId,
@@ -2883,15 +3300,17 @@ public final class TerrainPreview implements AutoCloseable {
          this.activity = fetchActivity;
       }
 
-      private void updateFetch(float value) {
+      private void updateFetch(float value, String detail) {
          this.fetchProgress = Math.max(this.fetchProgress, Mth.clamp(value, 0.0F, 1.0F));
          this.activity = this.fetchActivity;
+         this.detail = detail;
          this.publish();
       }
 
       private void updateRaster(float value) {
          this.rasterProgress = Math.max(this.rasterProgress, Mth.clamp(value, 0.0F, 1.0F));
          this.activity = this.rasterActivity;
+         this.detail = formatPercentProgress("Raster progress", this.rasterProgress);
          this.publish();
       }
 
@@ -2899,6 +3318,7 @@ public final class TerrainPreview implements AutoCloseable {
          this.fetchProgress = 1.0F;
          this.rasterProgress = 1.0F;
          this.activity = this.rasterActivity;
+         this.detail = formatPercentProgress("Raster progress", 1.0F);
          this.publishNow();
       }
 
@@ -2915,7 +3335,7 @@ public final class TerrainPreview implements AutoCloseable {
          this.emittedStageProgress = Math.max(this.emittedStageProgress, this.overlayStageProgress());
          long overlayUnits = Math.round(this.emittedStageProgress * (float)this.overlayProcessUnits);
          float totalProgress = Mth.clamp((float)(this.overlayBaseDone + overlayUnits) / (float)this.buildTotal, 0.0F, 1.0F);
-         TerrainPreview.this.updateStatus(this.requestId, TerrainPreview.PreviewStage.PROCESSING_OSM, totalProgress, this.activity);
+         TerrainPreview.this.updateStatus(this.requestId, TerrainPreview.PreviewStage.PROCESSING_OSM, totalProgress, this.activity, this.detail);
       }
 
       private float overlayStageProgress() {
@@ -2952,6 +3372,7 @@ public final class TerrainPreview implements AutoCloseable {
       double[] blockHeights,
       boolean[] esaWaterMask,
       boolean[] oceanFallbackMask,
+      boolean[] mapterhornLandOverride,
       double[] elevations,
       int[] coverClasses,
       int[] visualCoverClasses,
@@ -2973,25 +3394,9 @@ public final class TerrainPreview implements AutoCloseable {
    }
 
    @Environment(EnvType.CLIENT)
-   private static final class PreviewQuadScratch {
-      private int[] indices = new int[0];
-      private float[] depths = new float[0];
-
-      private int[] indices(int size) {
-         if (this.indices.length < size) {
-            this.indices = new int[size];
-         }
-
-         return this.indices;
-      }
-
-      private float[] depths(int size) {
-         if (this.depths.length < size) {
-            this.depths = new float[size];
-         }
-
-         return this.depths;
-      }
+   private record PreviewTree(
+      int gridX, int gridZ, float height, float canopyScale, float trunkScale, int leafColor, int sourceColor
+   ) {
    }
 
    @Environment(EnvType.CLIENT)
@@ -3002,8 +3407,13 @@ public final class TerrainPreview implements AutoCloseable {
       private final int[] terrainColors;
       private final float[] detailHeights;
       private final int[] detailColors;
+      private final int[] waterColors;
+      private final float[] waterSurfaceHeights;
       private final float[] axis;
+      private final TerrainPreview.PreviewTree[] trees;
       private final TerrainPreview.PreviewInfo info;
+      private volatile TerrainPreview.PreviewGeometry terrainGeometry;
+      private volatile TerrainPreview.PreviewGeometry detailGeometry;
 
       private PreviewMesh(
          int size,
@@ -3012,7 +3422,10 @@ public final class TerrainPreview implements AutoCloseable {
          int[] terrainColors,
          float[] detailHeights,
          int[] detailColors,
+         int[] waterColors,
+         float[] waterSurfaceHeights,
          float[] axis,
+         TerrainPreview.PreviewTree[] trees,
          TerrainPreview.PreviewInfo info
       ) {
          this.size = size;
@@ -3021,7 +3434,10 @@ public final class TerrainPreview implements AutoCloseable {
          this.terrainColors = terrainColors;
          this.detailHeights = detailHeights;
          this.detailColors = detailColors;
+         this.waterColors = waterColors;
+         this.waterSurfaceHeights = waterSurfaceHeights;
          this.axis = axis;
+         this.trees = trees.clone();
          this.info = Objects.requireNonNull(info, "info");
       }
 
@@ -3031,6 +3447,29 @@ public final class TerrainPreview implements AutoCloseable {
 
       private int[] colorsFor(TerrainPreviewWidget.RenderMode renderMode) {
          return renderMode == TerrainPreviewWidget.RenderMode.FULL_DETAIL ? this.detailColors : this.terrainColors;
+      }
+
+      private TerrainPreview.PreviewGeometry geometryFor(TerrainPreviewWidget.RenderMode renderMode) {
+         TerrainPreview.PreviewGeometry cached = renderMode == TerrainPreviewWidget.RenderMode.FULL_DETAIL
+            ? this.detailGeometry
+            : this.terrainGeometry;
+         if (cached != null) {
+            return cached;
+         }
+
+         synchronized (this) {
+            cached = renderMode == TerrainPreviewWidget.RenderMode.FULL_DETAIL ? this.detailGeometry : this.terrainGeometry;
+            if (cached == null) {
+               cached = buildPreviewGeometry(this, renderMode);
+               if (renderMode == TerrainPreviewWidget.RenderMode.FULL_DETAIL) {
+                  this.detailGeometry = cached;
+               } else {
+                  this.terrainGeometry = cached;
+               }
+            }
+         }
+
+         return cached;
       }
    }
 
@@ -3113,12 +3552,13 @@ public final class TerrainPreview implements AutoCloseable {
    }
 
    @Environment(EnvType.CLIENT)
-   public record PreviewStatus(TerrainPreview.PreviewStage stage, float progress, String activity) {
-      public PreviewStatus(TerrainPreview.PreviewStage stage, float progress, String activity) {
+   public record PreviewStatus(TerrainPreview.PreviewStage stage, float progress, String activity, String detail) {
+      public PreviewStatus(TerrainPreview.PreviewStage stage, float progress, String activity, String detail) {
          Objects.requireNonNull(stage, "stage");
          this.stage = stage;
          this.progress = progress;
          this.activity = activity == null || activity.isBlank() ? null : activity;
+         this.detail = detail == null || detail.isBlank() ? null : detail;
       }
    }
 
@@ -3235,6 +3675,1004 @@ public final class TerrainPreview implements AutoCloseable {
       }
    }
 
+   private static TerrainPreview.PreviewGeometry buildPreviewGeometry(
+      TerrainPreview.PreviewMesh mesh, TerrainPreviewWidget.RenderMode renderMode
+   ) {
+      float[] heights = mesh.heightsFor(renderMode);
+      int[] baseColors = mesh.colorsFor(renderMode);
+      int stride = Math.max(1, mesh.granularity);
+      int cellCount = (mesh.size - 1) / stride;
+      if (cellCount <= 0) {
+         return new TerrainPreview.PreviewGeometry(new float[0], new int[0], 0);
+      }
+
+      float cellSize = Math.abs(mesh.axis[stride] - mesh.axis[0]);
+      float verticalUnit = Math.max(1.0E-5F, cellSize * PREVIEW_VERTICAL_CELL_RATIO);
+      float[] cellHeights = new float[cellCount * cellCount];
+      float[] surfaceHeights = new float[cellCount * cellCount];
+      int[] cellColors = new int[cellCount * cellCount];
+      boolean[] waterCells = new boolean[cellCount * cellCount];
+
+      for (int cellZ = 0; cellZ < cellCount; cellZ++) {
+         int z = cellZ * stride;
+         int rowIndex = z * mesh.size;
+         int nextRowIndex = (z + stride) * mesh.size;
+
+         for (int cellX = 0; cellX < cellCount; cellX++) {
+            int x = cellX * stride;
+            int index = rowIndex + x;
+            float averageHeight = (heights[index]
+                  + heights[index + stride]
+                  + heights[nextRowIndex + x]
+                  + heights[nextRowIndex + x + stride])
+               * 0.25F;
+            int cellIndex = cellX + cellZ * cellCount;
+            float floorHeight = Math.round(averageHeight / verticalUnit) * verticalUnit;
+            boolean water = mesh.waterColors[index] >= 0 && baseColors[index] == mesh.waterColors[index];
+            cellHeights[cellIndex] = floorHeight;
+            surfaceHeights[cellIndex] = water
+               ? Math.max(floorHeight + verticalUnit * 0.08F, Math.round(mesh.waterSurfaceHeights[index] / verticalUnit) * verticalUnit)
+               : floorHeight;
+            cellColors[cellIndex] = previewTopMaterialColor(baseColors[index], x, z, 0x53A9);
+            waterCells[cellIndex] = water;
+         }
+      }
+
+      float[] occluderHeights = surfaceHeights.clone();
+      if (renderMode == TerrainPreviewWidget.RenderMode.FULL_DETAIL) {
+         addPreviewTreeOccluders(mesh, cellHeights, occluderHeights, cellCount, verticalUnit);
+      }
+
+      float[] bakedShadows = buildPreviewShadowMap(surfaceHeights, occluderHeights, cellCount, cellSize, verticalUnit);
+      TerrainPreview.PreviewGeometryBuilder builder = new TerrainPreview.PreviewGeometryBuilder(cellCount * cellCount * 10);
+      float sideThreshold = verticalUnit * 0.5F;
+
+      for (int cellZ = 0; cellZ < cellCount; cellZ++) {
+         int z = cellZ * stride;
+         float z0 = mesh.axis[z];
+         float z1 = mesh.axis[z + stride];
+
+         for (int cellX = 0; cellX < cellCount; cellX++) {
+            int x = cellX * stride;
+            float x0 = mesh.axis[x];
+            float x1 = mesh.axis[x + stride];
+            int cellIndex = cellX + cellZ * cellCount;
+            float top = cellHeights[cellIndex];
+            int topColor = cellColors[cellIndex];
+            float shadowShade = 1.0F - bakedShadows[cellIndex] * 0.48F;
+            float aoSouthWest = previewCornerAo(cellHeights, cellCount, cellX, cellZ, -1, 1, top, verticalUnit);
+            float aoSouthEast = previewCornerAo(cellHeights, cellCount, cellX, cellZ, 1, 1, top, verticalUnit);
+            float aoNorthEast = previewCornerAo(cellHeights, cellCount, cellX, cellZ, 1, -1, top, verticalUnit);
+            float aoNorthWest = previewCornerAo(cellHeights, cellCount, cellX, cellZ, -1, -1, top, verticalUnit);
+            float floorShade = waterCells[cellIndex] ? shadowShade * 0.8F : shadowShade;
+            addLitPreviewQuad(
+               builder,
+               topColor,
+               0.0F,
+               1.0F,
+               0.0F,
+               x0,
+               top,
+               z1,
+               x1,
+               top,
+               z1,
+               x1,
+               top,
+               z0,
+               x0,
+               top,
+               z0,
+               floorShade * aoSouthWest,
+               floorShade * aoSouthEast,
+               floorShade * aoNorthEast,
+               floorShade * aoNorthWest
+            );
+
+            if (waterCells[cellIndex]) {
+               float waterTop = surfaceHeights[cellIndex] + verticalUnit * 0.04F;
+               float shoreline = previewWaterShoreline(waterCells, cellCount, cellX, cellZ);
+               int waterColor = previewWaterSurfaceColor(topColor, cellX, cellZ, shoreline, cellCount);
+               float waterShadow = 1.0F - bakedShadows[cellIndex] * 0.34F;
+               float shoreAo = 1.0F - shoreline * 0.08F;
+               addLitPreviewQuad(
+                  builder,
+                  waterColor,
+                  0.0F,
+                  1.0F,
+                  0.0F,
+                  x0,
+                  waterTop,
+                  z1,
+                  x1,
+                  waterTop,
+                  z1,
+                  x1,
+                  waterTop,
+                  z0,
+                  x0,
+                  waterTop,
+                  z0,
+                  waterShadow * shoreAo,
+                  waterShadow * shoreAo,
+                  waterShadow * shoreAo,
+                  waterShadow * shoreAo
+               );
+            }
+
+            if (cellX + 1 < cellCount) {
+               int eastIndex = cellIndex + 1;
+               float eastTop = cellHeights[eastIndex];
+               if (top > eastTop + sideThreshold) {
+                  int sideColor = previewSideMaterialColor(topColor, x, z, 0x19D3);
+                  float bottomShade = shadowShade * 0.68F;
+                  float upperShade = shadowShade * 0.94F;
+                  addLitPreviewQuad(
+                     builder,
+                     sideColor,
+                     1.0F,
+                     0.0F,
+                     0.0F,
+                     x1,
+                     eastTop,
+                     z0,
+                     x1,
+                     top,
+                     z0,
+                     x1,
+                     top,
+                     z1,
+                     x1,
+                     eastTop,
+                     z1,
+                     bottomShade,
+                     upperShade,
+                     upperShade,
+                     bottomShade
+                  );
+               } else if (eastTop > top + sideThreshold) {
+                  int sideColor = previewSideMaterialColor(cellColors[eastIndex], x + stride, z, 0x27B1);
+                  float eastShadow = 1.0F - bakedShadows[eastIndex] * 0.48F;
+                  float bottomShade = eastShadow * 0.68F;
+                  float upperShade = eastShadow * 0.94F;
+                  addLitPreviewQuad(
+                     builder,
+                     sideColor,
+                     -1.0F,
+                     0.0F,
+                     0.0F,
+                     x1,
+                     top,
+                     z1,
+                     x1,
+                     eastTop,
+                     z1,
+                     x1,
+                     eastTop,
+                     z0,
+                     x1,
+                     top,
+                     z0,
+                     bottomShade,
+                     upperShade,
+                     upperShade,
+                     bottomShade
+                  );
+               }
+            }
+
+            if (cellZ + 1 < cellCount) {
+               int southIndex = cellIndex + cellCount;
+               float southTop = cellHeights[southIndex];
+               if (top > southTop + sideThreshold) {
+                  int sideColor = previewSideMaterialColor(topColor, x, z, 0x3157);
+                  float bottomShade = shadowShade * 0.68F;
+                  float upperShade = shadowShade * 0.94F;
+                  addLitPreviewQuad(
+                     builder,
+                     sideColor,
+                     0.0F,
+                     0.0F,
+                     1.0F,
+                     x1,
+                     southTop,
+                     z1,
+                     x1,
+                     top,
+                     z1,
+                     x0,
+                     top,
+                     z1,
+                     x0,
+                     southTop,
+                     z1,
+                     bottomShade,
+                     upperShade,
+                     upperShade,
+                     bottomShade
+                  );
+               } else if (southTop > top + sideThreshold) {
+                  int sideColor = previewSideMaterialColor(cellColors[southIndex], x, z + stride, 0x4A6D);
+                  float southShadow = 1.0F - bakedShadows[southIndex] * 0.48F;
+                  float bottomShade = southShadow * 0.68F;
+                  float upperShade = southShadow * 0.94F;
+                  addLitPreviewQuad(
+                     builder,
+                     sideColor,
+                     0.0F,
+                     0.0F,
+                     -1.0F,
+                     x0,
+                     top,
+                     z1,
+                     x0,
+                     southTop,
+                     z1,
+                     x1,
+                     southTop,
+                     z1,
+                     x1,
+                     top,
+                     z1,
+                     bottomShade,
+                     upperShade,
+                     upperShade,
+                     bottomShade
+                  );
+               }
+            }
+         }
+      }
+
+      addPreviewSolidTerrainVolume(builder, mesh.axis, cellHeights, cellCount, stride, verticalUnit);
+      addPreviewWaterVolumeSides(builder, mesh.axis, cellHeights, surfaceHeights, cellColors, waterCells, cellCount, stride, verticalUnit);
+      float cloudBase = previewCloudBaseHeight(mesh, verticalUnit);
+      addPreviewClouds(builder, cloudBase, verticalUnit);
+
+      if (renderMode == TerrainPreviewWidget.RenderMode.FULL_DETAIL) {
+         addPreviewTreeGeometry(builder, mesh, cellHeights, cellCount, cellSize, verticalUnit);
+      }
+
+      return builder.build();
+   }
+
+   private static float previewCloudBaseHeight(TerrainPreview.PreviewMesh mesh, float verticalUnit) {
+      float highestPoint = Float.NEGATIVE_INFINITY;
+      for (float height : mesh.detailHeights) {
+         highestPoint = Math.max(highestPoint, height);
+      }
+
+      float clearance = (float)(PREVIEW_CLOUD_CLEARANCE_BLOCKS / PREVIEW_RADIUS_BLOCKS * PREVIEW_VERTICAL_CELL_RATIO);
+      return (float)Math.ceil((highestPoint + clearance) / verticalUnit) * verticalUnit;
+   }
+
+   private static void addPreviewClouds(TerrainPreview.PreviewGeometryBuilder builder, float cloudBase, float verticalUnit) {
+      float thickness = Math.max(0.006F, verticalUnit * 2.0F);
+      boolean[] occupied = new boolean[PREVIEW_CLOUD_GRID_SIZE * PREVIEW_CLOUD_GRID_SIZE];
+      for (int cloud = 0; cloud < 11; cloud++) {
+         float centerX = -0.84F + (float)hashToUnitDouble(cloud, 11L, 0x17A3L) * 1.68F;
+         float centerZ = -0.84F + (float)hashToUnitDouble(cloud, 23L, 0x28B5L) * 1.68F;
+         float width = 0.14F + (float)hashToUnitDouble(cloud, 37L, 0x39C7L) * 0.16F;
+         float depth = 0.06F + (float)hashToUnitDouble(cloud, 41L, 0x4AD9L) * 0.08F;
+         markPreviewCloud(
+            occupied,
+            centerX - width * 0.5F,
+            centerX + width * 0.5F,
+            centerZ - depth * 0.5F,
+            centerZ + depth * 0.5F
+         );
+
+         for (int lobe = 0; lobe < 2; lobe++) {
+            long key = cloud * 3L + lobe;
+            float offsetX = ((float)hashToUnitDouble(key, 67L, 0x6CFDL) - 0.5F) * width * 1.2F;
+            float offsetZ = ((float)hashToUnitDouble(key, 71L, 0x7D0FL) - 0.5F) * depth * 1.4F;
+            float lobeWidth = width * (0.38F + (float)hashToUnitDouble(key, 83L, 0x8E21L) * 0.28F);
+            float lobeDepth = depth * (0.55F + (float)hashToUnitDouble(key, 97L, 0x9F33L) * 0.35F);
+            markPreviewCloud(
+               occupied,
+               centerX + offsetX - lobeWidth * 0.5F,
+               centerX + offsetX + lobeWidth * 0.5F,
+               centerZ + offsetZ - lobeDepth * 0.5F,
+               centerZ + offsetZ + lobeDepth * 0.5F
+            );
+         }
+      }
+
+      addPreviewCloudMesh(builder, occupied, cloudBase, cloudBase + thickness);
+   }
+
+   private static void markPreviewCloud(boolean[] occupied, float minX, float maxX, float minZ, float maxZ) {
+      float cellSize = (PREVIEW_CLOUD_MAX - PREVIEW_CLOUD_MIN) / PREVIEW_CLOUD_GRID_SIZE;
+      int minCellX = Mth.clamp((int)Math.floor((minX - PREVIEW_CLOUD_MIN) / cellSize), 0, PREVIEW_CLOUD_GRID_SIZE - 1);
+      int maxCellX = Mth.clamp((int)Math.ceil((maxX - PREVIEW_CLOUD_MIN) / cellSize), 1, PREVIEW_CLOUD_GRID_SIZE);
+      int minCellZ = Mth.clamp((int)Math.floor((minZ - PREVIEW_CLOUD_MIN) / cellSize), 0, PREVIEW_CLOUD_GRID_SIZE - 1);
+      int maxCellZ = Mth.clamp((int)Math.ceil((maxZ - PREVIEW_CLOUD_MIN) / cellSize), 1, PREVIEW_CLOUD_GRID_SIZE);
+      for (int cellZ = minCellZ; cellZ < maxCellZ; cellZ++) {
+         for (int cellX = minCellX; cellX < maxCellX; cellX++) {
+            occupied[cellZ * PREVIEW_CLOUD_GRID_SIZE + cellX] = true;
+         }
+      }
+   }
+
+   private static float previewCloudCoordinate(int cell) {
+      return PREVIEW_CLOUD_MIN + (PREVIEW_CLOUD_MAX - PREVIEW_CLOUD_MIN) * cell / PREVIEW_CLOUD_GRID_SIZE;
+   }
+
+   private static void addPreviewCloudMesh(
+      TerrainPreview.PreviewGeometryBuilder builder, boolean[] occupied, float minY, float maxY
+   ) {
+      boolean[] covered = new boolean[occupied.length];
+      for (int cellZ = 0; cellZ < PREVIEW_CLOUD_GRID_SIZE; cellZ++) {
+         for (int cellX = 0; cellX < PREVIEW_CLOUD_GRID_SIZE; cellX++) {
+            int index = cellZ * PREVIEW_CLOUD_GRID_SIZE + cellX;
+            if (!occupied[index] || covered[index]) {
+               continue;
+            }
+
+            int width = 1;
+            while (cellX + width < PREVIEW_CLOUD_GRID_SIZE && occupied[index + width] && !covered[index + width]) {
+               width++;
+            }
+
+            int depth = 1;
+            while (cellZ + depth < PREVIEW_CLOUD_GRID_SIZE) {
+               boolean canGrow = true;
+               int row = (cellZ + depth) * PREVIEW_CLOUD_GRID_SIZE + cellX;
+               for (int offset = 0; offset < width; offset++) {
+                  if (!occupied[row + offset] || covered[row + offset]) {
+                     canGrow = false;
+                     break;
+                  }
+               }
+               if (!canGrow) {
+                  break;
+               }
+               depth++;
+            }
+
+            for (int offsetZ = 0; offsetZ < depth; offsetZ++) {
+               int row = (cellZ + offsetZ) * PREVIEW_CLOUD_GRID_SIZE + cellX;
+               Arrays.fill(covered, row, row + width, true);
+            }
+
+            float minX = previewCloudCoordinate(cellX);
+            float maxX = previewCloudCoordinate(cellX + width);
+            float minZ = previewCloudCoordinate(cellZ);
+            float maxZ = previewCloudCoordinate(cellZ + depth);
+            addLitPreviewQuad(builder, PREVIEW_CLOUD_TOP_COLOR, 0.0F, 1.0F, 0.0F, minX, maxY, maxZ, maxX, maxY, maxZ, maxX, maxY, minZ, minX, maxY, minZ);
+            addLitPreviewQuad(builder, PREVIEW_CLOUD_BOTTOM_COLOR, 0.0F, -1.0F, 0.0F, minX, minY, minZ, maxX, minY, minZ, maxX, minY, maxZ, minX, minY, maxZ);
+         }
+      }
+
+      for (int cellZ = 0; cellZ < PREVIEW_CLOUD_GRID_SIZE; cellZ++) {
+         for (int cellX = 0; cellX < PREVIEW_CLOUD_GRID_SIZE; cellX++) {
+            int index = cellZ * PREVIEW_CLOUD_GRID_SIZE + cellX;
+            if (!occupied[index]) {
+               continue;
+            }
+
+            float minX = previewCloudCoordinate(cellX);
+            float maxX = previewCloudCoordinate(cellX + 1);
+            float minZ = previewCloudCoordinate(cellZ);
+            float maxZ = previewCloudCoordinate(cellZ + 1);
+            if (cellX == PREVIEW_CLOUD_GRID_SIZE - 1 || !occupied[index + 1]) {
+               addLitPreviewQuad(builder, PREVIEW_CLOUD_SIDE_COLOR, 1.0F, 0.0F, 0.0F, maxX, minY, minZ, maxX, maxY, minZ, maxX, maxY, maxZ, maxX, minY, maxZ);
+            }
+            if (cellX == 0 || !occupied[index - 1]) {
+               addLitPreviewQuad(builder, PREVIEW_CLOUD_SIDE_COLOR, -1.0F, 0.0F, 0.0F, minX, minY, maxZ, minX, maxY, maxZ, minX, maxY, minZ, minX, minY, minZ);
+            }
+            if (cellZ == PREVIEW_CLOUD_GRID_SIZE - 1 || !occupied[index + PREVIEW_CLOUD_GRID_SIZE]) {
+               addLitPreviewQuad(builder, PREVIEW_CLOUD_SIDE_COLOR, 0.0F, 0.0F, 1.0F, maxX, minY, maxZ, maxX, maxY, maxZ, minX, maxY, maxZ, minX, minY, maxZ);
+            }
+            if (cellZ == 0 || !occupied[index - PREVIEW_CLOUD_GRID_SIZE]) {
+               addLitPreviewQuad(builder, PREVIEW_CLOUD_SIDE_COLOR, 0.0F, 0.0F, -1.0F, minX, minY, minZ, minX, maxY, minZ, maxX, maxY, minZ, maxX, minY, minZ);
+            }
+         }
+      }
+   }
+
+   private static void addPreviewSolidTerrainVolume(
+      TerrainPreview.PreviewGeometryBuilder builder,
+      float[] axis,
+      float[] cellHeights,
+      int cellCount,
+      int stride,
+      float verticalUnit
+   ) {
+      float minimumHeight = Float.POSITIVE_INFINITY;
+      for (float height : cellHeights) {
+         minimumHeight = Math.min(minimumHeight, height);
+      }
+
+      float baseHeight = (float)Math.floor((minimumHeight - verticalUnit * PREVIEW_SOLID_BASE_DEPTH_CELLS) / verticalUnit) * verticalUnit;
+      float minAxis = axis[0];
+      float maxAxis = axis[cellCount * stride];
+      addLitPreviewQuad(
+         builder,
+         PREVIEW_STONE_BOTTOM_COLOR,
+         0.0F,
+         -1.0F,
+         0.0F,
+         minAxis,
+         baseHeight,
+         minAxis,
+         maxAxis,
+         baseHeight,
+         minAxis,
+         maxAxis,
+         baseHeight,
+         maxAxis,
+         minAxis,
+         baseHeight,
+         maxAxis,
+         0.82F,
+         0.82F,
+         0.68F,
+         0.68F
+      );
+
+      int lastCell = cellCount - 1;
+      for (int cell = 0; cell < cellCount; cell++) {
+         int coordinate = cell * stride;
+         float edge0 = axis[coordinate];
+         float edge1 = axis[coordinate + stride];
+         int northColor = previewTopMaterialColor(PREVIEW_STONE_FILL_COLOR, cell, 0, 0x2A17);
+         int southColor = previewTopMaterialColor(PREVIEW_STONE_FILL_COLOR, cell, lastCell, 0x3B29);
+         int westColor = previewTopMaterialColor(PREVIEW_STONE_FILL_COLOR, 0, cell, 0x4C3D);
+         int eastColor = previewTopMaterialColor(PREVIEW_STONE_FILL_COLOR, lastCell, cell, 0x5D4F);
+         addPreviewVolumeWall(builder, northColor, 0.0F, -1.0F, edge0, minAxis, edge1, minAxis, baseHeight, cellHeights[cell], 0.64F, 0.96F);
+         addPreviewVolumeWall(
+            builder,
+            southColor,
+            0.0F,
+            1.0F,
+            edge1,
+            maxAxis,
+            edge0,
+            maxAxis,
+            baseHeight,
+            cellHeights[cell + lastCell * cellCount],
+            0.64F,
+            0.96F
+         );
+         addPreviewVolumeWall(
+            builder,
+            westColor,
+            -1.0F,
+            0.0F,
+            minAxis,
+            edge1,
+            minAxis,
+            edge0,
+            baseHeight,
+            cellHeights[cell * cellCount],
+            0.64F,
+            0.96F
+         );
+         addPreviewVolumeWall(
+            builder,
+            eastColor,
+            1.0F,
+            0.0F,
+            maxAxis,
+            edge0,
+            maxAxis,
+            edge1,
+            baseHeight,
+            cellHeights[lastCell + cell * cellCount],
+            0.64F,
+            0.96F
+         );
+      }
+   }
+
+   private static void addPreviewWaterVolumeSides(
+      TerrainPreview.PreviewGeometryBuilder builder,
+      float[] axis,
+      float[] cellHeights,
+      float[] surfaceHeights,
+      int[] cellColors,
+      boolean[] waterCells,
+      int cellCount,
+      int stride,
+      float verticalUnit
+   ) {
+      for (int cellZ = 0; cellZ < cellCount; cellZ++) {
+         int z = cellZ * stride;
+         float z0 = axis[z];
+         float z1 = axis[z + stride];
+         for (int cellX = 0; cellX < cellCount; cellX++) {
+            int cellIndex = cellX + cellZ * cellCount;
+            if (!waterCells[cellIndex]) {
+               continue;
+            }
+
+            int x = cellX * stride;
+            float x0 = axis[x];
+            float x1 = axis[x + stride];
+            float floor = cellHeights[cellIndex];
+            float waterTop = surfaceHeights[cellIndex] + verticalUnit * 0.04F;
+            float shoreline = previewWaterShoreline(waterCells, cellCount, cellX, cellZ);
+            int surfaceColor = previewWaterSurfaceColor(cellColors[cellIndex], cellX, cellZ, shoreline, cellCount);
+            int volumeColor = previewWaterVolumeSideColor(surfaceColor, waterTop - floor, verticalUnit);
+
+            if (cellX == 0 || !waterCells[cellIndex - 1]) {
+               float bottom = cellX == 0 ? floor : Math.max(floor, cellHeights[cellIndex - 1]);
+               addPreviewVolumeWall(builder, volumeColor, -1.0F, 0.0F, x0, z1, x0, z0, bottom, waterTop, 0.52F, 0.92F);
+            }
+            if (cellX == cellCount - 1 || !waterCells[cellIndex + 1]) {
+               float bottom = cellX == cellCount - 1 ? floor : Math.max(floor, cellHeights[cellIndex + 1]);
+               addPreviewVolumeWall(builder, volumeColor, 1.0F, 0.0F, x1, z0, x1, z1, bottom, waterTop, 0.52F, 0.92F);
+            }
+            if (cellZ == 0 || !waterCells[cellIndex - cellCount]) {
+               float bottom = cellZ == 0 ? floor : Math.max(floor, cellHeights[cellIndex - cellCount]);
+               addPreviewVolumeWall(builder, volumeColor, 0.0F, -1.0F, x0, z0, x1, z0, bottom, waterTop, 0.52F, 0.92F);
+            }
+            if (cellZ == cellCount - 1 || !waterCells[cellIndex + cellCount]) {
+               float bottom = cellZ == cellCount - 1 ? floor : Math.max(floor, cellHeights[cellIndex + cellCount]);
+               addPreviewVolumeWall(builder, volumeColor, 0.0F, 1.0F, x1, z1, x0, z1, bottom, waterTop, 0.52F, 0.92F);
+            }
+         }
+      }
+   }
+
+   private static int previewWaterVolumeSideColor(int surfaceColor, float depth, float verticalUnit) {
+      float depthFactor = Mth.clamp(depth / Math.max(verticalUnit, verticalUnit * 32.0F), 0.0F, 1.0F);
+      int rgb = blendColor(surfaceColor, PREVIEW_DEEP_WATER_VOLUME_COLOR, 0.48F + depthFactor * 0.32F);
+      int alpha = Mth.clamp(Math.round(190.0F + depthFactor * 45.0F), 0, 255);
+      return alpha << 24 | rgb & 0xFFFFFF;
+   }
+
+   private static void addPreviewVolumeWall(
+      TerrainPreview.PreviewGeometryBuilder builder,
+      int color,
+      float normalX,
+      float normalZ,
+      float x0,
+      float z0,
+      float x1,
+      float z1,
+      float bottom,
+      float top,
+      float bottomShade,
+      float topShade
+   ) {
+      if (top <= bottom + 1.0E-5F) {
+         return;
+      }
+
+      addLitPreviewQuad(
+         builder,
+         color,
+         normalX,
+         0.0F,
+         normalZ,
+         x0,
+         bottom,
+         z0,
+         x0,
+         top,
+         z0,
+         x1,
+         top,
+         z1,
+         x1,
+         bottom,
+         z1,
+         bottomShade,
+         topShade,
+         topShade,
+         bottomShade
+      );
+   }
+
+   private static void addPreviewTreeOccluders(
+      TerrainPreview.PreviewMesh mesh,
+      float[] cellHeights,
+      float[] occluderHeights,
+      int cellCount,
+      float verticalUnit
+   ) {
+      int stride = Math.max(1, mesh.granularity);
+      for (TerrainPreview.PreviewTree tree : mesh.trees) {
+         int centerX = Mth.clamp(tree.gridX() / stride, 0, cellCount - 1);
+         int centerZ = Mth.clamp(tree.gridZ() / stride, 0, cellCount - 1);
+         float base = cellHeights[centerX + centerZ * cellCount];
+         float height = Math.max(verticalUnit * 3.0F, Math.round(tree.height() / verticalUnit) * verticalUnit);
+         int radius = Math.max(1, Mth.ceil(tree.canopyScale()));
+
+         for (int dz = -radius; dz <= radius; dz++) {
+            int z = centerZ + dz;
+            if (z < 0 || z >= cellCount) {
+               continue;
+            }
+
+            for (int dx = -radius; dx <= radius; dx++) {
+               int x = centerX + dx;
+               if (x >= 0 && x < cellCount && dx * dx + dz * dz <= radius * radius + 1) {
+                  int index = x + z * cellCount;
+                  occluderHeights[index] = Math.max(occluderHeights[index], base + height * 0.88F);
+               }
+            }
+         }
+      }
+   }
+
+   private static float[] buildPreviewShadowMap(
+      float[] surfaceHeights, float[] occluderHeights, int cellCount, float cellSize, float verticalUnit
+   ) {
+      float[] shadows = new float[surfaceHeights.length];
+      float horizontalLight = (float)Math.sqrt(LIGHT_DIR.x * LIGHT_DIR.x + LIGHT_DIR.z * LIGHT_DIR.z);
+      if (horizontalLight < 1.0E-5F) {
+         return shadows;
+      }
+
+      float stepX = LIGHT_DIR.x / horizontalLight;
+      float stepZ = LIGHT_DIR.z / horizontalLight;
+      float rayRise = cellSize * LIGHT_DIR.y / horizontalLight;
+
+      for (int z = 0; z < cellCount; z++) {
+         for (int x = 0; x < cellCount; x++) {
+            int index = x + z * cellCount;
+            float originHeight = surfaceHeights[index];
+            float shadow = 0.0F;
+            int lastSampleX = x;
+            int lastSampleZ = z;
+
+            for (int step = 1; step <= PREVIEW_SHADOW_STEPS; step++) {
+               int sampleX = Math.round(x + stepX * step);
+               int sampleZ = Math.round(z + stepZ * step);
+               if (sampleX < 0 || sampleZ < 0 || sampleX >= cellCount || sampleZ >= cellCount) {
+                  break;
+               }
+
+               if (sampleX == lastSampleX && sampleZ == lastSampleZ) {
+                  continue;
+               }
+
+               lastSampleX = sampleX;
+               lastSampleZ = sampleZ;
+               float rayHeight = originHeight + rayRise * step;
+               float clearance = occluderHeights[sampleX + sampleZ * cellCount] - rayHeight;
+               if (clearance > 0.0F) {
+                  float strength = Mth.clamp(0.38F + clearance / (verticalUnit * 5.0F), 0.0F, 1.0F);
+                  float distanceFade = 1.0F - (float)(step - 1) / (PREVIEW_SHADOW_STEPS * 1.35F);
+                  shadow = Math.max(shadow, strength * distanceFade);
+               }
+            }
+
+            shadows[index] = Mth.clamp(shadow, 0.0F, 1.0F);
+         }
+      }
+
+      return shadows;
+   }
+
+   private static float previewCornerAo(
+      float[] heights, int cellCount, int cellX, int cellZ, int directionX, int directionZ, float top, float verticalUnit
+   ) {
+      float sideX = previewAoContribution(heights, cellCount, cellX + directionX, cellZ, top, verticalUnit);
+      float sideZ = previewAoContribution(heights, cellCount, cellX, cellZ + directionZ, top, verticalUnit);
+      float diagonal = previewAoContribution(heights, cellCount, cellX + directionX, cellZ + directionZ, top, verticalUnit);
+      float occlusion = sideX * 0.48F + sideZ * 0.48F + diagonal * (sideX > 0.0F && sideZ > 0.0F ? 0.18F : 0.3F);
+      return Mth.clamp(1.0F - occlusion, 0.58F, 1.0F);
+   }
+
+   private static float previewAoContribution(
+      float[] heights, int cellCount, int x, int z, float top, float verticalUnit
+   ) {
+      if (x < 0 || z < 0 || x >= cellCount || z >= cellCount) {
+         return 0.0F;
+      }
+
+      float difference = heights[x + z * cellCount] - top;
+      if (difference <= verticalUnit * 0.45F) {
+         return 0.0F;
+      }
+
+      return Mth.clamp(0.18F + difference / verticalUnit * 0.075F, 0.0F, 0.62F);
+   }
+
+   private static float previewWaterShoreline(boolean[] waterCells, int cellCount, int cellX, int cellZ) {
+      float shoreline = 0.0F;
+
+      for (int dz = -2; dz <= 2; dz++) {
+         for (int dx = -2; dx <= 2; dx++) {
+            if (dx == 0 && dz == 0) {
+               continue;
+            }
+
+            int x = cellX + dx;
+            int z = cellZ + dz;
+            if (x < 0 || z < 0 || x >= cellCount || z >= cellCount || waterCells[x + z * cellCount]) {
+               continue;
+            }
+
+            int distance = Math.max(Math.abs(dx), Math.abs(dz));
+            shoreline = Math.max(shoreline, distance == 1 ? (dx == 0 || dz == 0 ? 1.0F : 0.72F) : 0.28F);
+         }
+      }
+
+      return shoreline;
+   }
+
+   private static int previewWaterSurfaceColor(int floorColor, int x, int z, float shoreline, int cellCount) {
+      int rgb = blendColor(floorColor, 0x55B6D2, 0.48F);
+      rgb = blendColor(rgb, 0xC7E9DF, shoreline * 0.28F);
+      float shimmer = (float)hashToUnitDouble(x, z, 0x61F3L);
+      if (((x * 3 + z * 5) & 7) == 0) {
+         rgb = blendColor(rgb, 0xD9F5EF, 0.08F + shimmer * 0.08F);
+      }
+
+      float worldX = -1.0F + ((float)x + 0.5F) * 2.0F / Math.max(1, cellCount);
+      float worldZ = -1.0F + ((float)z + 0.5F) * 2.0F / Math.max(1, cellCount);
+      float sunDistance = (float)Math.sqrt(PREVIEW_SUN_X * PREVIEW_SUN_X + PREVIEW_SUN_Z * PREVIEW_SUN_Z);
+      float lineDistance = Math.abs(worldX * PREVIEW_SUN_Z - worldZ * PREVIEW_SUN_X) / Math.max(1.0E-5F, sunDistance);
+      float towardSun = (worldX * PREVIEW_SUN_X + worldZ * PREVIEW_SUN_Z) / Math.max(1.0E-5F, sunDistance);
+      float reflectionWidth = 1.0F - Mth.clamp(lineDistance / 0.18F, 0.0F, 1.0F);
+      float reflectionLength = Mth.clamp((towardSun + 0.12F) / 0.92F, 0.0F, 1.0F);
+      float reflection = reflectionWidth * reflectionWidth * reflectionLength * (0.12F + shimmer * 0.2F);
+      rgb = blendColor(rgb, PREVIEW_SUN_REFLECTION_COLOR, reflection);
+
+      int alpha = Mth.clamp(Math.round(178.0F + shoreline * 38.0F), 0, 255);
+      return alpha << 24 | rgb & 0xFFFFFF;
+   }
+
+   private static void addPreviewTreeGeometry(
+      TerrainPreview.PreviewGeometryBuilder builder,
+      TerrainPreview.PreviewMesh mesh,
+      float[] cellHeights,
+      int cellCount,
+      float cellSize,
+      float verticalUnit
+   ) {
+      for (TerrainPreview.PreviewTree tree : mesh.trees) {
+         int cellX = Mth.clamp(tree.gridX() / Math.max(1, mesh.granularity), 0, cellCount - 1);
+         int cellZ = Mth.clamp(tree.gridZ() / Math.max(1, mesh.granularity), 0, cellCount - 1);
+         float base = cellHeights[cellX + cellZ * cellCount];
+         float height = Math.max(verticalUnit * 3.0F, Math.round(tree.height() / verticalUnit) * verticalUnit);
+         float centerX = mesh.axis[tree.gridX()];
+         float centerZ = mesh.axis[tree.gridZ()];
+         float trunkHalfWidth = cellSize * 0.18F * tree.trunkScale();
+         float canopyHalfWidth = cellSize * 0.82F * tree.canopyScale();
+         float trunkTop = base + height * 0.64F;
+         int trunkColor = previewTopMaterialColor(PREVIEW_TREE_TRUNK_COLOR, tree.gridX(), tree.gridZ(), 0x67C1);
+         int trunkSide = scalePreviewColor(trunkColor, 0.84F);
+         addPreviewBox(
+            builder,
+            centerX - trunkHalfWidth,
+            centerX + trunkHalfWidth,
+            base,
+            trunkTop,
+            centerZ - trunkHalfWidth,
+            centerZ + trunkHalfWidth,
+            trunkColor,
+            trunkSide,
+            false
+         );
+
+         int lowerLeaves = previewTopMaterialColor(tree.leafColor(), tree.gridX(), tree.gridZ(), 0x78E5);
+         int upperLeaves = previewTopMaterialColor(blendColor(tree.leafColor(), 0x75B85C, 0.16F), tree.gridX(), tree.gridZ(), 0x8F3B);
+         addPreviewBox(
+            builder,
+            centerX - canopyHalfWidth,
+            centerX + canopyHalfWidth,
+            base + height * 0.43F,
+            base + height * 0.78F,
+            centerZ - canopyHalfWidth,
+            centerZ + canopyHalfWidth,
+            lowerLeaves,
+            scalePreviewColor(lowerLeaves, 0.84F),
+            true
+         );
+         float crownHalfWidth = canopyHalfWidth * 0.68F;
+         addPreviewBox(
+            builder,
+            centerX - crownHalfWidth,
+            centerX + crownHalfWidth,
+            base + height * 0.71F,
+            base + height,
+            centerZ - crownHalfWidth,
+            centerZ + crownHalfWidth,
+            upperLeaves,
+            scalePreviewColor(upperLeaves, 0.86F),
+            true
+         );
+      }
+   }
+
+   private static void addPreviewBox(
+      TerrainPreview.PreviewGeometryBuilder builder,
+      float minX,
+      float maxX,
+      float minY,
+      float maxY,
+      float minZ,
+      float maxZ,
+      int topColor,
+      int sideColor,
+      boolean includeTop
+   ) {
+      addLitPreviewQuad(builder, sideColor, 1.0F, 0.0F, 0.0F, maxX, minY, minZ, maxX, maxY, minZ, maxX, maxY, maxZ, maxX, minY, maxZ);
+      addLitPreviewQuad(builder, sideColor, -1.0F, 0.0F, 0.0F, minX, minY, maxZ, minX, maxY, maxZ, minX, maxY, minZ, minX, minY, minZ);
+      addLitPreviewQuad(builder, sideColor, 0.0F, 0.0F, 1.0F, maxX, minY, maxZ, maxX, maxY, maxZ, minX, maxY, maxZ, minX, minY, maxZ);
+      addLitPreviewQuad(builder, sideColor, 0.0F, 0.0F, -1.0F, minX, minY, minZ, minX, maxY, minZ, maxX, maxY, minZ, maxX, minY, minZ);
+      if (includeTop) {
+         addLitPreviewQuad(builder, topColor, 0.0F, 1.0F, 0.0F, minX, maxY, maxZ, maxX, maxY, maxZ, maxX, maxY, minZ, minX, maxY, minZ);
+      }
+   }
+
+   private static void addLitPreviewQuad(
+      TerrainPreview.PreviewGeometryBuilder builder,
+      int color,
+      float normalX,
+      float normalY,
+      float normalZ,
+      float x0,
+      float y0,
+      float z0,
+      float x1,
+      float y1,
+      float z1,
+      float x2,
+      float y2,
+      float z2,
+      float x3,
+      float y3,
+      float z3
+   ) {
+      addLitPreviewQuad(
+         builder,
+         color,
+         normalX,
+         normalY,
+         normalZ,
+         x0,
+         y0,
+         z0,
+         x1,
+         y1,
+         z1,
+         x2,
+         y2,
+         z2,
+         x3,
+         y3,
+         z3,
+         1.0F,
+         1.0F,
+         1.0F,
+         1.0F
+      );
+   }
+
+   private static void addLitPreviewQuad(
+      TerrainPreview.PreviewGeometryBuilder builder,
+      int color,
+      float normalX,
+      float normalY,
+      float normalZ,
+      float x0,
+      float y0,
+      float z0,
+      float x1,
+      float y1,
+      float z1,
+      float x2,
+      float y2,
+      float z2,
+      float x3,
+      float y3,
+      float z3,
+      float shade0,
+      float shade1,
+      float shade2,
+      float shade3
+   ) {
+      builder.addVertex(x0, y0, z0, applyPreviewLighting(scalePreviewColor(color, shade0), normalX, normalY, normalZ, x0, z0));
+      builder.addVertex(x1, y1, z1, applyPreviewLighting(scalePreviewColor(color, shade1), normalX, normalY, normalZ, x1, z1));
+      builder.addVertex(x2, y2, z2, applyPreviewLighting(scalePreviewColor(color, shade2), normalX, normalY, normalZ, x2, z2));
+      builder.addVertex(x3, y3, z3, applyPreviewLighting(scalePreviewColor(color, shade3), normalX, normalY, normalZ, x3, z3));
+   }
+
+   private static int previewTopMaterialColor(int rgb, int x, int z, long salt) {
+      float brightness = 0.9F + (float)hashToUnitDouble(x, z, salt) * 0.2F;
+      int varied = scalePreviewColor(rgb, brightness);
+      int r = Math.min(255, ((varied >> 16 & 0xFF) + 2) / 5 * 5);
+      int g = Math.min(255, ((varied >> 8 & 0xFF) + 2) / 5 * 5);
+      int b = Math.min(255, ((varied & 0xFF) + 2) / 5 * 5);
+      return r << 16 | g << 8 | b;
+   }
+
+   private static int previewSideMaterialColor(int topColor, int x, int z, long salt) {
+      int r = topColor >> 16 & 0xFF;
+      int g = topColor >> 8 & 0xFF;
+      int b = topColor & 0xFF;
+      int sideColor;
+      if (g > r * 1.13F && g > b * 1.1F) {
+         sideColor = blendColor(topColor, 0x745538, 0.58F);
+      } else if (r > 218 && g > 218 && b > 218) {
+         sideColor = blendColor(topColor, 0xAAB0B2, 0.24F);
+      } else {
+         sideColor = scalePreviewColor(topColor, b > r * 1.2F ? 0.9F : 0.84F);
+      }
+
+      return previewTopMaterialColor(sideColor, x, z, salt);
+   }
+
+   private static int scalePreviewColor(int rgb, float scale) {
+      int alpha = rgb & 0xFF000000;
+      int r = Mth.clamp(Math.round((rgb >> 16 & 0xFF) * scale), 0, 255);
+      int g = Mth.clamp(Math.round((rgb >> 8 & 0xFF) * scale), 0, 255);
+      int b = Mth.clamp(Math.round((rgb & 0xFF) * scale), 0, 255);
+      return alpha | r << 16 | g << 8 | b;
+   }
+
+   private static int applyPreviewLighting(
+      int rgb, float normalX, float normalY, float normalZ, float worldX, float worldZ
+   ) {
+      int alpha = rgb >>> 24;
+      if (alpha == 0) {
+         alpha = 0xFF;
+      }
+
+      float dot = normalX * LIGHT_DIR.x + normalY * LIGHT_DIR.y + normalZ * LIGHT_DIR.z;
+      float sun = (float)Math.pow(Math.max(0.0F, dot), 0.72);
+      float sky = 0.5F + 0.5F * Mth.clamp(normalY, -1.0F, 1.0F);
+      float redLight = Mth.clamp(0.38F + sky * 0.16F + sun * 0.66F, 0.32F, 1.16F);
+      float greenLight = Mth.clamp(0.43F + sky * 0.18F + sun * 0.6F, 0.36F, 1.16F);
+      float blueLight = Mth.clamp(0.5F + sky * 0.2F + sun * 0.5F, 0.42F, 1.16F);
+      int r = Mth.clamp(Math.round((rgb >> 16 & 0xFF) * redLight), 0, 255);
+      int g = Mth.clamp(Math.round((rgb >> 8 & 0xFF) * greenLight), 0, 255);
+      int b = Mth.clamp(Math.round((rgb & 0xFF) * blueLight), 0, 255);
+      int lit = r << 16 | g << 8 | b;
+      float distance = (float)Math.sqrt(worldX * worldX + worldZ * worldZ);
+      float fog = Mth.clamp((distance - 0.62F) / 0.75F, 0.0F, 1.0F);
+      fog = fog * fog * (3.0F - 2.0F * fog) * 0.78F;
+      return alpha << 24 | blendColor(lit, PREVIEW_FOG_COLOR, fog) & 0xFFFFFF;
+   }
+
+   @Environment(EnvType.CLIENT)
+   private record PreviewGeometry(float[] positions, int[] colors, int vertexCount) {
+   }
+
+   @Environment(EnvType.CLIENT)
+   private static final class PreviewGeometryBuilder {
+      private float[] positions;
+      private int[] colors;
+      private int vertexCount;
+
+      private PreviewGeometryBuilder(int expectedVertices) {
+         int capacity = Math.max(16, expectedVertices);
+         this.positions = new float[capacity * 3];
+         this.colors = new int[capacity];
+      }
+
+      private void addVertex(float x, float y, float z, int color) {
+         this.ensureCapacity(this.vertexCount + 1);
+         int positionIndex = this.vertexCount * 3;
+         this.positions[positionIndex] = x;
+         this.positions[positionIndex + 1] = y;
+         this.positions[positionIndex + 2] = z;
+         this.colors[this.vertexCount] = color;
+         this.vertexCount++;
+      }
+
+      private void ensureCapacity(int requiredVertices) {
+         if (requiredVertices > this.colors.length) {
+            int capacity = Math.max(requiredVertices, this.colors.length + this.colors.length / 2);
+            this.positions = Arrays.copyOf(this.positions, capacity * 3);
+            this.colors = Arrays.copyOf(this.colors, capacity);
+         }
+      }
+
+      private TerrainPreview.PreviewGeometry build() {
+         return new TerrainPreview.PreviewGeometry(
+            Arrays.copyOf(this.positions, this.vertexCount * 3), Arrays.copyOf(this.colors, this.vertexCount), this.vertexCount
+         );
+      }
+   }
+
    @Environment(EnvType.CLIENT)
    private static final class TerrainPreviewRenderState implements GuiElementRenderState {
       private final TerrainPreview.PreviewMesh mesh;
@@ -3266,7 +4704,7 @@ public final class TerrainPreview implements AutoCloseable {
       }
 
       public RenderPipeline pipeline() {
-         return RenderPipelines.GUI;
+         return PREVIEW_PIPELINE;
       }
 
       public TextureSetup textureSetup() {
@@ -3282,201 +4720,50 @@ public final class TerrainPreview implements AutoCloseable {
       }
 
       public void buildVertices(VertexConsumer consumer) {
-         float[] heights = this.mesh.heightsFor(this.renderMode);
-         int[] colors = this.mesh.colorsFor(this.renderMode);
-         int stride = this.mesh.granularity;
-         if (this.mesh.size > stride) {
-            int quadsX = (this.mesh.size - 1) / stride;
-            int quadsZ = (this.mesh.size - 1) / stride;
-            int quadCount = quadsX * quadsZ;
-            TerrainPreview.PreviewQuadScratch scratch = PREVIEW_QUAD_SCRATCH.get();
-            int[] quadTopLeft = scratch.indices(quadCount);
-            float[] quadDepth = scratch.depths(quadCount);
-            Vector3f view = new Vector3f();
-            Vector3f normal = new Vector3f();
-            float depthScale = 0.25F;
-            int quadIndex = 0;
+         TerrainPreview.PreviewGeometry geometry = this.mesh.geometryFor(this.renderMode);
+         Vector3f view0 = new Vector3f();
+         Vector3f view1 = new Vector3f();
+         Vector3f view2 = new Vector3f();
+         Vector3f view3 = new Vector3f();
+         Vector3f projected0 = new Vector3f();
+         Vector3f projected1 = new Vector3f();
+         Vector3f projected2 = new Vector3f();
+         Vector3f projected3 = new Vector3f();
 
-            for (int z = 0; z < this.mesh.size - stride; z += stride) {
-               float z0 = this.mesh.axis[z];
-               float z1 = this.mesh.axis[z + stride];
-               int rowIndex = z * this.mesh.size;
-               int nextRowIndex = (z + stride) * this.mesh.size;
-
-               for (int x = 0; x < this.mesh.size - stride; x += stride) {
-                  int idx = rowIndex + x;
-                  int idxRight = idx + stride;
-                  int idxDown = nextRowIndex + x;
-                  int idxDownRight = idxDown + stride;
-                  float v0 = this.modelView.transformPosition(this.mesh.axis[x], heights[idx], z0, view).z;
-                  float v1 = this.modelView.transformPosition(this.mesh.axis[x + stride], heights[idxRight], z0, view).z;
-                  float v2 = this.modelView.transformPosition(this.mesh.axis[x], heights[idxDown], z1, view).z;
-                  float v3 = this.modelView.transformPosition(this.mesh.axis[x + stride], heights[idxDownRight], z1, view).z;
-                  float maxZ = Math.max(Math.max(v0, v1), Math.max(v2, v3));
-                  if (maxZ > -0.05F) {
-                     quadTopLeft[quadIndex] = -1;
-                     quadDepth[quadIndex] = Float.POSITIVE_INFINITY;
-                  } else {
-                     float depth = (v0 + v1 + v2 + v3) * depthScale;
-                     quadTopLeft[quadIndex] = idx;
-                     quadDepth[quadIndex] = depth;
-                  }
-
-                  quadIndex++;
-               }
-            }
-
-            if (quadCount > 1) {
-               sortQuads(quadTopLeft, quadDepth, 0, quadCount - 1);
-            }
-
-            Vector3f projected = new Vector3f();
-            float x0 = this.rawBounds.left();
-            float y0 = this.rawBounds.top();
-            float width = this.rawBounds.width();
-            float height = this.rawBounds.height();
-
-            for (int i = 0; i < quadCount; i++) {
-               int idx = quadTopLeft[i];
-               if (idx >= 0) {
-                  int x = idx % this.mesh.size;
-                  int z = idx / this.mesh.size;
-                  int idxRight = idx + stride;
-                  int idxDown = idx + stride * this.mesh.size;
-                  int idxDownRight = idxDown + stride;
-                  float worldX0 = this.mesh.axis[x];
-                  float worldX1 = this.mesh.axis[x + stride];
-                  float worldZ0 = this.mesh.axis[z];
-                  float worldZ1 = this.mesh.axis[z + stride];
-                  float shade = this.computeQuadShade(
-                     worldX0,
-                     heights[idx],
-                     worldZ0,
-                     worldX1,
-                     heights[idxRight],
-                     worldZ0,
-                     worldX0,
-                     heights[idxDown],
-                     worldZ1,
-                     worldX1,
-                     heights[idxDownRight],
-                     worldZ1,
-                     normal
-                  );
-                  int quadColor = applyShade(colors[idx], shade);
-                  this.emitVertex(consumer, worldX0, heights[idxDown], worldZ1, quadColor, x0, y0, width, height, view, projected);
-                  this.emitVertex(consumer, worldX1, heights[idxDownRight], worldZ1, quadColor, x0, y0, width, height, view, projected);
-                  this.emitVertex(consumer, worldX1, heights[idxRight], worldZ0, quadColor, x0, y0, width, height, view, projected);
-                  this.emitVertex(consumer, worldX0, heights[idx], worldZ0, quadColor, x0, y0, width, height, view, projected);
-               }
+         for (int vertex = 0; vertex + 3 < geometry.vertexCount(); vertex += 4) {
+            int position0 = vertex * 3;
+            int position1 = position0 + 3;
+            int position2 = position1 + 3;
+            int position3 = position2 + 3;
+            if (this.project(geometry.positions()[position0], geometry.positions()[position0 + 1], geometry.positions()[position0 + 2], view0, projected0)
+               && this.project(geometry.positions()[position1], geometry.positions()[position1 + 1], geometry.positions()[position1 + 2], view1, projected1)
+               && this.project(geometry.positions()[position2], geometry.positions()[position2 + 1], geometry.positions()[position2 + 2], view2, projected2)
+               && this.project(geometry.positions()[position3], geometry.positions()[position3 + 1], geometry.positions()[position3 + 2], view3, projected3)) {
+               this.emitProjectedVertex(consumer, projected0, geometry.colors()[vertex]);
+               this.emitProjectedVertex(consumer, projected1, geometry.colors()[vertex + 1]);
+               this.emitProjectedVertex(consumer, projected2, geometry.colors()[vertex + 2]);
+               this.emitProjectedVertex(consumer, projected3, geometry.colors()[vertex + 3]);
             }
          }
       }
 
-      private void emitVertex(
-         VertexConsumer consumer,
-         float worldX,
-         float worldY,
-         float worldZ,
-         int rgb,
-         float x0,
-         float y0,
-         float width,
-         float height,
-         Vector3f view,
-         Vector3f projected
-      ) {
+      private boolean project(float worldX, float worldY, float worldZ, Vector3f view, Vector3f projected) {
          this.modelView.transformPosition(worldX, worldY, worldZ, view);
+         if (view.z >= -0.05F) {
+            return false;
+         }
+
          this.projection.transformProject(view, projected);
-         float screenX = x0 + (projected.x + 1.0F) * 0.5F * width;
-         float screenY = y0 + (1.0F - projected.y) * 0.5F * height;
-         int argb = 0xFF000000 | rgb & 16777215;
-         consumer.addVertexWith2DPose(this.pose, screenX, screenY).setColor(argb);
+         return Float.isFinite(projected.x) && Float.isFinite(projected.y) && Float.isFinite(projected.z);
       }
 
-      private float computeQuadShade(
-         float x0, float y0, float z0, float x1, float y1, float z1, float x2, float y2, float z2, float x3, float y3, float z3, Vector3f normal
-      ) {
-         float a1x = x1 - x0;
-         float a1y = y1 - y0;
-         float a1z = z1 - z0;
-         float b1x = x2 - x0;
-         float b1y = y2 - y0;
-         float b1z = z2 - z0;
-         float n1x = a1y * b1z - a1z * b1y;
-         float n1y = a1z * b1x - a1x * b1z;
-         float n1z = a1x * b1y - a1y * b1x;
-         float a2x = x3 - x1;
-         float a2y = y3 - y1;
-         float a2z = z3 - z1;
-         float b2x = x2 - x1;
-         float b2y = y2 - y1;
-         float b2z = z2 - z1;
-         float n2x = a2y * b2z - a2z * b2y;
-         float n2y = a2z * b2x - a2x * b2z;
-         float n2z = a2x * b2y - a2y * b2x;
-         normal.set(n1x + n2x, n1y + n2y, n1z + n2z);
-         if (normal.lengthSquared() < 1.0E-9F) {
-            normal.set(n1x, n1y, n1z);
-         }
-
-         if (normal.y < 0.0F) {
-            normal.negate();
-         }
-
-         normal.normalize();
-         float shade = Mth.clamp(normal.dot(TerrainPreview.LIGHT_DIR), 0.0F, 1.0F);
-         shade = 0.45F + shade * 0.55F;
-         return Math.round(shade * 16.0F) / 16.0F;
-      }
-
-      private static int applyShade(int rgb, float shade) {
-         int r = rgb >> 16 & 0xFF;
-         int g = rgb >> 8 & 0xFF;
-         int b = rgb & 0xFF;
-         r = Mth.clamp(Math.round(r * shade), 0, 255);
-         g = Mth.clamp(Math.round(g * shade), 0, 255);
-         b = Mth.clamp(Math.round(b * shade), 0, 255);
-         return r << 16 | g << 8 | b;
-      }
-
-      private static void sortQuads(int[] quadTopLeft, float[] quadDepth, int left, int right) {
-         int i = left;
-         int j = right;
-         float pivot = quadDepth[left + right >>> 1];
-
-         while (i <= j) {
-            while (quadDepth[i] < pivot) {
-               i++;
-            }
-
-            while (quadDepth[j] > pivot) {
-               j--;
-            }
-
-            if (i <= j) {
-               swap(quadTopLeft, quadDepth, i, j);
-               i++;
-               j--;
-            }
-         }
-
-         if (left < j) {
-            sortQuads(quadTopLeft, quadDepth, left, j);
-         }
-
-         if (i < right) {
-            sortQuads(quadTopLeft, quadDepth, i, right);
-         }
-      }
-
-      private static void swap(int[] quadTopLeft, float[] quadDepth, int i, int j) {
-         int tempIndex = quadTopLeft[i];
-         quadTopLeft[i] = quadTopLeft[j];
-         quadTopLeft[j] = tempIndex;
-         float tempDepth = quadDepth[i];
-         quadDepth[i] = quadDepth[j];
-         quadDepth[j] = tempDepth;
+      private void emitProjectedVertex(VertexConsumer consumer, Vector3f projected, int rgb) {
+         float screenX = this.rawBounds.left() + (projected.x + 1.0F) * 0.5F * this.rawBounds.width();
+         float screenY = this.rawBounds.top() + (1.0F - projected.y) * 0.5F * this.rawBounds.height();
+         float transformedX = this.pose.m00() * screenX + this.pose.m10() * screenY + this.pose.m20();
+         float transformedY = this.pose.m01() * screenX + this.pose.m11() * screenY + this.pose.m21();
+         float depth = Mth.clamp((1.0F - projected.z) * 500.0F, 0.0F, 1000.0F);
+         consumer.addVertex(transformedX, transformedY, depth).setColor(rgb);
       }
    }
 }

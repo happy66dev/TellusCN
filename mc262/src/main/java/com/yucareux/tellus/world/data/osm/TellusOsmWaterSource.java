@@ -5,10 +5,12 @@ import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
 import com.yucareux.tellus.Tellus;
 import com.yucareux.tellus.config.TellusEndpointConfig;
+import com.yucareux.tellus.integration.distant_horizons.managed.ManagedTerrainNetworkPolicy;
 import com.yucareux.tellus.cache.TellusCacheDomain;
 import com.yucareux.tellus.cache.TellusCacheFiles;
 import com.yucareux.tellus.cache.TellusCacheHandle;
 import com.yucareux.tellus.cache.TellusCacheRegistry;
+import com.yucareux.tellus.world.data.source.ParallelDownloadRunner;
 import com.yucareux.tellus.worldgen.EarthProjection;
 import io.github.sebasbaumh.mapbox.vectortile.VectorTile.Tile;
 import io.github.sebasbaumh.mapbox.vectortile.VectorTile.Tile.Feature;
@@ -28,14 +30,15 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BiConsumer;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
-import net.fabricmc.loader.api.FabricLoader;
+import com.yucareux.tellus.platform.TellusPlatform;
 import net.minecraft.util.Mth;
 import net.minecraft.util.Util;
 
 public final class TellusOsmWaterSource implements TellusCacheHandle {
-   private static final String DEFAULT_PM_TILES_URL = "https://overturemaps-tiles-us-west-2-beta.s3.amazonaws.com/2026-01-21/base.pmtiles";
+   private static final String PM_TILES_THEME = "base";
    private static final double MIN_LAT = -85.05112878;
    private static final double MAX_LAT = 85.05112878;
    private static final double MIN_LON = -180.0;
@@ -43,8 +46,8 @@ public final class TellusOsmWaterSource implements TellusCacheHandle {
    private static final double METERS_PER_DEGREE = 111319.49166666667;
    private static final double POINT_EPSILON = 1.0E-9;
    private static final int DEFAULT_TILE_EXTENT = 4096;
-   private static final int CONNECT_TIMEOUT_MS = intProperty("tellus.overture.water.connectTimeoutMs", 7000, 1, 120000);
-   private static final int READ_TIMEOUT_MS = intProperty("tellus.overture.water.readTimeoutMs", 20000, 1, 180000);
+   private static final int CONNECT_TIMEOUT_MS = intProperty("tellus.overture.water.connectTimeoutMs", 30000, 1, 120000);
+   private static final int READ_TIMEOUT_MS = intProperty("tellus.overture.water.readTimeoutMs", 60000, 1, 180000);
    private static final int DIRECTORY_CACHE_ENTRIES = intProperty("tellus.overture.water.dirCache", 256, 1, 8192);
    private static final int MAX_CACHE_TILES = intProperty("tellus.osm.water.cacheTiles", 256, 1, 8192);
    private static final int MAX_ASYNC_PREFETCH_LOADS = intProperty("tellus.osm.water.prefetchAsyncMax", 96, 0, 8192);
@@ -54,7 +57,7 @@ public final class TellusOsmWaterSource implements TellusCacheHandle {
    private static final int PMTILES_TILETYPE_MVT = 1;
    private static final String WATER_LAYER_NAME = "water";
    private static final byte[] EMPTY_TILE_PAYLOAD = new byte[0];
-   private final Path cacheRoot = FabricLoader.getInstance().getGameDir().resolve("tellus/cache/map/water");
+   private final Path cacheRoot;
    private final PmTilesRangeReader pmTilesReader;
    private final Object initLock = new Object();
    private final LoadingCache<TellusOsmWaterSource.TileKey, OsmWaterTile> cache;
@@ -64,10 +67,20 @@ public final class TellusOsmWaterSource implements TellusCacheHandle {
    private volatile int minZoom;
    private volatile int maxZoom;
    private volatile boolean initialized;
+   private volatile int initializationFailures;
+   private volatile long nextInitializationAttemptNanos;
 
    public TellusOsmWaterSource() {
-      String pmTilesUrl = TellusEndpointConfig.getOvertureWaterEndpoint(DEFAULT_PM_TILES_URL);
-      this.pmTilesReader = new PmTilesRangeReader(pmTilesUrl, CONNECT_TIMEOUT_MS, READ_TIMEOUT_MS, DIRECTORY_CACHE_ENTRIES);
+      // 官方水域瓦片地址：发布版本交给上游 OvertureTileUrls 自动发现，避免写死版本过期后整层数据 404
+      String officialWaterUrl = OvertureTileUrls.defaultThemeUrl(PM_TILES_THEME);
+      // 收集候选瓦片地址：镜像地址优先，官方地址兜底，避免单个镜像路由失效就整体禁用水域
+      List<String> pmTilesUrls = TellusEndpointConfig.getOvertureWaterCandidates(officialWaterUrl);
+      // 缓存目录按主地址做命名空间隔离，避免镜像与官方源的同名瓦片互相当作缓存命中
+      this.cacheRoot = TellusPlatform.gameDir()
+         .resolve("tellus/cache/map/water")
+         .resolve(OvertureTileUrls.cacheNamespace(pmTilesUrls.get(0)));
+      // 用候选列表共享读取器：与其它数据层读到同一个压缩包时可共用文件头与目录缓存
+      this.pmTilesReader = PmTilesRangeReader.shared(pmTilesUrls, CONNECT_TIMEOUT_MS, READ_TIMEOUT_MS, DIRECTORY_CACHE_ENTRIES);
       this.cache = CacheBuilder.newBuilder().maximumSize(MAX_CACHE_TILES).build(new CacheLoader<TellusOsmWaterSource.TileKey, OsmWaterTile>() {
          public OsmWaterTile load(TellusOsmWaterSource.TileKey key) {
             return TellusOsmWaterSource.this.loadTile(key);
@@ -86,34 +99,49 @@ public final class TellusOsmWaterSource implements TellusCacheHandle {
    public WaterQueryResult waterForAreaWithStatus(
       int minBlockX, int minBlockZ, int maxBlockX, int maxBlockZ, double worldScale, int marginBlocks, OsmQueryMode mode
    ) {
+      return this.waterForAreaWithStatus(
+         minBlockX, minBlockZ, maxBlockX, maxBlockZ, worldScale, marginBlocks, mode, MAX_QUERY_TILES
+      );
+   }
+
+   public WaterQueryResult waterForAreaWithStatus(
+      int minBlockX,
+      int minBlockZ,
+      int maxBlockX,
+      int maxBlockZ,
+      double worldScale,
+      int marginBlocks,
+      OsmQueryMode mode,
+      int maxQueryTiles
+   ) {
       this.ensureInitialized();
       if (this.available && !(worldScale <= 0.0)) {
          TellusOsmWaterSource.GeoBounds bounds = geoBoundsForBlockArea(minBlockX, minBlockZ, maxBlockX, maxBlockZ, marginBlocks, worldScale);
          if (bounds == null) {
-            return new WaterQueryResult(List.of(), false, 0);
+            return new WaterQueryResult(List.of(), CoverageStatus.COMPLETE, 0);
          } else {
-            int zoom = this.queryZoomForBounds(bounds, worldScale);
+            int zoom = this.queryZoomForBounds(bounds, worldScale, maxQueryTiles);
             List<TellusOsmWaterSource.TileKey> keys = tileKeysForBounds(bounds, zoom);
             if (keys.isEmpty()) {
-               return new WaterQueryResult(List.of(), false, zoom);
+               return new WaterQueryResult(List.of(), CoverageStatus.COMPLETE, zoom);
             } else {
                List<OsmWaterFeature> features = new ArrayList<>();
-               boolean hadCacheMiss = false;
+               CoverageStatus coverageStatus = CoverageStatus.COMPLETE;
 
                for (TellusOsmWaterSource.TileKey key : keys) {
                   TellusOsmWaterSource.TileLookup lookup = this.getTileLookup(key, mode);
-                  hadCacheMiss |= lookup.cacheMiss();
+                  coverageStatus = CoverageStatus.combine(coverageStatus, lookup.coverageStatus());
                   OsmWaterTile tile = lookup.tile();
                   if (!tile.isEmpty()) {
                      features.addAll(tile.featuresInBounds(bounds.south(), bounds.west(), bounds.north(), bounds.east()));
                   }
                }
 
-               return new WaterQueryResult(features, hadCacheMiss, zoom);
+               return new WaterQueryResult(features, coverageStatus, zoom);
             }
          }
       } else {
-         return new WaterQueryResult(List.of(), false, 0);
+         return new WaterQueryResult(List.of(), CoverageStatus.FAILED, 0);
       }
    }
 
@@ -121,10 +149,66 @@ public final class TellusOsmWaterSource implements TellusCacheHandle {
       return this.waterForAreaWithStatus(minBlockX, minBlockZ, maxBlockX, maxBlockZ, worldScale, marginBlocks, OsmQueryMode.BLOCKING).features();
    }
 
+   public int downloadAreaTaskCount(int minBlockX, int minBlockZ, int maxBlockX, int maxBlockZ, double worldScale, int marginBlocks) {
+      return Math.max(1, this.downloadAreaTileKeys(minBlockX, minBlockZ, maxBlockX, maxBlockZ, worldScale, marginBlocks).size());
+   }
+
+   public int downloadAreaInputs(
+      int minBlockX, int minBlockZ, int maxBlockX, int maxBlockZ, double worldScale, int marginBlocks,
+      int completedUnits, BiConsumer<Integer, String> progressConsumer
+   ) {
+      return this.downloadAreaInputs(
+         minBlockX, minBlockZ, maxBlockX, maxBlockZ, worldScale, marginBlocks, MAX_QUERY_TILES, completedUnits, progressConsumer
+      );
+   }
+
+   public int downloadAreaInputs(
+      int minBlockX, int minBlockZ, int maxBlockX, int maxBlockZ, double worldScale, int marginBlocks, int maxQueryTiles,
+      int completedUnits, BiConsumer<Integer, String> progressConsumer
+   ) {
+      BiConsumer<Integer, String> progress = progressConsumer == null ? (completed, detail) -> {
+      } : progressConsumer;
+      List<TellusOsmWaterSource.TileKey> keys = this.downloadAreaTileKeys(
+         minBlockX, minBlockZ, maxBlockX, maxBlockZ, worldScale, marginBlocks, maxQueryTiles
+      );
+      if (keys.isEmpty()) {
+         progress.accept(completedUnits, "Skipping Overture water tiles because the source is unavailable");
+         return completedUnits + 1;
+      }
+      int startingUnits = completedUnits;
+      progress.accept(completedUnits, "Downloading " + keys.size() + " Overture water source tiles");
+      return ParallelDownloadRunner.run(ParallelDownloadRunner.scope("osm-water", TellusCacheRegistry.generation(TellusCacheDomain.OSM)), keys, completedUnits, this::downloadRawTile, (key, completed, phaseTotal) -> progress.accept(
+         completed, "Cached Overture water tile " + (completed - startingUnits) + "/" + phaseTotal + " (" + key.zoom() + "/" + key.x() + "/" + key.y() + ")"
+      ));
+   }
+
+   private List<TellusOsmWaterSource.TileKey> downloadAreaTileKeys(
+      int minBlockX, int minBlockZ, int maxBlockX, int maxBlockZ, double worldScale, int marginBlocks
+   ) {
+      return this.downloadAreaTileKeys(minBlockX, minBlockZ, maxBlockX, maxBlockZ, worldScale, marginBlocks, MAX_QUERY_TILES);
+   }
+
+   private List<TellusOsmWaterSource.TileKey> downloadAreaTileKeys(
+      int minBlockX, int minBlockZ, int maxBlockX, int maxBlockZ, double worldScale, int marginBlocks, int maxQueryTiles
+   ) {
+      this.ensureInitialized();
+      if (!this.available || worldScale <= 0.0) {
+         return List.of();
+      }
+
+      TellusOsmWaterSource.GeoBounds bounds = geoBoundsForBlockArea(minBlockX, minBlockZ, maxBlockX, maxBlockZ, marginBlocks, worldScale);
+      if (bounds == null) {
+         return List.of();
+      }
+
+      int zoom = this.queryZoomForBounds(bounds, worldScale, maxQueryTiles);
+      return tileKeysForBounds(bounds, zoom);
+   }
+
    public FastWaterSample sampleWater(int blockX, int blockZ, double worldScale, OsmQueryMode mode) {
       WaterQueryResult result = this.waterForAreaWithStatus(blockX - 1, blockZ - 1, blockX + 1, blockZ + 1, worldScale, 0, mode);
       if (result.features().isEmpty()) {
-         return new FastWaterSample(false, false, result.hadCacheMiss());
+         return new FastWaterSample(false, false, result.coverageStatus());
       } else {
          boolean hasWater = false;
          boolean ocean = false;
@@ -139,7 +223,7 @@ public final class TellusOsmWaterSource implements TellusCacheHandle {
             }
          }
 
-         return new FastWaterSample(hasWater, ocean, result.hadCacheMiss());
+         return new FastWaterSample(hasWater, ocean, result.coverageStatus());
       }
    }
 
@@ -168,12 +252,13 @@ public final class TellusOsmWaterSource implements TellusCacheHandle {
       }
    }
 
-   private int queryZoomForBounds(TellusOsmWaterSource.GeoBounds bounds, double worldScale) {
+   private int queryZoomForBounds(TellusOsmWaterSource.GeoBounds bounds, double worldScale, int maxQueryTiles) {
       this.ensureInitialized();
       int zoom = this.queryZoomForScale(worldScale);
+      int tileBudget = Mth.clamp(maxQueryTiles, 1, MAX_QUERY_TILES);
 
       while (zoom > this.minZoom) {
-         if (tileKeysForBounds(bounds, zoom).size() <= MAX_QUERY_TILES) {
+         if (tileCountForBounds(bounds, zoom) <= tileBudget) {
             break;
          }
 
@@ -210,24 +295,26 @@ public final class TellusOsmWaterSource implements TellusCacheHandle {
       if (cached != null) {
          if (!cached.isEmpty() || !this.tileLoadFailures.contains(key)) {
             OsmPerf.recordTileLoad(OsmPerf.TileSource.OSM_WATER, OsmPerf.TileLoadPath.MEMORY);
-            return new TellusOsmWaterSource.TileLookup(cached, false);
+            return new TellusOsmWaterSource.TileLookup(cached, CoverageStatus.COMPLETE);
          }
 
          this.cache.invalidate(key);
       }
 
-      OsmQueryMode queryMode = mode == null ? OsmQueryMode.BLOCKING : mode;
+      OsmQueryMode queryMode = ManagedTerrainNetworkPolicy.isCacheOnly()
+         ? OsmQueryMode.BLOCKING
+         : mode == null ? OsmQueryMode.BLOCKING : mode;
       if (queryMode == OsmQueryMode.NON_BLOCKING) {
          this.queueAsyncLoad(key);
-         return new TellusOsmWaterSource.TileLookup(OsmWaterTile.empty(), true);
+         return new TellusOsmWaterSource.TileLookup(OsmWaterTile.empty(), CoverageStatus.PENDING);
       } else {
          try {
-            return new TellusOsmWaterSource.TileLookup(this.cache.get(key), false);
+            return new TellusOsmWaterSource.TileLookup(this.cache.get(key), CoverageStatus.COMPLETE);
          } catch (Exception error) {
             Tellus.LOGGER.debug("Failed to load Overture water tile {}", key, error);
             this.tileLoadFailures.add(key);
             OsmPerf.recordTileLoad(OsmPerf.TileSource.OSM_WATER, OsmPerf.TileLoadPath.FAILURE);
-            return new TellusOsmWaterSource.TileLookup(OsmWaterTile.empty(), false);
+            return new TellusOsmWaterSource.TileLookup(OsmWaterTile.empty(), CoverageStatus.FAILED);
          }
       }
    }
@@ -321,13 +408,30 @@ public final class TellusOsmWaterSource implements TellusCacheHandle {
       }
    }
 
+   private void downloadRawTile(TellusOsmWaterSource.TileKey key) {
+      Path cachePath = this.cachePathFor(key);
+      if (Files.isRegularFile(cachePath)) {
+         return;
+      }
+
+      long generation = TellusCacheRegistry.generation(TellusCacheDomain.OSM);
+      byte[] payload = this.fetchTilePayloadWithRetry(key);
+      if (!TellusCacheRegistry.isCurrent(TellusCacheDomain.OSM, generation) || !this.cacheTile(cachePath, payload, generation)) {
+         throw new RuntimeException("Discarded stale Overture water cache write for " + key);
+      }
+   }
+
    private void ensureInitialized() {
       if (this.initialized) {
          return;
       }
+      long now = System.nanoTime();
+      if (now < this.nextInitializationAttemptNanos) {
+         return;
+      }
 
       synchronized (this.initLock) {
-         if (this.initialized) {
+         if (this.initialized || System.nanoTime() < this.nextInitializationAttemptNanos) {
             return;
          }
 
@@ -344,16 +448,31 @@ public final class TellusOsmWaterSource implements TellusCacheHandle {
             resolvedMinZoom = header.minZoom();
             resolvedMaxZoom = header.maxZoom();
             sourceAvailable = true;
+            this.initializationFailures = 0;
+            this.nextInitializationAttemptNanos = 0L;
          } catch (IOException error) {
             sourceAvailable = false;
-            Tellus.LOGGER.warn("Overture water PMTiles unavailable, OSM water disabled", error);
+            int failures = ++this.initializationFailures;
+            long delaySeconds = retryDelaySeconds(failures);
+            this.nextInitializationAttemptNanos = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(delaySeconds);
+            Tellus.LOGGER.warn("Overture water PMTiles unavailable; retrying in {}s", delaySeconds, error);
          }
 
          this.available = sourceAvailable;
          this.minZoom = resolvedMinZoom;
          this.maxZoom = resolvedMaxZoom;
-         this.initialized = true;
+         this.initialized = sourceAvailable;
       }
+   }
+
+   static long retryDelaySeconds(int failureCount) {
+      if (failureCount <= 0) {
+         return 0L;
+      }
+      if (failureCount <= 5) {
+         return 1L << failureCount - 1;
+      }
+      return 60L;
    }
 
    private byte[] fetchTilePayloadWithRetry(TellusOsmWaterSource.TileKey key) {
@@ -938,6 +1057,17 @@ public final class TellusOsmWaterSource implements TellusCacheHandle {
       }
    }
 
+   private static long tileCountForBounds(TellusOsmWaterSource.GeoBounds bounds, int zoom) {
+      int tilesPerAxis = 1 << zoom;
+      int minX = Mth.clamp(lonToTileX(bounds.west(), zoom), 0, tilesPerAxis - 1);
+      int maxX = Mth.clamp(lonToTileX(bounds.east(), zoom), 0, tilesPerAxis - 1);
+      int minY = Mth.clamp(latToTileY(bounds.north(), zoom), 0, tilesPerAxis - 1);
+      int maxY = Mth.clamp(latToTileY(bounds.south(), zoom), 0, tilesPerAxis - 1);
+      long width = Math.max(0L, (long)maxX - minX + 1L);
+      long height = Math.max(0L, (long)maxY - minY + 1L);
+      return width * height;
+   }
+
    private static List<TellusOsmWaterSource.TileKey> tileKeysForBounds(TellusOsmWaterSource.GeoBounds bounds, int zoom) {
       int tilesPerAxis = 1 << zoom;
       int minX = Mth.clamp(lonToTileX(bounds.west(), zoom), 0, tilesPerAxis - 1);
@@ -1055,7 +1185,10 @@ public final class TellusOsmWaterSource implements TellusCacheHandle {
    private record GeoBounds(double south, double west, double north, double east) {
    }
 
-   public record FastWaterSample(boolean hasWater, boolean ocean, boolean hadCacheMiss) {
+   public record FastWaterSample(boolean hasWater, boolean ocean, CoverageStatus coverageStatus) {
+      public boolean hadCacheMiss() {
+         return this.coverageStatus == CoverageStatus.PENDING;
+      }
    }
 
    private record TileGeoBounds(double south, double west, double north, double east) {
@@ -1064,18 +1197,39 @@ public final class TellusOsmWaterSource implements TellusCacheHandle {
    private record TileKey(int zoom, int x, int y) {
    }
 
-   private record TileLookup(OsmWaterTile tile, boolean cacheMiss) {
+   private record TileLookup(OsmWaterTile tile, CoverageStatus coverageStatus) {
    }
 
    private record TilePoint(int x, int y) {
    }
 
-   public record WaterQueryResult(List<OsmWaterFeature> features, boolean hadCacheMiss, int zoom) {
-      public WaterQueryResult(List<OsmWaterFeature> features, boolean hadCacheMiss, int zoom) {
+   public enum CoverageStatus {
+      COMPLETE,
+      PENDING,
+      FAILED;
+
+      private static CoverageStatus combine(CoverageStatus current, CoverageStatus next) {
+         if (current == FAILED || next == FAILED) {
+            return FAILED;
+         }
+         return current == PENDING || next == PENDING ? PENDING : COMPLETE;
+      }
+   }
+
+   public record WaterQueryResult(List<OsmWaterFeature> features, CoverageStatus coverageStatus, int zoom) {
+      public WaterQueryResult(List<OsmWaterFeature> features, CoverageStatus coverageStatus, int zoom) {
          features = features == null ? List.of() : List.copyOf(features);
          this.features = features;
-         this.hadCacheMiss = hadCacheMiss;
+         this.coverageStatus = coverageStatus == null ? CoverageStatus.FAILED : coverageStatus;
          this.zoom = zoom;
+      }
+
+      public boolean hadCacheMiss() {
+         return this.coverageStatus == CoverageStatus.PENDING;
+      }
+
+      public boolean complete() {
+         return this.coverageStatus == CoverageStatus.COMPLETE;
       }
    }
 }

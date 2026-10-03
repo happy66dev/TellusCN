@@ -1,7 +1,12 @@
 package com.yucareux.tellus;
 
 import com.yucareux.tellus.client.screen.EarthTeleportScreen;
+import com.yucareux.tellus.client.hud.ManagedTerrainDownloadOverlay;
+import com.yucareux.tellus.integration.distant_horizons.managed.ManagedTerrainClientState;
+import com.yucareux.tellus.integration.distant_horizons.managed.ManagedTerrainViewDistance;
 import com.yucareux.tellus.network.GeoTpOpenMapPayload;
+import com.yucareux.tellus.network.ManagedTerrainStatusPayload;
+import com.yucareux.tellus.network.ManagedTerrainViewPayload;
 import com.yucareux.tellus.network.TellusWeatherPayload;
 import com.yucareux.tellus.world.realtime.SnowGrid;
 import com.yucareux.tellus.world.realtime.TemperatureGrid;
@@ -12,13 +17,18 @@ import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.Screen;
 
 @Environment(EnvType.CLIENT)
 public class TellusClient implements ClientModInitializer {
+   private int managedTerrainViewUpdateTicks;
+
    @Override
    public void onInitializeClient() {
+      HudElementRegistry.addLast(Tellus.id("managed_terrain_status"), (graphics, deltaTracker) -> ManagedTerrainDownloadOverlay.render(graphics));
       ClientPlayNetworking.registerGlobalReceiver(Objects.requireNonNull(GeoTpOpenMapPayload.TYPE, "GeoTpOpenMapPayload.TYPE"), (payload, context) -> context.client().execute(() -> {
          Minecraft minecraft = context.client();
          Screen parent = minecraft.gui.screen();
@@ -47,6 +57,22 @@ public class TellusClient implements ClientModInitializer {
                }
             )
       );
-      ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> TellusRealtimeState.reset());
+      ClientPlayNetworking.registerGlobalReceiver(
+         Objects.requireNonNull(ManagedTerrainStatusPayload.TYPE, "ManagedTerrainStatusPayload.TYPE"),
+         (payload, context) -> context.client().execute(() -> ManagedTerrainClientState.update(payload.status()))
+      );
+      ClientTickEvents.END_CLIENT_TICK.register(client -> {
+         if (client.player != null && ++this.managedTerrainViewUpdateTicks >= 40) {
+            this.managedTerrainViewUpdateTicks = 0;
+            if (ClientPlayNetworking.canSend(ManagedTerrainViewPayload.TYPE)) {
+               ClientPlayNetworking.send(new ManagedTerrainViewPayload(ManagedTerrainViewDistance.detect()));
+            }
+         }
+      });
+      ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
+         TellusRealtimeState.reset();
+         ManagedTerrainClientState.reset();
+         this.managedTerrainViewUpdateTicks = 0;
+      });
    }
 }

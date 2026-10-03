@@ -11,19 +11,19 @@ subprojects {
 }
 
 tasks.named('clean') {
-	dependsOn(':mc1201:clean', ':mc1211:clean', ':mc262:clean')
+	dependsOn(':mc1201:clean', ':mc1211:clean', ':mc262:clean', ':mc262-neoforge:clean')
 }
 
 tasks.named('assemble') {
-	dependsOn(':mc1201:assemble', ':mc1211:assemble', ':mc262:assemble')
+	dependsOn(':mc1201:assemble', ':mc1211:assemble', ':mc262:assemble', ':mc262-neoforge:assemble')
 }
 
 tasks.named('check') {
-	dependsOn(':mc1201:check', ':mc1211:check', ':mc262:check')
+	dependsOn(':mc1201:check', ':mc1211:check', ':mc262:check', ':mc262-neoforge:check')
 }
 
 tasks.named('build') {
-	dependsOn(':mc1201:build', ':mc1211:build', ':mc262:build')
+	dependsOn(':mc1201:build', ':mc1211:build', ':mc262:build', ':mc262-neoforge:build')
 }
 
 tasks.register('build1201') {
@@ -44,6 +44,12 @@ tasks.register('build262') {
 	dependsOn(':mc262:build')
 }
 
+tasks.register('build262NeoForge') {
+	group = 'build'
+	description = 'Builds the Minecraft 26.2 NeoForge target.'
+	dependsOn(':mc262-neoforge:build')
+}
+
 tasks.register('runClient1211') {
 	group = 'fabric'
 	description = 'Runs the Minecraft 1.21.1 client target.'
@@ -62,6 +68,12 @@ tasks.register('runClient262') {
 	dependsOn(':mc262:runClient')
 }
 
+tasks.register('runClient262NeoForge') {
+	group = 'neoforge'
+	description = 'Runs the Minecraft 26.2 NeoForge client target.'
+	dependsOn(':mc262-neoforge:runClient')
+}
+
 tasks.register('runServer1201') {
 	group = 'fabric'
 	description = 'Runs the Minecraft 1.20.1 server target.'
@@ -78,4 +90,10 @@ tasks.register('runServer262') {
 	group = 'fabric'
 	description = 'Runs the Minecraft 26.2 server target.'
 	dependsOn(':mc262:runServer')
+}
+
+tasks.register('runServer262NeoForge') {
+	group = 'neoforge'
+	description = 'Runs the Minecraft 26.2 NeoForge server target.'
+	dependsOn(':mc262-neoforge:runServer')
 }

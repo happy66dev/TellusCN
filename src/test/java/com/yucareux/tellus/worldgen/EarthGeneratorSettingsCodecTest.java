@@ -9,6 +9,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
@@ -21,24 +22,74 @@ class EarthGeneratorSettingsCodecTest {
    @Test
    void defaultSettingsEnableWater() {
       assertTrue(EarthGeneratorSettings.DEFAULT.enableWater());
-      assertFalse(EarthGeneratorSettings.DEFAULT.demSelection().gebco2026Enabled());
+      assertFalse(EarthGeneratorSettings.DEFAULT.demSelection().automatic());
+      assertTrue(EarthGeneratorSettings.DEFAULT.demSelection().terrainTilesEnabled());
+      assertEquals(List.of("terrarium"), EarthGeneratorSettings.DEFAULT.demSelection().enabledProviderIds());
+      assertFalse(EarthGeneratorSettings.DEFAULT.experimentalIncreaseHeight());
+      assertFalse(EarthGeneratorSettings.DEFAULT.tellusManagedTerrainDownloads());
+      assertFalse(EarthGeneratorSettings.DEFAULT.showTerrainDownloadOverlay());
+      assertFalse(EarthGeneratorSettings.DEFAULT.addStrongholds());
+      assertFalse(EarthGeneratorSettings.DEFAULT.addVillages());
+      assertFalse(EarthGeneratorSettings.DEFAULT.addMineshafts());
+      assertFalse(EarthGeneratorSettings.DEFAULT.addOceanMonuments());
+      assertFalse(EarthGeneratorSettings.DEFAULT.addWoodlandMansions());
+      assertFalse(EarthGeneratorSettings.DEFAULT.addDesertTemples());
+      assertFalse(EarthGeneratorSettings.DEFAULT.addJungleTemples());
+      assertFalse(EarthGeneratorSettings.DEFAULT.addPillagerOutposts());
+      assertFalse(EarthGeneratorSettings.DEFAULT.addRuinedPortals());
+      assertFalse(EarthGeneratorSettings.DEFAULT.addShipwrecks());
+      assertFalse(EarthGeneratorSettings.DEFAULT.addOceanRuins());
+      assertFalse(EarthGeneratorSettings.DEFAULT.addBuriedTreasure());
+      assertFalse(EarthGeneratorSettings.DEFAULT.addIgloos());
+      assertFalse(EarthGeneratorSettings.DEFAULT.addWitchHuts());
+      assertFalse(EarthGeneratorSettings.DEFAULT.addAncientCities());
+      assertFalse(EarthGeneratorSettings.DEFAULT.addTrialChambers());
+      assertFalse(EarthGeneratorSettings.DEFAULT.addTrailRuins());
+      assertFalse(EarthGeneratorSettings.DEFAULT.deepDark());
+      assertFalse(EarthGeneratorSettings.DEFAULT.geodes());
    }
 
    @Test
-   void gebcoIsDisabledForAutomaticManualAndSerializedSelections() {
-      EarthGeneratorSettings.DemProvider gebco = EarthGeneratorSettings.DemProvider.GEBCO2026;
+   void legacyDisabledWaterSettingMigratesToOvertureWater() {
+      JsonElement input = JsonParser.parseString("{\"enable_water\":false}");
+
+      EarthGeneratorSettings decoded = requireSuccess(EarthGeneratorSettings.CODEC.parse(JsonOps.INSTANCE, input));
+      JsonObject encoded = requireSuccess(EarthGeneratorSettings.CODEC.encodeStart(JsonOps.INSTANCE, decoded)).getAsJsonObject();
+
+      assertTrue(decoded.enableWater());
+      assertTrue(encoded.get("enable_water").getAsBoolean());
+   }
+
+   @Test
+   void legacySeaLevelSettingIsIgnored() {
+      JsonElement input = JsonParser.parseString("{\"height_offset\":48,\"sea_level\":73}");
+
+      EarthGeneratorSettings decoded = requireSuccess(EarthGeneratorSettings.CODEC.parse(JsonOps.INSTANCE, input));
+      JsonObject encoded = requireSuccess(EarthGeneratorSettings.CODEC.encodeStart(JsonOps.INSTANCE, decoded)).getAsJsonObject();
+
+      assertEquals(48, decoded.effectiveHeightOffset());
+      assertFalse(encoded.has("sea_level"));
+   }
+
+   @Test
+   void legacyProviderIdsNormalizeToMapterhorn() {
       EarthGeneratorSettings.DemSelection automatic = EarthGeneratorSettings.DemSelection.automaticSelection();
-      EarthGeneratorSettings.DemSelection manual = EarthGeneratorSettings.DemSelection.manual(
-         EarthGeneratorSettings.DemSelection.fullUserSelectableMask() | gebco.selectionBit()
-      );
+      EarthGeneratorSettings.DemSelection manual = EarthGeneratorSettings.DemSelection.manual(0);
       EarthGeneratorSettings.DemSelection serialized = EarthGeneratorSettings.DemSelection.manual(
-         EarthGeneratorSettings.DemSelection.maskFromProviderIds(java.util.List.of("terrarium", "gebco2026"))
+         EarthGeneratorSettings.DemSelection.maskFromProviderIds(List.of("terrarium", "gebco2026", "usgs", "inegi", "hma"))
       );
 
-      assertFalse(automatic.gebco2026Enabled());
-      assertFalse(manual.gebco2026Enabled());
-      assertFalse(serialized.gebco2026Enabled());
-      assertFalse(automatic.enabledProviderIds().contains("gebco2026"));
+      assertFalse(automatic.automatic());
+      assertFalse(manual.automatic());
+      assertFalse(serialized.automatic());
+      assertTrue(automatic.terrainTilesEnabled());
+      assertTrue(manual.terrainTilesEnabled());
+      assertTrue(serialized.terrainTilesEnabled());
+      assertEquals(List.of("terrarium"), automatic.enabledProviderIds());
+      assertEquals(List.of("terrarium"), manual.enabledProviderIds());
+      assertEquals(List.of("terrarium"), serialized.enabledProviderIds());
+      assertEquals(EarthGeneratorSettings.DemProvider.AUTO, EarthGeneratorSettings.DemProvider.fromId("hma"));
+      assertEquals(EarthGeneratorSettings.DemProvider.AUTO, EarthGeneratorSettings.DemProvider.fromId("inegi"));
    }
 
    @Test
@@ -50,7 +101,6 @@ class EarthGeneratorSettingsCodecTest {
            "terrestrial_height_scale": 1.35,
            "oceanic_height_scale": 0.85,
            "height_offset": 48,
-           "sea_level": 73,
            "spawn_latitude": 35.6895,
            "spawn_longitude": 139.6917,
            "min_altitude": -80,
@@ -96,6 +146,8 @@ class EarthGeneratorSettingsCodecTest {
            "thin_shell_terrain": true,
            "climate_based_built_up_terrain": true,
            "random_biomes": true,
+           "tellus_managed_terrain_downloads": false,
+           "show_terrain_download_overlay": false,
            "random_biome_density": 0.25,
            "random_biome_seed": 987654321
          }
@@ -107,28 +159,42 @@ class EarthGeneratorSettingsCodecTest {
       EarthGeneratorSettings reparsed = requireSuccess(EarthGeneratorSettings.CODEC.parse(JsonOps.INSTANCE, encoded));
 
       assertEquals(decoded, reparsed);
+      assertFalse(encoded.getAsJsonObject().has("sea_level"));
       assertTrue(decoded.thinShellTerrain());
       assertTrue(decoded.climateBasedBuiltUpTerrain());
       assertTrue(decoded.randomBiomes());
+      assertFalse(decoded.tellusManagedTerrainDownloads());
+      assertFalse(decoded.showTerrainDownloadOverlay());
+      assertFalse(decoded.experimentalIncreaseHeight());
       assertEquals(0.25, decoded.randomBiomeDensity());
       assertEquals(987654321L, decoded.randomBiomeSeed());
       assertTrue(reparsed.thinShellTerrain());
       assertTrue(reparsed.climateBasedBuiltUpTerrain());
       assertTrue(reparsed.randomBiomes());
+      assertFalse(reparsed.experimentalIncreaseHeight());
       assertEquals(0.25, reparsed.randomBiomeDensity());
       assertEquals(987654321L, reparsed.randomBiomeSeed());
-      assertFalse(decoded.demSelection().gebco2026Enabled());
-      assertFalse(reparsed.demSelection().gebco2026Enabled());
+      assertFalse(decoded.demSelection().automatic());
+      assertTrue(decoded.demSelection().terrainTilesEnabled());
+      assertEquals(List.of("terrarium"), decoded.demSelection().enabledProviderIds());
+      assertEquals(decoded.demSelection(), reparsed.demSelection());
       JsonObject encodedObject = encoded.getAsJsonObject();
       assertTrue(encodedObject.has("dem_automatic"));
       assertTrue(encodedObject.has("dem_enabled_providers"));
+      assertTrue(encodedObject.getAsJsonArray("dem_enabled_providers").contains(JsonParser.parseString("\"terrarium\"")));
+      assertFalse(encodedObject.getAsJsonArray("dem_enabled_providers").contains(JsonParser.parseString("\"gebco2026\"")));
       assertFalse(encodedObject.has("dem_provider"));
       assertEquals("detailed", encodedObject.get("distant_horizons_render_mode").getAsString());
       assertTrue(encodedObject.get("thin_shell_terrain").getAsBoolean());
       assertTrue(encodedObject.get("climate_based_built_up_terrain").getAsBoolean());
       assertTrue(encodedObject.get("random_biomes").getAsBoolean());
+      assertFalse(encodedObject.get("tellus_managed_terrain_downloads").getAsBoolean());
+      assertFalse(encodedObject.get("show_terrain_download_overlay").getAsBoolean());
       assertEquals(0.25, encodedObject.get("random_biome_density").getAsDouble());
       assertEquals(987654321L, encodedObject.get("random_biome_seed").getAsLong());
+      if (encodedObject.has("experimental_increase_height")) {
+         assertFalse(encodedObject.get("experimental_increase_height").getAsBoolean());
+      }
    }
 
    @Test
@@ -141,10 +207,8 @@ class EarthGeneratorSettingsCodecTest {
       assertEquals(-0.1278, decoded.spawnLongitude());
       assertEquals(EarthGeneratorSettings.DistantHorizonsRenderMode.DETAILED, decoded.distantHorizonsRenderMode());
       assertFalse(decoded.demSelection().automatic());
-      assertTrue(decoded.demSelection().isEnabled(EarthGeneratorSettings.DemProvider.USGS));
-      assertTrue(decoded.demSelection().isEnabled(EarthGeneratorSettings.DemProvider.COPERNICUS));
-      assertFalse(decoded.demSelection().isEnabled(EarthGeneratorSettings.DemProvider.TERRARIUM));
-      assertFalse(decoded.demSelection().gebco2026Enabled());
+      assertTrue(decoded.demSelection().isEnabled(EarthGeneratorSettings.DemProvider.TERRARIUM));
+      assertEquals(List.of("terrarium"), decoded.demSelection().enabledProviderIds());
       assertTrue(decoded.realtimeTime());
       assertTrue(decoded.realtimeWeather());
       assertTrue(decoded.historicalSnow());
@@ -154,6 +218,9 @@ class EarthGeneratorSettingsCodecTest {
       assertFalse(decoded.thinShellTerrain());
       assertFalse(decoded.climateBasedBuiltUpTerrain());
       assertFalse(decoded.randomBiomes());
+      assertFalse(decoded.experimentalIncreaseHeight());
+      assertFalse(decoded.tellusManagedTerrainDownloads());
+      assertFalse(decoded.showTerrainDownloadOverlay());
       assertEquals(EarthGeneratorSettings.DEFAULT_RANDOM_BIOME_DENSITY, decoded.randomBiomeDensity());
       assertEquals(EarthGeneratorSettings.DEFAULT_RANDOM_BIOME_SEED, decoded.randomBiomeSeed());
       assertTrue(decoded.voxyChunkPregenEnabled());

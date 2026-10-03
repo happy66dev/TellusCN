@@ -4,6 +4,7 @@ import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
 import com.yucareux.tellus.Tellus;
+import com.yucareux.tellus.world.data.source.DownloadProgressReporter;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.EOFException;
@@ -42,7 +43,7 @@ final class PmTilesReader {
          });
    }
 
-   PmTilesReader.PmTilesHeader header() throws IOException {
+   synchronized PmTilesReader.PmTilesHeader header() throws IOException {
       if (this.header == null) {
          this.header = this.readHeader();
       }
@@ -79,7 +80,7 @@ final class PmTilesReader {
       return null;
    }
 
-   private PmTilesReader.Directory getRootDirectory() throws IOException {
+   private synchronized PmTilesReader.Directory getRootDirectory() throws IOException {
       if (this.rootDirectory == null) {
          PmTilesReader.PmTilesHeader header = this.header();
          this.rootDirectory = this.getDirectory(header.rootOffset, header.rootLength);
@@ -199,14 +200,16 @@ final class PmTilesReader {
          }
 
          byte[] var7;
+         DownloadProgressReporter.requestStarted(length);
          try (InputStream input = connection.getInputStream()) {
             if (code == HttpURLConnection.HTTP_OK) {
                skipFully(input, offset);
-               return readFully(input, length);
+               return readFullyWithProgress(input, length);
             }
 
-            var7 = readFully(input, length);
+            var7 = readFullyWithProgress(input, length);
          } finally {
+            DownloadProgressReporter.requestFinished();
             connection.disconnect();
          }
 
@@ -258,7 +261,7 @@ final class PmTilesReader {
       }
    }
 
-   private static byte[] readFully(InputStream input, int length) throws IOException {
+   private static byte[] readFullyWithProgress(InputStream input, int length) throws IOException {
       byte[] buffer = new byte[length];
       int offset = 0;
 
@@ -269,6 +272,7 @@ final class PmTilesReader {
          }
 
          offset += read;
+         DownloadProgressReporter.bytesRead(read);
       }
 
       return buffer;

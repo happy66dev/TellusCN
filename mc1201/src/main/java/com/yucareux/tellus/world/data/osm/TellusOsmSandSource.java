@@ -5,10 +5,12 @@ import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
 import com.yucareux.tellus.Tellus;
 import com.yucareux.tellus.config.TellusEndpointConfig;
+import com.yucareux.tellus.integration.distant_horizons.managed.ManagedTerrainNetworkPolicy;
 import com.yucareux.tellus.cache.TellusCacheDomain;
 import com.yucareux.tellus.cache.TellusCacheFiles;
 import com.yucareux.tellus.cache.TellusCacheHandle;
 import com.yucareux.tellus.cache.TellusCacheRegistry;
+import com.yucareux.tellus.world.data.source.ParallelDownloadRunner;
 import com.yucareux.tellus.worldgen.EarthProjection;
 import io.github.sebasbaumh.mapbox.vectortile.VectorTile.Tile;
 import io.github.sebasbaumh.mapbox.vectortile.VectorTile.Tile.Feature;
@@ -29,14 +31,15 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BiConsumer;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
-import net.fabricmc.loader.api.FabricLoader;
+import com.yucareux.tellus.platform.TellusPlatform;
 import net.minecraft.util.Mth;
 import net.minecraft.Util;
 
 public final class TellusOsmSandSource implements TellusCacheHandle {
-   private static final String DEFAULT_PM_TILES_URL = "https://overturemaps-tiles-us-west-2-beta.s3.amazonaws.com/2026-01-21/base.pmtiles";
+   private static final String PM_TILES_THEME = "base";
    private static final double MIN_LAT = -85.05112878;
    private static final double MAX_LAT = 85.05112878;
    private static final double MIN_LON = -180.0;
@@ -44,8 +47,8 @@ public final class TellusOsmSandSource implements TellusCacheHandle {
    private static final double METERS_PER_DEGREE = 111319.49166666667;
    private static final double POINT_EPSILON = 1.0E-9;
    private static final int DEFAULT_TILE_EXTENT = 4096;
-   private static final int CONNECT_TIMEOUT_MS = intProperty("tellus.overture.sand.connectTimeoutMs", 7000, 1, 120000);
-   private static final int READ_TIMEOUT_MS = intProperty("tellus.overture.sand.readTimeoutMs", 20000, 1, 180000);
+   private static final int CONNECT_TIMEOUT_MS = intProperty("tellus.overture.sand.connectTimeoutMs", 30000, 1, 120000);
+   private static final int READ_TIMEOUT_MS = intProperty("tellus.overture.sand.readTimeoutMs", 60000, 1, 180000);
    private static final int DIRECTORY_CACHE_ENTRIES = intProperty("tellus.overture.sand.dirCache", 256, 1, 8192);
    private static final int MAX_CACHE_TILES = intProperty("tellus.osm.sand.cacheTiles", 256, 1, 8192);
    private static final int MAX_ASYNC_PREFETCH_LOADS = intProperty("tellus.osm.sand.prefetchAsyncMax", 96, 0, 8192);
@@ -55,7 +58,7 @@ public final class TellusOsmSandSource implements TellusCacheHandle {
    private static final String LAND_LAYER_NAME = "land";
    private static final String SAND_SUBTYPE = "sand";
    private static final byte[] EMPTY_TILE_PAYLOAD = new byte[0];
-   private final Path cacheRoot = FabricLoader.getInstance().getGameDir().resolve("tellus/cache/map/sand");
+   private final Path cacheRoot;
    private final PmTilesRangeReader pmTilesReader;
    private final Object initLock = new Object();
    private final LoadingCache<TellusOsmSandSource.TileKey, OsmSandTile> cache;
@@ -67,8 +70,16 @@ public final class TellusOsmSandSource implements TellusCacheHandle {
    private volatile boolean initialized;
 
    public TellusOsmSandSource() {
-      String pmTilesUrl = TellusEndpointConfig.getOvertureSandEndpoint(DEFAULT_PM_TILES_URL);
-      this.pmTilesReader = new PmTilesRangeReader(pmTilesUrl, CONNECT_TIMEOUT_MS, READ_TIMEOUT_MS, DIRECTORY_CACHE_ENTRIES);
+      // 官方沙地瓦片地址：发布版本交给上游 OvertureTileUrls 自动发现，避免写死版本过期后整层数据 404
+      String officialSandUrl = OvertureTileUrls.defaultThemeUrl(PM_TILES_THEME);
+      // 收集候选瓦片地址：镜像地址优先，官方地址兜底，避免单个镜像路由失效就整体禁用沙地
+      List<String> pmTilesUrls = TellusEndpointConfig.getOvertureSandCandidates(officialSandUrl);
+      // 缓存目录按主地址做命名空间隔离，避免镜像与官方源的同名瓦片互相当作缓存命中
+      this.cacheRoot = TellusPlatform.gameDir()
+         .resolve("tellus/cache/map/sand")
+         .resolve(OvertureTileUrls.cacheNamespace(pmTilesUrls.get(0)));
+      // 用候选列表共享读取器：与其它数据层读到同一个压缩包时可共用文件头与目录缓存
+      this.pmTilesReader = PmTilesRangeReader.shared(pmTilesUrls, CONNECT_TIMEOUT_MS, READ_TIMEOUT_MS, DIRECTORY_CACHE_ENTRIES);
       this.cache = CacheBuilder.newBuilder().maximumSize(MAX_CACHE_TILES).build(new CacheLoader<TellusOsmSandSource.TileKey, OsmSandTile>() {
          public OsmSandTile load(TellusOsmSandSource.TileKey key) {
             return TellusOsmSandSource.this.loadTile(key);
@@ -131,6 +142,60 @@ public final class TellusOsmSandSource implements TellusCacheHandle {
       }
    }
 
+   public int downloadAreaTileCount(
+      double minBlockX, double minBlockZ, double maxBlockX, double maxBlockZ, double worldScale, int paddingTiles
+   ) {
+      return Math.max(1, this.downloadAreaTileKeys(minBlockX, minBlockZ, maxBlockX, maxBlockZ, worldScale, paddingTiles).size());
+   }
+
+   public int downloadAreaTiles(
+      double minBlockX, double minBlockZ, double maxBlockX, double maxBlockZ, double worldScale, int paddingTiles,
+      int completedUnits, BiConsumer<Integer, String> progressConsumer
+   ) {
+      BiConsumer<Integer, String> progress = progressConsumer == null ? (completed, detail) -> {
+      } : progressConsumer;
+      List<TellusOsmSandSource.TileKey> keys = this.downloadAreaTileKeys(minBlockX, minBlockZ, maxBlockX, maxBlockZ, worldScale, paddingTiles);
+      if (keys.isEmpty()) {
+         progress.accept(completedUnits, "Skipping OSM sand tiles because the source is unavailable");
+         return completedUnits + 1;
+      }
+      int startingUnits = completedUnits;
+      progress.accept(completedUnits, "Downloading " + keys.size() + " OSM sand source tiles");
+      return ParallelDownloadRunner.run(ParallelDownloadRunner.scope("osm-sand", TellusCacheRegistry.generation(TellusCacheDomain.OSM)), keys, completedUnits, this::downloadRawTile, (key, completed, phaseTotal) -> progress.accept(
+         completed, "Cached OSM sand tile " + (completed - startingUnits) + "/" + phaseTotal + " (" + key.zoom() + "/" + key.x() + "/" + key.y() + ")"
+      ));
+   }
+
+   private List<TellusOsmSandSource.TileKey> downloadAreaTileKeys(
+      double minBlockX, double minBlockZ, double maxBlockX, double maxBlockZ, double worldScale, int paddingTiles
+   ) {
+      this.ensureInitialized();
+      if (!this.available || worldScale <= 0.0) {
+         return List.of();
+      }
+
+      int zoom = this.queryZoomForScale(worldScale);
+      TellusOsmSandSource.TileKey first = tileKeyForBlock(Math.min(minBlockX, maxBlockX), Math.min(minBlockZ, maxBlockZ), worldScale, zoom);
+      TellusOsmSandSource.TileKey second = tileKeyForBlock(Math.max(minBlockX, maxBlockX), Math.max(minBlockZ, maxBlockZ), worldScale, zoom);
+      if (first == null || second == null) {
+         return List.of();
+      }
+
+      List<TellusOsmSandSource.TileKey> keys = new ArrayList<>();
+      int tilesPerAxis = 1 << zoom;
+      int padding = Math.max(0, paddingTiles);
+      int minX = Math.max(0, Math.min(first.x(), second.x()) - padding);
+      int maxX = Math.min(tilesPerAxis - 1, Math.max(first.x(), second.x()) + padding);
+      int minY = Math.max(0, Math.min(first.y(), second.y()) - padding);
+      int maxY = Math.min(tilesPerAxis - 1, Math.max(first.y(), second.y()) + padding);
+      for (int tileY = minY; tileY <= maxY; tileY++) {
+         for (int tileX = minX; tileX <= maxX; tileX++) {
+            keys.add(new TellusOsmSandSource.TileKey(zoom, tileX, tileY));
+         }
+      }
+      return keys;
+   }
+
    private int queryZoomForScale(double worldScale) {
       this.ensureInitialized();
       if (worldScale <= 0.0) {
@@ -164,7 +229,9 @@ public final class TellusOsmSandSource implements TellusCacheHandle {
          this.cache.invalidate(key);
       }
 
-      OsmQueryMode queryMode = mode == null ? OsmQueryMode.BLOCKING : mode;
+      OsmQueryMode queryMode = ManagedTerrainNetworkPolicy.isCacheOnly()
+         ? OsmQueryMode.BLOCKING
+         : mode == null ? OsmQueryMode.BLOCKING : mode;
       if (queryMode == OsmQueryMode.NON_BLOCKING) {
          this.queueAsyncLoad(key);
          return new TellusOsmSandSource.TileLookup(OsmSandTile.empty(), true);
@@ -265,6 +332,19 @@ public final class TellusOsmSandSource implements TellusCacheHandle {
          this.tileLoadFailures.remove(key);
          OsmPerf.recordTileLoad(OsmPerf.TileSource.OSM_SAND, OsmPerf.TileLoadPath.NETWORK);
          return parsed;
+      }
+   }
+
+   private void downloadRawTile(TellusOsmSandSource.TileKey key) {
+      Path cachePath = this.cachePathFor(key);
+      if (Files.isRegularFile(cachePath)) {
+         return;
+      }
+
+      long generation = TellusCacheRegistry.generation(TellusCacheDomain.OSM);
+      byte[] payload = this.fetchTilePayloadWithRetry(key);
+      if (!TellusCacheRegistry.isCurrent(TellusCacheDomain.OSM, generation) || !this.cacheTile(cachePath, payload, generation)) {
+         throw new RuntimeException("Discarded stale Overture sand cache write for " + key);
       }
    }
 
@@ -454,13 +534,18 @@ public final class TellusOsmSandSource implements TellusCacheHandle {
       }
    }
 
-   private static boolean isSandLikeFeature(Map<String, Object> tags) {
+   static boolean isSandLikeFeature(Map<String, Object> tags) {
       String subtype = nonBlank(asString(tags.get("subtype")));
       if (SAND_SUBTYPE.equalsIgnoreCase(subtype)) {
          return true;
       } else {
          String classTag = nonBlank(asString(tags.get("class")));
-         return "sand".equalsIgnoreCase(classTag) || "beach".equalsIgnoreCase(classTag) || "dune".equalsIgnoreCase(classTag);
+         if ("sand".equalsIgnoreCase(classTag) || "beach".equalsIgnoreCase(classTag) || "dune".equalsIgnoreCase(classTag)) {
+            return true;
+         }
+
+         String surface = nonBlank(asString(tags.get("surface")));
+         return "sand".equalsIgnoreCase(surface) || "recreation_sand".equalsIgnoreCase(surface);
       }
    }
 

@@ -12,8 +12,9 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.yucareux.tellus.Tellus;
-import com.yucareux.tellus.config.OvertureDataConfig;
 import com.yucareux.tellus.config.TellusEndpointConfig;
+import com.yucareux.tellus.integration.distant_horizons.managed.ManagedTerrainNetworkPolicy;
+import com.yucareux.tellus.world.data.source.ParallelDownloadRunner;
 import com.yucareux.tellus.worldgen.EarthProjection;
 import io.github.sebasbaumh.mapbox.vectortile.VectorTile.Tile;
 import io.github.sebasbaumh.mapbox.vectortile.VectorTile.Tile.Feature;
@@ -35,15 +36,18 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BiConsumer;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
-import net.fabricmc.loader.api.FabricLoader;
+import com.yucareux.tellus.platform.TellusPlatform;
 import net.minecraft.util.Mth;
 import net.minecraft.Util;
 
 public final class TellusOsmRoadSource implements TellusCacheHandle {
-   // 官方道路瓦片地址：发布版本号由 OvertureDataConfig 统一管理，可用 -Dtellus.overture.release 覆盖
-   private static final String DEFAULT_PM_TILES_URL = OvertureDataConfig.officialTileUrl("transportation");
+   // 上游用主题名向 S3 列出发布目录并挑选最新版本，避免写死的版本号过期后整层数据 404
+   private static final String PM_TILES_THEME = "transportation";
+   // 官方道路瓦片地址：发布版本交给上游 OvertureTileUrls 自动发现，可用 -Dtellus.overture.release 覆盖
+   private static final String DEFAULT_PM_TILES_URL = OvertureTileUrls.defaultThemeUrl(PM_TILES_THEME);
    private static final double MIN_LAT = -85.05112878;
    private static final double MAX_LAT = 85.05112878;
    private static final double MIN_LON = -180.0;
@@ -51,8 +55,8 @@ public final class TellusOsmRoadSource implements TellusCacheHandle {
    private static final double METERS_PER_DEGREE = 111319.49166666667;
    private static final double POINT_EPSILON = 1.0E-9;
    private static final int DEFAULT_TILE_EXTENT = 4096;
-   private static final int CONNECT_TIMEOUT_MS = intProperty("tellus.overture.roads.connectTimeoutMs", 7000, 1, 120000);
-   private static final int READ_TIMEOUT_MS = intProperty("tellus.overture.roads.readTimeoutMs", 20000, 1, 180000);
+   private static final int CONNECT_TIMEOUT_MS = intProperty("tellus.overture.roads.connectTimeoutMs", 30000, 1, 120000);
+   private static final int READ_TIMEOUT_MS = intProperty("tellus.overture.roads.readTimeoutMs", 60000, 1, 180000);
    private static final int DIRECTORY_CACHE_ENTRIES = intProperty("tellus.overture.roads.dirCache", 256, 1, 8192);
    private static final int MAX_CACHE_TILES = intProperty("tellus.osm.roads.cacheTiles", 256, 1, 8192);
    private static final int QUERY_ZOOM = intProperty("tellus.osm.roads.queryZoom", 14, 0, 20);
@@ -62,7 +66,7 @@ public final class TellusOsmRoadSource implements TellusCacheHandle {
    private static final int PMTILES_TILETYPE_MVT = 1;
    private static final String SEGMENT_LAYER_NAME = "segment";
    private static final byte[] EMPTY_TILE_PAYLOAD = new byte[0];
-   private final Path cacheRoot = FabricLoader.getInstance().getGameDir().resolve("tellus/cache/map/roads");
+   private final Path cacheRoot;
    private final PmTilesRangeReader pmTilesReader;
    private final Object initLock = new Object();
    private final LoadingCache<TellusOsmRoadSource.TileKey, OverpassRoadTile> cache;
@@ -75,8 +79,12 @@ public final class TellusOsmRoadSource implements TellusCacheHandle {
    public TellusOsmRoadSource() {
       // 收集候选瓦片地址：镜像地址优先，官方地址兜底，避免单个镜像路由失效就整体禁用道路
       List<String> pmTilesUrls = TellusEndpointConfig.getOvertureRoadsCandidates(DEFAULT_PM_TILES_URL);
-      // 用多地址读取器，只有读到合法文件头时才固定生效地址，防止坏地址导致道路全部缺失
-      this.pmTilesReader = new PmTilesRangeReader(pmTilesUrls, CONNECT_TIMEOUT_MS, READ_TIMEOUT_MS, DIRECTORY_CACHE_ENTRIES);
+      // 缓存目录按主地址做命名空间隔离，避免镜像与官方源的同名瓦片互相当作缓存命中
+      this.cacheRoot = TellusPlatform.gameDir()
+         .resolve("tellus/cache/map/roads")
+         .resolve(OvertureTileUrls.cacheNamespace(pmTilesUrls.get(0)));
+      // 用候选列表共享读取器：与其它数据层读到同一个压缩包时可共用文件头与目录缓存
+      this.pmTilesReader = PmTilesRangeReader.shared(pmTilesUrls, CONNECT_TIMEOUT_MS, READ_TIMEOUT_MS, DIRECTORY_CACHE_ENTRIES);
       this.cache = CacheBuilder.newBuilder().maximumSize(MAX_CACHE_TILES).build(new CacheLoader<TellusOsmRoadSource.TileKey, OverpassRoadTile>() {
          public OverpassRoadTile load(TellusOsmRoadSource.TileKey key) {
             return TellusOsmRoadSource.this.loadTile(key);
@@ -173,6 +181,43 @@ public final class TellusOsmRoadSource implements TellusCacheHandle {
       }
    }
 
+   public int downloadAreaTaskCount(int minBlockX, int minBlockZ, int maxBlockX, int maxBlockZ, double worldScale, int marginBlocks) {
+      return Math.max(1, this.downloadAreaTileKeys(minBlockX, minBlockZ, maxBlockX, maxBlockZ, worldScale, marginBlocks).size());
+   }
+
+   public int downloadAreaInputs(
+      int minBlockX, int minBlockZ, int maxBlockX, int maxBlockZ, double worldScale, int marginBlocks,
+      int completedUnits, BiConsumer<Integer, String> progressConsumer
+   ) {
+      BiConsumer<Integer, String> progress = progressConsumer == null ? (completed, detail) -> {
+      } : progressConsumer;
+      List<TellusOsmRoadSource.TileKey> keys = this.downloadAreaTileKeys(minBlockX, minBlockZ, maxBlockX, maxBlockZ, worldScale, marginBlocks);
+      if (keys.isEmpty()) {
+         progress.accept(completedUnits, "Skipping OSM road tiles because the source is unavailable");
+         return completedUnits + 1;
+      }
+      int startingUnits = completedUnits;
+      progress.accept(completedUnits, "Downloading " + keys.size() + " OSM road source tiles");
+      return ParallelDownloadRunner.run(ParallelDownloadRunner.scope("osm-roads", TellusCacheRegistry.generation(TellusCacheDomain.OSM)), keys, completedUnits, this::downloadRawTile, (key, completed, phaseTotal) -> progress.accept(
+         completed, "Cached OSM road tile " + (completed - startingUnits) + "/" + phaseTotal + " (" + key.zoom() + "/" + key.x() + "/" + key.y() + ")"
+      ));
+   }
+
+   private List<TellusOsmRoadSource.TileKey> downloadAreaTileKeys(
+      int minBlockX, int minBlockZ, int maxBlockX, int maxBlockZ, double worldScale, int marginBlocks
+   ) {
+      this.ensureInitialized();
+      if (!this.available || worldScale <= 0.0) {
+         return List.of();
+      }
+
+      TellusOsmRoadSource.GeoBounds bounds = geoBoundsForBlockArea(minBlockX, minBlockZ, maxBlockX, maxBlockZ, marginBlocks, worldScale);
+      if (bounds == null) {
+         return List.of();
+      }
+      return tileKeysForBounds(bounds, this.queryZoom);
+   }
+
    public void prefetchTiles(double blockX, double blockZ, double worldScale, int radius) {
       this.ensureInitialized();
       if (this.available && !(worldScale <= 0.0) && radius > 0) {
@@ -208,7 +253,9 @@ public final class TellusOsmRoadSource implements TellusCacheHandle {
          this.cache.invalidate(key);
       }
 
-      OsmQueryMode queryMode = mode == null ? OsmQueryMode.BLOCKING : mode;
+      OsmQueryMode queryMode = ManagedTerrainNetworkPolicy.isCacheOnly()
+         ? OsmQueryMode.BLOCKING
+         : mode == null ? OsmQueryMode.BLOCKING : mode;
       if (queryMode == OsmQueryMode.NON_BLOCKING) {
          this.queueAsyncLoad(key);
          return new TellusOsmRoadSource.TileLookup(OverpassRoadTile.empty(), true);
@@ -310,6 +357,19 @@ public final class TellusOsmRoadSource implements TellusCacheHandle {
          this.tileLoadFailures.remove(key);
          OsmPerf.recordTileLoad(OsmPerf.TileSource.OSM_ROADS, OsmPerf.TileLoadPath.NETWORK);
          return parsed;
+      }
+   }
+
+   private void downloadRawTile(TellusOsmRoadSource.TileKey key) {
+      Path cachePath = this.cachePathFor(key);
+      if (Files.isRegularFile(cachePath)) {
+         return;
+      }
+
+      long generation = TellusCacheRegistry.generation(TellusCacheDomain.OSM);
+      byte[] payload = this.fetchTilePayloadWithRetry(key);
+      if (!TellusCacheRegistry.isCurrent(TellusCacheDomain.OSM, generation) || !this.cacheTile(cachePath, payload, generation)) {
+         throw new RuntimeException("Discarded stale Overture road cache write for " + key);
       }
    }
 

@@ -4,6 +4,7 @@ import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
 import com.yucareux.tellus.Tellus;
+import com.yucareux.tellus.integration.distant_horizons.managed.ManagedTerrainNetworkPolicy;
 import com.yucareux.tellus.world.data.source.DownloadProgressReporter;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -16,14 +17,18 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.zip.GZIPInputStream;
 
-final class PmTilesRangeReader {
+public final class PmTilesRangeReader {
    private static final int HEADER_SIZE = 127;
    private static final int MAX_DIRECTORY_DEPTH = 6;
    private static final int COMPRESSION_NONE = 1;
    private static final int COMPRESSION_GZIP = 2;
    private static final int PMTILES_VERSION = 3;
+   // 共享读取器缓存：同一组候选地址只保留一个实例，避免建筑与道路重复建立目录缓存
+   private static final ConcurrentHashMap<ReaderKey, PmTilesRangeReader> SHARED_READERS = new ConcurrentHashMap<>();
    // 按列表顺序尝试的候选数据源地址，第一个能读到合法文件头的会被固定下来
    private final List<URI> candidateUris;
    // 当前生效的数据源地址，读取期间保持不变，避免不同版本的文件偏移被混用
@@ -31,19 +36,22 @@ final class PmTilesRangeReader {
    private final int connectTimeoutMs;
    private final int readTimeoutMs;
    private final LoadingCache<PmTilesRangeReader.DirectoryKey, PmTilesRangeReader.Directory> directoryCache;
+   private final LoadingCache<Long, TilePayload> tilePayloadCache;
    
    private PmTilesRangeReader.PmTilesHeader header;
    
    private PmTilesRangeReader.Directory rootDirectory;
 
    // 单地址构造：保持与水域、沙地等既有调用方兼容
-   PmTilesRangeReader(String url, int connectTimeoutMs, int readTimeoutMs, int directoryCacheEntries) {
+   public PmTilesRangeReader(String url, int connectTimeoutMs, int readTimeoutMs, int directoryCacheEntries) {
       // 把单个地址包装成只有一个候选的列表，复用下面的多地址逻辑
       this(List.of(Objects.requireNonNull(url, "url")), connectTimeoutMs, readTimeoutMs, directoryCacheEntries);
    }
 
    // 多地址构造：按列表顺序尝试，通常第一个是国内镜像，第二个是官方源兜底
-   PmTilesRangeReader(List<String> urls, int connectTimeoutMs, int readTimeoutMs, int directoryCacheEntries) {
+   public PmTilesRangeReader(List<String> urls, int connectTimeoutMs, int readTimeoutMs, int directoryCacheEntries) {
+      // 喵~防御：候选列表整体为 null 时立刻抛错，避免后面取 size 时出现难定位的空指针
+      Objects.requireNonNull(urls, "urls");
       // 预先按候选数量分配容量，避免解析过程中扩容
       List<URI> parsedUris = new ArrayList<>(urls.size());
       // 逐个把字符串地址解析成 URI 对象
@@ -70,9 +78,74 @@ final class PmTilesRangeReader {
                return PmTilesRangeReader.this.readDirectory(key.offset, key.length);
             }
          });
+      this.tilePayloadCache = CacheBuilder.newBuilder()
+         .maximumSize(Math.max(8, Math.min(512, directoryCacheEntries)))
+         .build(new CacheLoader<Long, TilePayload>() {
+            @Override
+            public TilePayload load(Long tileId) throws Exception {
+               return PmTilesRangeReader.this.loadTilePayload(tileId);
+            }
+         });
    }
 
-   PmTilesRangeReader.PmTilesHeader header() throws IOException {
+   /**
+    * 共享读取器工厂（单地址重载）：只有一个数据源时使用，内部委托给候选列表版本。
+    *
+    * 输入：单个数据源地址、连接超时、读取超时、目录缓存条目数。
+    * 输出：可复用的 PmTilesRangeReader 实例。
+    * 边界条件：地址为 null 时由 List.of 与下层构造函数共同拦截并抛异常。
+    */
+   public static PmTilesRangeReader shared(String url, int connectTimeoutMs, int readTimeoutMs, int directoryCacheEntries) {
+      // 喵~防御：地址为 null 时立刻抛错，避免把 null 包装进列表后在下层才失败
+      return shared(List.of(Objects.requireNonNull(url, "url")), connectTimeoutMs, readTimeoutMs, directoryCacheEntries);
+   }
+
+   /**
+    * 共享读取器工厂：把"同一组候选地址 + 同一组超时/缓存参数"的读取器合并成一个实例。
+    *
+    * 整体思路：建筑层与道路层经常读取同一个 Overture PMTiles 压缩包，
+    * 如果各自 new 一个读取器，文件头与目录缓存会被重复下载与重复占用内存。
+    * 这里用 ConcurrentHashMap 做进程内去重，key 为规范化后的候选地址列表与三个参数。
+    *
+    * 输入：候选地址列表（通常"镜像在前、官方在后"）、连接超时、读取超时、目录缓存条目数。
+    * 输出：可复用的 PmTilesRangeReader 实例。
+    * 边界条件：地址列表为 null 或空、列表里某个地址为 null 时直接抛异常，
+    * 避免返回一个永远读不到数据却又不报错的读取器。
+    */
+   public static PmTilesRangeReader shared(List<String> urls, int connectTimeoutMs, int readTimeoutMs, int directoryCacheEntries) {
+      // 喵~防御：候选地址列表为 null 时立刻抛错，避免后面遍历时出现难定位的空指针
+      Objects.requireNonNull(urls, "urls");
+      // 规范化每个候选地址，去掉 "./"、"../" 这类多余路径段，保证同一地址只对应一个缓存键
+      List<URI> normalizedUris = new ArrayList<>(urls.size());
+      // 逐个规范化候选地址
+      for (String url : urls) {
+         // 喵~防御：单个地址为 null 时立刻抛错，避免拼出非法 URI
+         normalizedUris.add(URI.create(Objects.requireNonNull(url, "url")).normalize());
+      }
+      // 喵~防御：候选列表为空时抛错，避免造出无法工作的共享读取器
+      if (normalizedUris.isEmpty()) {
+         throw new IllegalArgumentException("PMTiles requires at least one source URL");
+      }
+      // 用"规范化候选地址列表 + 三个超时/缓存参数"作为缓存键，同键只保留一个实例
+      ReaderKey key = new ReaderKey(
+         List.copyOf(normalizedUris),
+         Math.max(1, connectTimeoutMs),
+         Math.max(1, readTimeoutMs),
+         Math.max(1, directoryCacheEntries)
+      );
+      // 已存在就直接复用，否则按同样的候选列表新建一个读取器
+      return SHARED_READERS.computeIfAbsent(
+         key,
+         ignored -> new PmTilesRangeReader(
+            key.uris().stream().map(URI::toString).toList(),
+            key.connectTimeoutMs(),
+            key.readTimeoutMs(),
+            key.directoryCacheEntries()
+         )
+      );
+   }
+
+   public synchronized PmTilesRangeReader.PmTilesHeader header() throws IOException {
       if (this.header == null) {
          this.header = this.readHeader();
       }
@@ -81,15 +154,27 @@ final class PmTilesRangeReader {
    }
 
    
-   byte[] getTileBytes(int z, int x, int y) throws IOException {
+   public byte[] getTileBytes(int z, int x, int y) throws IOException {
       long tileId = zxyToTileId(z, x, y);
+      try {
+         TilePayload payload = this.tilePayloadCache.get(tileId);
+         return payload.found() ? payload.bytes() : null;
+      } catch (ExecutionException error) {
+         if (error.getCause() instanceof IOException io) {
+            throw io;
+         }
+         throw new IOException("Failed to read PMTiles tile " + z + "/" + x + "/" + y, error.getCause());
+      }
+   }
+
+   private TilePayload loadTilePayload(long tileId) throws IOException {
       PmTilesRangeReader.PmTilesHeader header = this.header();
       PmTilesRangeReader.Directory directory = this.getRootDirectory();
 
       for (int depth = 0; depth < MAX_DIRECTORY_DEPTH; depth++) {
          PmTilesRangeReader.Entry entry = findTile(directory.entries, tileId);
          if (entry == null) {
-            return null;
+            return TilePayload.missing();
          }
 
          if (entry.runLength != 0L) {
@@ -99,7 +184,7 @@ final class PmTilesRangeReader {
             }
 
             byte[] tileBytes = this.readBytes(dataOffset, (int)entry.length);
-            return decompress(tileBytes, header.tileCompression);
+            return TilePayload.found(decompress(tileBytes, header.tileCompression));
          }
 
          long dirOffset = header.leafDirectoryOffset + entry.offset;
@@ -107,10 +192,10 @@ final class PmTilesRangeReader {
          directory = this.getDirectory(dirOffset, dirLength);
       }
 
-      return null;
+      return TilePayload.missing();
    }
 
-   private PmTilesRangeReader.Directory getRootDirectory() throws IOException {
+   private synchronized PmTilesRangeReader.Directory getRootDirectory() throws IOException {
       if (this.rootDirectory == null) {
          PmTilesRangeReader.PmTilesHeader header = this.header();
          this.rootDirectory = this.getDirectory(header.rootOffset, header.rootLength);
@@ -254,6 +339,10 @@ final class PmTilesRangeReader {
       if (length <= 0) {
          return new byte[0];
       } else {
+         // 喵~防御：受管远距地形生成期间禁止联网，只允许读本地缓存
+         if (ManagedTerrainNetworkPolicy.isCacheOnly()) {
+            throw new IOException("Network access is disabled during managed Distant Horizons generation");
+         }
          // 针对指定数据源地址建立 HTTP 连接
          HttpURLConnection connection = (HttpURLConnection)sourceUri.toURL().openConnection();
          connection.setRequestProperty("Range", "bytes=" + offset + "-" + (offset + length - 1L));
@@ -485,6 +574,20 @@ final class PmTilesRangeReader {
    private record DirectoryKey(long offset, long length) {
    }
 
+   // 共享读取器的缓存键：候选地址列表（已规范化）+ 连接超时 + 读取超时 + 目录缓存条目数
+   private record ReaderKey(List<URI> uris, int connectTimeoutMs, int readTimeoutMs, int directoryCacheEntries) {
+   }
+
+   private record TilePayload(byte[] bytes, boolean found) {
+      private static TilePayload found(byte[] bytes) {
+         return new TilePayload(Objects.requireNonNull(bytes, "bytes"), true);
+      }
+
+      private static TilePayload missing() {
+         return new TilePayload(new byte[0], false);
+      }
+   }
+
    private static final class Entry {
       private final long tileId;
       private long offset;
@@ -499,7 +602,7 @@ final class PmTilesRangeReader {
       }
    }
 
-   static final class PmTilesHeader {
+   public static final class PmTilesHeader {
       private final long rootOffset;
       private final long rootLength;
       private final long leafDirectoryOffset;

@@ -22,7 +22,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.zip.InflaterInputStream;
-import net.fabricmc.loader.api.FabricLoader;
+import com.yucareux.tellus.platform.TellusPlatform;
 import net.minecraft.util.Mth;
 
 public final class TellusKoppenSource implements TellusCacheHandle {
@@ -44,7 +44,7 @@ public final class TellusKoppenSource implements TellusCacheHandle {
    private static final ThreadLocal<TellusKoppenSource.KoppenBlendScratch> DITHER_SCRATCH = ThreadLocal.withInitial(
       TellusKoppenSource.KoppenBlendScratch::new
    );
-   private final Path cachePath = FabricLoader.getInstance().getGameDir().resolve("tellus/cache/koppen/koppen_geiger_0p00833333.tif");
+   private final Path cachePath = TellusPlatform.gameDir().resolve("tellus/cache/koppen/koppen_geiger_0p00833333.tif");
    private volatile TellusKoppenSource.GeoTiffRaster raster;
 
    public TellusKoppenSource() {

@@ -8,7 +8,6 @@ import net.minecraft.world.level.biome.Biome.Precipitation;
 public final class TellusRealtimeState {
    private static final float SNOW_THRESHOLD = 0.35F;
    private static final float SNOW_JITTER = 0.15F;
-   private static final float FREEZING_TEMPERATURE_C = 0.0F;
    private static volatile boolean weatherEnabled;
    private static volatile boolean historicalSnowEnabled;
    private static volatile TellusRealtimeState.PrecipitationMode precipitationMode = TellusRealtimeState.PrecipitationMode.CLEAR;
@@ -82,9 +81,8 @@ public final class TellusRealtimeState {
       return WeatherTemperaturePolicy.hasTemperature(realWorldTemperatureC(pos));
    }
 
-   public static Boolean waterFreezeOverride(BlockPos pos) {
-      float temperatureC = realWorldTemperatureC(pos);
-      return WeatherTemperaturePolicy.hasTemperature(temperatureC) ? temperatureC <= FREEZING_TEMPERATURE_C : null;
+   public static boolean canWaterFreeze(BlockPos pos, boolean ocean) {
+      return WeatherTemperaturePolicy.canWaterFreeze(ocean, realWorldTemperatureC(pos));
    }
 
    public static Precipitation precipitationOverride(boolean biomeHasPrecipitation, BlockPos pos) {

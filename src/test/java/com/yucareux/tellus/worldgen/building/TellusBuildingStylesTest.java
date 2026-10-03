@@ -7,6 +7,9 @@ import com.yucareux.tellus.worldgen.TellusBlockReferences;
 import net.minecraft.SharedConstants;
 import net.minecraft.core.Direction;
 import net.minecraft.server.Bootstrap;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -183,6 +186,20 @@ class TellusBuildingStylesTest {
          );
          assertTrue(TellusBuildingMaterials.hasMatchingRoofStair(TellusBuildingMaterials.resolvePalette(residentialProfile, residentialStyle, seed).roof()));
       }
+   }
+
+   @Test
+   void roofStairHelperMatchesResolvedRoofMaterial() {
+      SharedConstants.tryDetectVersion();
+      Bootstrap.bootStrap();
+      BuildingProfile houseProfile = pitchedProfile(BuildingProfile.BuildingCategory.HOUSE, BuildingProfile.RoofProfile.GABLED_X);
+      BuildingStyle houseStyle = TellusBuildingStyles.resolveBuildingStyle(houseProfile, metadata("house", "brick", null), 180.0, 14, 10, 77L);
+      TellusBuildingMaterials.BuildingMaterialPalette palette = TellusBuildingMaterials.resolvePalette(houseProfile, houseStyle, 77L);
+
+      BlockState stair = TellusBuildingMaterials.resolveRoofStairBlock(palette, Direction.EAST);
+
+      assertEquals(Blocks.BRICK_STAIRS, stair.getBlock());
+      assertEquals(Direction.EAST, stair.getValue(BlockStateProperties.HORIZONTAL_FACING));
    }
 
    @Test

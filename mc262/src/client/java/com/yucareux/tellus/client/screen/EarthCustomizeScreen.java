@@ -5,15 +5,13 @@ import com.mojang.serialization.Lifecycle;
 import com.yucareux.tellus.Tellus;
 import com.yucareux.tellus.cache.TellusCacheDomain;
 import com.yucareux.tellus.cache.TellusCacheRegistry;
-import com.yucareux.tellus.config.HmaAccessConfig;
 import com.yucareux.tellus.client.preview.TerrainPreview;
 import com.yucareux.tellus.client.preview.TerrainPreviewWidget;
 import com.yucareux.tellus.client.widget.CustomizationList;
 import com.yucareux.tellus.worldgen.EarthChunkGenerator;
 import com.yucareux.tellus.worldgen.EarthGeneratorSettings;
+import com.yucareux.tellus.worldgen.ExperimentalHeightSupport;
 import java.io.IOException;
-import java.net.HttpURLConnection;
-import java.net.URI;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
@@ -52,7 +50,6 @@ import net.minecraft.client.gui.components.AbstractSliderButton;
 import net.minecraft.client.gui.components.AbstractWidget;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.CycleButton;
-import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.components.Button.OnPress;
 import net.minecraft.client.gui.components.CycleButton.Builder;
@@ -117,6 +114,7 @@ public class EarthCustomizeScreen extends Screen {
    private double spawnLatitude = 27.9881;
    private double spawnLongitude = 86.925;
    private long randomBiomeSeed = EarthGeneratorSettings.DEFAULT.randomBiomeSeed();
+   private Component validationError;
 
    public EarthCustomizeScreen(CreateWorldScreen parent, WorldCreationContext worldCreationContext) {
       super(TITLE);
@@ -143,6 +141,7 @@ public class EarthCustomizeScreen extends Screen {
       this.previewWidget = new TerrainPreviewWidget(previewX, listTop, previewWidth, previewHeight, this.preview);
       this.previewWidget.setFullscreenAction(this::openPreviewFullScreen);
       this.previewWidget.setAutoAdjustAction(this::applyPreviewAutoAdjust);
+      this.updatePreviewAutoAdjustState();
       if (this.pendingPreviewViewState != null) {
          this.previewWidget.setViewState(this.pendingPreviewViewState);
          this.pendingPreviewViewState = null;
@@ -166,10 +165,13 @@ public class EarthCustomizeScreen extends Screen {
    }
 
    private void onSettingsChanged() {
+      this.validationError = null;
       this.previewDirtyAt = System.currentTimeMillis();
+      this.updatePreviewAutoAdjustState();
    }
 
    public void applySpawnpoint(double latitude, double longitude) {
+      this.validationError = null;
       this.spawnLatitude = latitude;
       this.spawnLongitude = longitude;
       this.previewDirtyAt = System.currentTimeMillis();
@@ -200,15 +202,15 @@ public class EarthCustomizeScreen extends Screen {
 
    public EarthGeneratorSettings applyPreviewAutoAdjust(TerrainPreview.PreviewInfo info) {
       EarthGeneratorSettings current = this.buildSettings();
+      if (current.experimentalIncreaseHeight()) {
+         return current;
+      }
+
       double targetWorldScale = findBestWorldScale(current, info);
       int targetHeightOffset = findBestHeightOffset(current, info, targetWorldScale);
       int delta = targetHeightOffset - current.heightOffset();
       this.setSliderValue("world_scale", targetWorldScale);
       this.setSliderValue("height_offset", targetHeightOffset);
-      if (!current.isSeaLevelAutomatic()) {
-         this.setSliderValue("sea_level", current.seaLevel() + delta);
-      }
-
       if (current.minAltitude() != Integer.MIN_VALUE) {
          this.setSliderValue("min_altitude", current.minAltitude() + delta);
       }
@@ -229,10 +231,18 @@ public class EarthCustomizeScreen extends Screen {
          EarthGeneratorSettings settings = Objects.requireNonNull(this.buildSettings(), "generatorSettings");
          WorldCreationContext current = Objects.requireNonNull(this.parent.getUiState().getSettings(), "worldCreationContext");
          EarthGeneratorSettings.HeightLimits limits = Objects.requireNonNull(EarthGeneratorSettings.resolveHeightLimits(settings), "heightLimits");
-         WorldCreationContext updated = Objects.requireNonNull(updateWorldCreationContext(current, settings, limits), "updatedWorldContext");
-         this.parent.getUiState().setSettings(updated);
-         this.preview.close();
-         this.minecraft.gui.setScreen(this.parent);
+         try {
+            ExperimentalHeightSupport.validateOrThrow(settings, limits);
+            WorldCreationContext updated = Objects.requireNonNull(updateWorldCreationContext(current, settings, limits), "updatedWorldContext");
+            this.parent.getUiState().setSettings(updated);
+            this.preview.close();
+            this.minecraft.gui.setScreen(this.parent);
+         } catch (IllegalStateException error) {
+            Tellus.LOGGER.warn("Tellus world settings validation failed", error);
+            this.validationError = settings.experimentalIncreaseHeight() && !ExperimentalHeightSupport.isRuntimeProfileActive()
+               ? experimentalHeightValidationFailedTooltip()
+               : Component.literal(error.getMessage()).withStyle(ChatFormatting.RED);
+         }
       }
    }
 
@@ -403,16 +413,75 @@ public class EarthCustomizeScreen extends Screen {
       super.removed();
    }
 
+   public EarthGeneratorSettings currentGeneratorSettings() {
+      return this.buildSettings();
+   }
+
+   public void applyPreloadSettings(EarthGeneratorSettings settings) {
+      Objects.requireNonNull(settings, "settings");
+      this.spawnLatitude = settings.spawnLatitude();
+      this.spawnLongitude = settings.spawnLongitude();
+      this.setSliderValue("world_scale", settings.worldScale());
+      this.setToggleValue("cave_generation", settings.caveGeneration());
+      this.setToggleValue("ore_distribution", settings.oreDistribution());
+      this.setToggleValue("enable_roads", settings.enableRoads());
+      this.setToggleValue("enable_buildings", settings.enableBuildings());
+      this.setToggleValue("thin_shell_terrain", settings.thinShellTerrain());
+      this.setToggleValue("add_strongholds", settings.addStrongholds());
+      this.setToggleValue("add_villages", settings.addVillages());
+      this.setToggleValue("add_mineshafts", settings.addMineshafts());
+      this.setToggleValue("add_ocean_monuments", settings.addOceanMonuments());
+      this.setToggleValue("add_woodland_mansions", settings.addWoodlandMansions());
+      this.setToggleValue("add_desert_temples", settings.addDesertTemples());
+      this.setToggleValue("add_jungle_temples", settings.addJungleTemples());
+      this.setToggleValue("add_pillager_outposts", settings.addPillagerOutposts());
+      this.setToggleValue("add_ruined_portals", settings.addRuinedPortals());
+      this.setToggleValue("add_shipwrecks", settings.addShipwrecks());
+      this.setToggleValue("add_ocean_ruins", settings.addOceanRuins());
+      this.setToggleValue("add_buried_treasure", settings.addBuriedTreasure());
+      this.setToggleValue("add_igloos", settings.addIgloos());
+      this.setToggleValue("add_witch_huts", settings.addWitchHuts());
+      this.setToggleValue("add_ancient_cities", settings.addAncientCities());
+      this.setToggleValue("add_trial_chambers", settings.addTrialChambers());
+      this.setToggleValue("add_trail_ruins", settings.addTrailRuins());
+      this.setToggleValue("experimental_increase_height", settings.experimentalIncreaseHeight() && ExperimentalHeightSupport.isRuntimeProfileActive());
+      this.applyPreloadHeightGuard(settings);
+      this.onSettingsChanged();
+   }
+
+   private void applyPreloadHeightGuard(EarthGeneratorSettings settings) {
+      if (settings.experimentalIncreaseHeight()) {
+         return;
+      }
+
+      EarthGeneratorSettings.HeightLimits limits = EarthGeneratorSettings.resolveHeightLimits(settings);
+      if (limits.height() >= EarthGeneratorSettings.MAX_WORLD_HEIGHT || limits.minY() <= EarthGeneratorSettings.MIN_WORLD_Y) {
+         this.setToggleValue("experimental_increase_height", false);
+         this.setSliderValue("min_altitude", -64.0);
+         this.setSliderValue("max_altitude", 511.0);
+      }
+   }
+
    
    private EarthGeneratorSettings buildSettings() {
       double worldScale = this.findSliderValue("world_scale", EarthGeneratorSettings.DEFAULT.worldScale());
       EarthGeneratorSettings.DemSelection demSelection = this.buildDemSelection();
+      boolean experimentalIncreaseHeight = this.findToggleValue(
+         "experimental_increase_height", EarthGeneratorSettings.DEFAULT.experimentalIncreaseHeight()
+      );
       double terrestrialScale = this.findSliderValue("terrestrial_height_scale", EarthGeneratorSettings.DEFAULT.terrestrialHeightScale());
       double oceanicScale = this.findSliderValue("oceanic_height_scale", EarthGeneratorSettings.DEFAULT.oceanicHeightScale());
       int heightOffset = (int)Math.round(this.findSliderValue("height_offset", EarthGeneratorSettings.DEFAULT.heightOffset()));
-      int seaLevel = this.resolveSeaLevelSetting("sea_level", -64.0);
       int maxAltitude = this.resolveAltitudeSetting("max_altitude", -1.0);
       int minAltitude = this.resolveAltitudeSetting("min_altitude", -2048.0);
+      if (experimentalIncreaseHeight) {
+         terrestrialScale = 1.0;
+         oceanicScale = 1.0;
+         heightOffset = EarthGeneratorSettings.EXPERIMENTAL_HEIGHT_OFFSET;
+         minAltitude = EarthGeneratorSettings.AUTO_ALTITUDE;
+         maxAltitude = EarthGeneratorSettings.AUTO_ALTITUDE;
+      }
+
       int riverLakeShorelineBlend = EarthGeneratorSettings.DEFAULT.riverLakeShorelineBlend();
       int oceanShorelineBlend = EarthGeneratorSettings.DEFAULT.oceanShorelineBlend();
       boolean shorelineBlendCliffLimit = EarthGeneratorSettings.DEFAULT.shorelineBlendCliffLimit();
@@ -421,7 +490,6 @@ public class EarthCustomizeScreen extends Screen {
       boolean lavaPools = this.findToggleValue("lava_pools", EarthGeneratorSettings.DEFAULT.lavaPools());
       boolean enableRoads = this.findToggleValue("enable_roads", EarthGeneratorSettings.DEFAULT.enableRoads());
       boolean enableBuildings = this.findToggleValue("enable_buildings", EarthGeneratorSettings.DEFAULT.enableBuildings());
-      boolean enableWater = this.findToggleValue("enable_water", EarthGeneratorSettings.DEFAULT.enableWater());
       boolean climateBasedBuiltUpTerrain = this.findToggleValue("climate_based_built_up_terrain", EarthGeneratorSettings.DEFAULT.climateBasedBuiltUpTerrain());
       boolean randomBiomes = this.findToggleValue("random_biomes", EarthGeneratorSettings.DEFAULT.randomBiomes());
       double randomBiomeDensity = this.findSliderValue("random_biome_density", EarthGeneratorSettings.DEFAULT.randomBiomeDensity() * 100.0) / 100.0;
@@ -452,6 +520,12 @@ public class EarthCustomizeScreen extends Screen {
       int distantHorizonsOsmRoadMaxDetail = EarthGeneratorSettings.DEFAULT.distantHorizonsOsmRoadMaxDetail();
       int distantHorizonsOsmBuildingMaxDetail = EarthGeneratorSettings.DEFAULT.distantHorizonsOsmBuildingMaxDetail();
       boolean distantHorizonsOsmNonBlockingFetch = EarthGeneratorSettings.DEFAULT.distantHorizonsOsmNonBlockingFetch();
+      boolean tellusManagedTerrainDownloads = this.findToggleValue(
+         "tellus_managed_terrain_downloads", EarthGeneratorSettings.DEFAULT.tellusManagedTerrainDownloads()
+      );
+      boolean showTerrainDownloadOverlay = this.findToggleValue(
+         "show_terrain_download_overlay", EarthGeneratorSettings.DEFAULT.showTerrainDownloadOverlay()
+      );
       boolean realtimeTime = this.findToggleValue("realtime_time", EarthGeneratorSettings.DEFAULT.realtimeTime());
       boolean realtimeWeather = this.findToggleValue("realtime_weather", EarthGeneratorSettings.DEFAULT.realtimeWeather());
       boolean historicalSnow = false;
@@ -479,7 +553,6 @@ public class EarthCustomizeScreen extends Screen {
          terrestrialScale,
          oceanicScale,
          heightOffset,
-         seaLevel,
          this.spawnLatitude,
          this.spawnLongitude,
          minAltitude,
@@ -524,12 +597,15 @@ public class EarthCustomizeScreen extends Screen {
          demSelection,
          enableRoads,
          enableBuildings,
-         enableWater,
+         true,
          thinShellTerrain,
          climateBasedBuiltUpTerrain,
          randomBiomes,
          randomBiomeDensity,
-         this.randomBiomeSeed
+         this.randomBiomeSeed,
+         experimentalIncreaseHeight,
+         tellusManagedTerrainDownloads,
+         showTerrainDownloadOverlay
       );
    }
 
@@ -565,7 +641,6 @@ public class EarthCustomizeScreen extends Screen {
       this.setSliderValue("terrestrial_height_scale", initialSettings.terrestrialHeightScale());
       this.setSliderValue("oceanic_height_scale", initialSettings.oceanicHeightScale());
       this.setSliderValue("height_offset", initialSettings.heightOffset());
-      this.setSliderValue("sea_level", initialSettings.seaLevel() == -2147483647 ? -64.0 : initialSettings.seaLevel());
       this.setSliderValue("max_altitude", initialSettings.maxAltitude() == Integer.MIN_VALUE ? -1.0 : initialSettings.maxAltitude());
       this.setSliderValue("min_altitude", initialSettings.minAltitude() == Integer.MIN_VALUE ? -2048.0 : initialSettings.minAltitude());
       this.setToggleValue("cave_generation", initialSettings.caveGeneration());
@@ -573,12 +648,12 @@ public class EarthCustomizeScreen extends Screen {
       this.setToggleValue("lava_pools", initialSettings.lavaPools());
       this.setToggleValue("enable_roads", initialSettings.enableRoads());
       this.setToggleValue("enable_buildings", initialSettings.enableBuildings());
-      this.setToggleValue("enable_water", initialSettings.enableWater());
       this.setToggleValue("thin_shell_terrain", initialSettings.thinShellTerrain());
       this.setToggleValue("climate_based_built_up_terrain", initialSettings.climateBasedBuiltUpTerrain());
       this.setToggleValue("random_biomes", initialSettings.randomBiomes());
       this.setSliderValue("random_biome_density", initialSettings.randomBiomeDensity() * 100.0);
       this.randomBiomeSeed = initialSettings.randomBiomeSeed();
+      this.setToggleValue("experimental_increase_height", initialSettings.experimentalIncreaseHeight() && ExperimentalHeightSupport.isRuntimeProfileActive());
       this.setToggleValue("deep_dark", initialSettings.deepDark());
       this.setToggleValue("geodes", initialSettings.geodes());
       this.setToggleValue("add_strongholds", initialSettings.addStrongholds());
@@ -599,6 +674,8 @@ public class EarthCustomizeScreen extends Screen {
       this.setToggleValue("add_trial_chambers", initialSettings.addTrialChambers());
       this.setToggleValue("add_trail_ruins", initialSettings.addTrailRuins());
       this.setToggleValue("distant_horizons_water_resolver", initialSettings.distantHorizonsWaterResolver());
+      this.setToggleValue("tellus_managed_terrain_downloads", initialSettings.tellusManagedTerrainDownloads());
+      this.setToggleValue("show_terrain_download_overlay", initialSettings.showTerrainDownloadOverlay());
       this.setToggleValue("realtime_time", initialSettings.realtimeTime());
       this.setToggleValue("realtime_weather", initialSettings.realtimeWeather());
       this.setToggleValue("historical_snow", false);
@@ -606,6 +683,7 @@ public class EarthCustomizeScreen extends Screen {
       this.setSliderValue("voxy_chunk_pregen_max_radius", initialSettings.voxyChunkPregenMaxRadius());
       this.setSliderValue("voxy_chunk_pregen_chunks_per_tick", initialSettings.voxyChunkPregenChunksPerTick());
       this.setRenderModeValue("distant_horizons_render_mode", initialSettings.distantHorizonsRenderMode());
+      this.updatePreviewAutoAdjustState();
    }
 
    private void setSliderValue(String key, double value) {
@@ -642,22 +720,6 @@ public class EarthCustomizeScreen extends Screen {
    }
 
    private void setDemSelectionValue(EarthGeneratorSettings.DemSelection demSelection) {
-      EarthGeneratorSettings.DemSelection normalized = Objects.requireNonNull(demSelection, "demSelection");
-      this.setToggleValue("dem_automatic", normalized.automatic());
-      for (EarthGeneratorSettings.DemProvider provider : EarthGeneratorSettings.DemSelection.userSelectableProviders()) {
-         this.setDemProviderToggleValue(provider, normalized.isEnabled(provider));
-      }
-   }
-
-   private void setDemProviderToggleValue(EarthGeneratorSettings.DemProvider provider, boolean value) {
-      for (EarthCustomizeScreen.CategoryDefinition category : this.categories) {
-         for (EarthCustomizeScreen.SettingDefinition setting : category.getSettings()) {
-            if (setting instanceof EarthCustomizeScreen.DemProviderToggleDefinition providerToggle && providerToggle.provider == provider) {
-               providerToggle.value = value;
-               return;
-            }
-         }
-      }
    }
 
    private double findSliderValue(String key, double fallback) {
@@ -696,103 +758,33 @@ public class EarthCustomizeScreen extends Screen {
       return fallback;
    }
 
-   private boolean findDemProviderToggleValue(EarthGeneratorSettings.DemProvider provider, boolean fallback) {
-      for (EarthCustomizeScreen.CategoryDefinition category : this.categories) {
-         for (EarthCustomizeScreen.SettingDefinition setting : category.getSettings()) {
-            if (setting instanceof EarthCustomizeScreen.DemProviderToggleDefinition providerToggle && providerToggle.provider == provider) {
-               return providerToggle.value;
-            }
-         }
-      }
-
-      return fallback;
-   }
-
    private EarthGeneratorSettings.DemSelection buildDemSelection() {
-      boolean automatic = this.findToggleValue("dem_automatic", EarthGeneratorSettings.DEFAULT.demSelection().automatic());
-      int enabledProviderMask = 0;
-
-      for (EarthGeneratorSettings.DemProvider provider : EarthGeneratorSettings.DemSelection.userSelectableProviders()) {
-         boolean enabled = this.findDemProviderToggleValue(
-            provider, EarthGeneratorSettings.DEFAULT.demSelection().isEnabled(provider)
-         );
-         if (enabled) {
-            enabledProviderMask |= provider.selectionBit();
-         }
-      }
-
-      return automatic ? EarthGeneratorSettings.DemSelection.automaticSelection() : EarthGeneratorSettings.DemSelection.manual(enabledProviderMask);
+      return EarthGeneratorSettings.DemSelection.mapterhornSelection();
    }
 
    public void extractRenderState(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float delta) {
       super.extractRenderState(graphics, mouseX, mouseY, delta);
       graphics.centeredText(this.font, this.title, this.width / 2, 20, 16777215);
+      if (this.validationError != null) {
+         int messageWidth = Math.max(120, this.width - 24);
+         graphics.textWithWordWrap(this.font, this.validationError, 12, Math.max(42, this.height - 58), messageWidth, 16733525, true);
+      }
    }
 
    private List<EarthCustomizeScreen.CategoryDefinition> createCategories() {
       List<EarthCustomizeScreen.CategoryDefinition> categories = new ArrayList<>();
       boolean distantHorizonsInstalled = FabricLoader.getInstance().isModLoaded("distanthorizons");
       boolean voxyInstalled = FabricLoader.getInstance().isModLoaded("voxy");
-      EarthCustomizeScreen.HmaTokenDefinition hmaToken = new EarthCustomizeScreen.HmaTokenDefinition(HmaAccessManager.savedToken());
-      EarthCustomizeScreen.CategoryDefinition hmaAccessCategory = new EarthCustomizeScreen.CategoryDefinition(
-         "hma_access", hmaAccessEntries(hmaToken)
-      ).hideFromRoot().parent("world");
-      EarthCustomizeScreen.CategoryDefinition demProvidersCategory = new EarthCustomizeScreen.CategoryDefinition(
-         "dem_providers",
-         List.of(
-            toggle("dem_automatic", EarthGeneratorSettings.DEFAULT.demSelection().automatic()),
-            demProviderToggle(
-               EarthGeneratorSettings.DemProvider.TERRARIUM, EarthGeneratorSettings.DEFAULT.demSelection().isEnabled(EarthGeneratorSettings.DemProvider.TERRARIUM)
-            ),
-            demProviderToggle(
-               EarthGeneratorSettings.DemProvider.GEBCO2026,
-               EarthGeneratorSettings.DEFAULT.demSelection().isEnabled(EarthGeneratorSettings.DemProvider.GEBCO2026)
-            ),
-            demProviderToggle(
-               EarthGeneratorSettings.DemProvider.SWISSALTI3D,
-               EarthGeneratorSettings.DEFAULT.demSelection().isEnabled(EarthGeneratorSettings.DemProvider.SWISSALTI3D)
-            ),
-            demProviderToggle(EarthGeneratorSettings.DemProvider.AHN, EarthGeneratorSettings.DEFAULT.demSelection().isEnabled(EarthGeneratorSettings.DemProvider.AHN)),
-            demProviderToggle(
-               EarthGeneratorSettings.DemProvider.CANELEVATION,
-               EarthGeneratorSettings.DEFAULT.demSelection().isEnabled(EarthGeneratorSettings.DemProvider.CANELEVATION)
-            ),
-            demProviderToggle(
-               EarthGeneratorSettings.DemProvider.NORWAYDTM1,
-               EarthGeneratorSettings.DEFAULT.demSelection().isEnabled(EarthGeneratorSettings.DemProvider.NORWAYDTM1)
-            ),
-            demProviderToggle(
-               EarthGeneratorSettings.DemProvider.JAPANGSI,
-               EarthGeneratorSettings.DEFAULT.demSelection().isEnabled(EarthGeneratorSettings.DemProvider.JAPANGSI)
-            ),
-            demProviderToggle(
-               EarthGeneratorSettings.DemProvider.USGS, EarthGeneratorSettings.DEFAULT.demSelection().isEnabled(EarthGeneratorSettings.DemProvider.USGS)
-            ),
-            demProviderToggle(
-               EarthGeneratorSettings.DemProvider.COPERNICUS,
-               EarthGeneratorSettings.DEFAULT.demSelection().isEnabled(EarthGeneratorSettings.DemProvider.COPERNICUS)
-            ),
-            demProviderToggle(
-               EarthGeneratorSettings.DemProvider.ARCTICDEM,
-               EarthGeneratorSettings.DEFAULT.demSelection().isEnabled(EarthGeneratorSettings.DemProvider.ARCTICDEM)
-            )
-         )
-      ).hideFromRoot().parent("world");
       List<EarthCustomizeScreen.SettingDefinition> worldSettings = new ArrayList<>(
          List.of(
             slider("world_scale", 30.0, 1.0, 500.0, 5.0)
                .withDisplay(EarthCustomizeScreen::formatWorldScale)
                .withScale(EarthCustomizeScreen.SliderScale.power(3.0)),
-            toggle("thin_shell_terrain", EarthGeneratorSettings.DEFAULT.thinShellTerrain()),
-            this.categoryLink(demProvidersCategory)
-               .withLabel(Component.translatable("property.tellus.dem_provider.name"))
-               .withTooltip(Component.translatable("property.tellus.dem_provider.tooltip").withStyle(ChatFormatting.GRAY))
+            toggle("experimental_increase_height", EarthGeneratorSettings.DEFAULT.experimentalIncreaseHeight())
+               .withTooltip(experimentalIncreaseHeightTooltip())
+               .forceDisabled(!ExperimentalHeightSupport.isRuntimeProfileActive(), experimentalHeightRuntimeDisabledTooltip()),
+            toggle("thin_shell_terrain", EarthGeneratorSettings.DEFAULT.thinShellTerrain())
          )
-      );
-      worldSettings.add(
-         this.categoryLink(hmaAccessCategory)
-            .active(false)
-            .withTooltip(Component.translatable("tellus.hma_access.button.tooltip").withStyle(ChatFormatting.GRAY))
       );
       worldSettings.addAll(
          List.of(
@@ -804,7 +796,6 @@ public class EarthCustomizeScreen extends Screen {
                .withScale(EarthCustomizeScreen.SliderScale.power(3.0)),
             slider("height_offset", EarthGeneratorSettings.DEFAULT.heightOffset(), -2000.0, 128.0, 1.0)
                .withDisplay(EarthCustomizeScreen::formatHeightOffset),
-            slider("sea_level", -64.0, -64.0, 256.0, 1.0).withDisplay(EarthCustomizeScreen::formatSeaLevel),
             slider("max_altitude", -1.0, -1.0, 2031.0, 16.0).withDisplay(EarthCustomizeScreen::formatMaxAltitude),
             slider("min_altitude", EarthGeneratorSettings.DEFAULT.minAltitude(), -2048.0, 2031.0, 16.0).withDisplay(EarthCustomizeScreen::formatMinAltitude)
          )
@@ -812,15 +803,12 @@ public class EarthCustomizeScreen extends Screen {
       categories.add(
          new EarthCustomizeScreen.CategoryDefinition("world", worldSettings)
       );
-      categories.add(demProvidersCategory);
-      categories.add(hmaAccessCategory);
       categories.add(
          new EarthCustomizeScreen.CategoryDefinition(
             "openstreetmaps_features",
             List.of(
                toggle("enable_roads", EarthGeneratorSettings.DEFAULT.enableRoads()),
                toggle("enable_buildings", EarthGeneratorSettings.DEFAULT.enableBuildings()),
-               toggle("enable_water", EarthGeneratorSettings.DEFAULT.enableWater()),
                toggle("climate_based_built_up_terrain", EarthGeneratorSettings.DEFAULT.climateBasedBuiltUpTerrain())
             )
          )
@@ -829,13 +817,10 @@ public class EarthCustomizeScreen extends Screen {
          new EarthCustomizeScreen.CategoryDefinition(
             "ecological",
             List.of(
-               toggle("land_vegetation", true).locked(true),
                toggle("random_biomes", EarthGeneratorSettings.DEFAULT.randomBiomes()),
                slider("random_biome_density", EarthGeneratorSettings.DEFAULT.randomBiomeDensity() * 100.0, 0.0, 40.0, 1.0).withDisplay(EarthCustomizeScreen::formatPercent),
-               slider("land_vegetation_density", 100.0, 0.0, 200.0, 5.0).withDisplay(EarthCustomizeScreen::formatPercent).locked(true),
                slider("trees_density", 100.0, 0.0, 200.0, 5.0).withDisplay(EarthCustomizeScreen::formatPercent).locked(true),
-               toggle("aquatic_vegetation", true).locked(true),
-               toggle("crops_in_villages", true).locked(true)
+               toggle("aquatic_vegetation", true).locked(true)
             )
          )
       );
@@ -884,6 +869,15 @@ public class EarthCustomizeScreen extends Screen {
                toggle("historical_snow", false).forceDisabled(true, historicalSnowReworkTooltip())
             )
          )
+      );
+      categories.add(
+         new EarthCustomizeScreen.CategoryDefinition(
+            "network",
+            List.of(
+               toggle("tellus_managed_terrain_downloads", EarthGeneratorSettings.DEFAULT.tellusManagedTerrainDownloads()),
+               toggle("show_terrain_download_overlay", EarthGeneratorSettings.DEFAULT.showTerrainDownloadOverlay())
+            )
+         ).hideFromRoot()
       );
       EarthCustomizeScreen.CategoryDefinition distantHorizonsCategory = Objects.requireNonNull(
          new EarthCustomizeScreen.CategoryDefinition(
@@ -942,19 +936,12 @@ public class EarthCustomizeScreen extends Screen {
             "cache",
             List.of(
                cacheEntry(EarthCustomizeScreen.CacheMetric.OSM, true),
-               cacheEntry(EarthCustomizeScreen.CacheMetric.ESA, true),
+               cacheEntry(EarthCustomizeScreen.CacheMetric.LAND_COVER, true),
                cacheEntry(EarthCustomizeScreen.CacheMetric.KOPPEN, true),
                cacheEntry(EarthCustomizeScreen.CacheMetric.TERRAIN, true),
-               cacheEntry(EarthCustomizeScreen.CacheMetric.SWISSALTI3D, true),
-               cacheEntry(EarthCustomizeScreen.CacheMetric.AHN, true),
-               cacheEntry(EarthCustomizeScreen.CacheMetric.CANELEVATION, true),
-               cacheEntry(EarthCustomizeScreen.CacheMetric.NORWAYDTM1, true),
-               cacheEntry(EarthCustomizeScreen.CacheMetric.JAPANGSI, true),
-               cacheEntry(EarthCustomizeScreen.CacheMetric.ARCTICDEM, true),
-               cacheEntry(EarthCustomizeScreen.CacheMetric.USGS, true),
-               cacheEntry(EarthCustomizeScreen.CacheMetric.COPERNICUS, true),
-               cacheEntry(EarthCustomizeScreen.CacheMetric.GEBCO2026, true),
+               cacheEntry(EarthCustomizeScreen.CacheMetric.OPENWATERS, true),
                cacheEntry(EarthCustomizeScreen.CacheMetric.OISST, true),
+               cacheEntry(EarthCustomizeScreen.CacheMetric.PRELOADED_TERRAIN, true),
                cacheEntry(EarthCustomizeScreen.CacheMetric.TOTAL, false),
                cacheActionButton(Component.translatable("tellus.cache.delete_all"), EarthCustomizeScreen.CacheManager::deleteAll)
             )
@@ -972,34 +959,8 @@ public class EarthCustomizeScreen extends Screen {
       return new EarthCustomizeScreen.ToggleDefinition(key, defaultValue);
    }
 
-   private static EarthCustomizeScreen.DemProviderToggleDefinition demProviderToggle(
-      EarthGeneratorSettings.DemProvider provider, boolean defaultValue
-   ) {
-      return new EarthCustomizeScreen.DemProviderToggleDefinition(provider, defaultValue);
-   }
-
    private static EarthCustomizeScreen.ModeDefinition mode(String key, EarthGeneratorSettings.DistantHorizonsRenderMode defaultValue) {
       return new EarthCustomizeScreen.ModeDefinition(key, defaultValue);
-   }
-
-   private static List<EarthCustomizeScreen.SettingDefinition> hmaAccessEntries(EarthCustomizeScreen.HmaTokenDefinition tokenDefinition) {
-      List<EarthCustomizeScreen.SettingDefinition> entries = new ArrayList<>();
-      entries.add(infoHeader("High Mountain Asia 8 m Access"));
-      entries.add(infoLine("Tellus can use NSIDC High Mountain Asia 8 m DEM tiles, but Earthdata access is required."));
-      entries.add(infoSubtle("1. Create an Earthdata account."));
-      entries.add(infoLink("https://urs.earthdata.nasa.gov/users/new"));
-      entries.add(infoSubtle("2. Follow the Earthdata token guide and generate a bearer token."));
-      entries.add(infoLink("https://urs.earthdata.nasa.gov/documentation/for_users/user_token"));
-      entries.add(infoSubtle("3. Paste the bearer token below and test it."));
-      entries.add(infoSubtle(Component.translatable("tellus.hma_access.instruction.test_before_save")));
-      entries.add(infoSubtle("Stored locally in config/tellus-hma-access.properties on this computer."));
-      entries.add(infoSpacer());
-      entries.add(infoSubtle("Earthdata bearer token"));
-      entries.add(tokenDefinition);
-      entries.add(new EarthCustomizeScreen.HmaAccessButtonsDefinition(tokenDefinition));
-      entries.add(new EarthCustomizeScreen.HmaAccessStatusDefinition());
-      entries.add(infoSpacer());
-      return entries;
    }
 
    private EarthCustomizeScreen.CategoryLinkDefinition categoryLink( EarthCustomizeScreen.CategoryDefinition targetCategory) {
@@ -1039,15 +1000,15 @@ public class EarthCustomizeScreen extends Screen {
 
    private static List<EarthCustomizeScreen.SettingDefinition> dataSourcesEntries() {
       List<EarthCustomizeScreen.SettingDefinition> entries = new ArrayList<>();
-      entries.add(infoHeader("ESA WorldCover 2021 (land cover)"));
-      entries.add(infoLine("ESA WorldCover 2021 (10 m land cover, v200)"));
-      entries.add(infoLine("© ESA WorldCover project / Contains modified Copernicus Sentinel data (2021)"));
-      entries.add(infoLine("processed by ESA WorldCover consortium."));
-      entries.add(infoSubtle("License: CC BY 4.0"));
-      entries.add(infoLink("https://creativecommons.org/licenses/by/4.0/"));
-      entries.add(infoLink("https://doi.org/10.5281/zenodo.7254221"));
-      entries.add(infoLine("In-game processing: reprojected to the world grid, resampled to blocks,"));
-      entries.add(infoLine("and cached as tiles for fast lookup."));
+      entries.add(infoHeader("Overture Maps land cover"));
+      entries.add(infoLine("Overture Maps base-theme vector land cover with adaptive zoom levels."));
+      entries.add(infoLine("© Overture Maps Foundation; derived from ESA WorldCover 2020."));
+      entries.add(infoLine("Contains modified Copernicus Sentinel data processed by ESA WorldCover consortium."));
+      entries.add(infoSubtle("Licenses: ODbL (Overture base theme) / CC BY 4.0 (ESA WorldCover)"));
+      entries.add(infoLink("https://docs.overturemaps.org/attribution/"));
+      entries.add(infoLink("https://docs.overturemaps.org/schema/reference/base/land_cover/"));
+      entries.add(infoLine("In-game processing: fetched as PMTiles ranges, rasterized for the selected scale,"));
+      entries.add(infoLine("and cached as compact local tiles for fast lookup."));
       entries.add(infoSpacer());
       entries.add(infoHeader("Köppen–Geiger climate classification (1 km, Beck et al. 2018)"));
       entries.add(infoLine("Source: Beck, H.E., Zimmermann, N.E., McVicar, T.R., et al. (2018)."));
@@ -1060,112 +1021,19 @@ public class EarthCustomizeScreen extends Screen {
       entries.add(infoLine("In-game processing: reprojected and resampled to match the world grid."));
       entries.add(infoLine("Cached for fast lookup."));
       entries.add(infoSpacer());
-      entries.add(infoHeader("Terrain Tiles (global DEM tiles)"));
-      entries.add(infoLine("Terrain Tiles (AWS Open Data Registry / Mapzen Jörð)"));
+      entries.add(infoHeader("Mapterhorn terrain DEM"));
+      entries.add(infoLine("Mapterhorn global terrain tiles"));
       entries.add(infoLine("Accessed on " + formatLocalDate() + " from"));
-      entries.add(infoLink("https://registry.opendata.aws/terrain-tiles"));
-      entries.add(infoLine("Source attributions for Terrain Tiles:"));
-      entries.add(infoSubtle("ArcticDEM terrain data: DEM(s) were created from DigitalGlobe, Inc. imagery"));
-      entries.add(infoSubtle("and funded under National Science Foundation awards 1043681, 1559691, and 1542736;"));
-      entries.add(infoSubtle("Australia terrain data © Commonwealth of Australia (Geoscience Australia) 2017;"));
-      entries.add(infoSubtle("Austria terrain data © offene Daten Österreichs – Digitales Geländemodell (DGM) Österreich;"));
-      entries.add(infoSubtle("Canada terrain data contains information licensed under the Open Government Licence – Canada;"));
-      entries.add(infoSubtle("Europe terrain data produced using Copernicus data and information funded by the"));
-      entries.add(infoSubtle("European Union – EU-DEM layers;"));
-      entries.add(infoSubtle("Global ETOPO1 terrain data U.S. National Oceanic and Atmospheric Administration;"));
-      entries.add(infoSubtle("New Zealand terrain data Copyright 2011 Crown copyright (c) Land Information"));
-      entries.add(infoSubtle("New Zealand and the New Zealand Government (All rights reserved);"));
-      entries.add(infoSubtle("Norway terrain data © Kartverket;"));
-      entries.add(infoSubtle("United Kingdom terrain data © Environment Agency copyright and/or database right 2015."));
-      entries.add(infoSubtle("All rights reserved;"));
-      entries.add(infoSubtle("United States 3DEP (formerly NED) and global GMTED2010 and SRTM terrain data"));
-      entries.add(infoSubtle("courtesy of the U.S. Geological Survey."));
+      entries.add(infoLink("https://mapterhorn.com/"));
+      entries.add(infoLine("In-game processing: sampled from Mapterhorn Terrarium elevation tiles,"));
+      entries.add(infoLine("with zoom selected from player scale and cached locally for reuse."));
       entries.add(infoSpacer());
-      entries.add(infoHeader("swissALTI3D 0.5 m / 2 m"));
-      entries.add(infoLine("swisstopo swissALTI3D digital terrain model"));
+      entries.add(infoHeader("OpenWaters bathymetry"));
+      entries.add(infoLine("OpenWaters ocean and inland-water bathymetry tiles"));
       entries.add(infoLine("Accessed on " + formatLocalDate() + " from"));
-      entries.add(infoLink("https://www.swisstopo.admin.ch/en/height-model-swissalti3d"));
-      entries.add(infoLink("https://data.geo.admin.ch/api/stac/v0.9/collections/ch.swisstopo.swissalti3d"));
-      entries.add(infoLink("https://data.geo.admin.ch/api/stac/v0.9/collections/ch.swisstopo.swissalti3d/items"));
-      entries.add(infoLink("https://www.swisstopo.admin.ch/en/free-geodata-ogd"));
-      entries.add(infoLink("https://www.swisstopo.admin.ch/en/conditions-geodata"));
-      entries.add(infoLine("In-game processing: sampled from official swisstopo swissALTI3D COG tiles"));
-      entries.add(infoLine("with byte-range reads and cached locally. Automatic prefers"));
-      entries.add(infoLine("0.5 m at fine scales and 2 m at broader scales inside swissALTI3D coverage."));
-      entries.add(infoSubtle("Terrain data source: Federal Office of Topography swisstopo."));
-      entries.add(infoSpacer());
-      entries.add(infoHeader("AHN DTM 0.5 m"));
-      entries.add(infoLine("Actueel Hoogtebestand Nederland (AHN) DTM 0,5m"));
-      entries.add(infoLine("Accessed on " + formatLocalDate() + " from"));
-      entries.add(infoLink("https://service.pdok.nl/rws/actueel-hoogtebestand-nederland/atom/dtm_05m.xml"));
-      entries.add(infoLink("https://service.pdok.nl/rws/actueel-hoogtebestand-nederland/atom/downloads/dtm_05m/kaartbladindex.json"));
-      entries.add(infoLine("In-game processing: sampled from official PDOK/RWS AHN DTM COG tiles"));
-      entries.add(infoLine("with byte-range reads and cached locally for reuse."));
-      entries.add(infoSubtle("AHN terrain data provided by Rijkswaterstaat through PDOK."));
-      entries.add(infoSpacer());
-      entries.add(infoHeader("CANElevation 2 m / 30 m DTM"));
-      entries.add(infoLine("Natural Resources Canada CANElevation DEMs"));
-      entries.add(infoLine("Accessed on " + formatLocalDate() + " from"));
-      entries.add(infoLink("https://registry.opendata.aws/canelevation-dem/"));
-      entries.add(infoLine("In-game processing: sampled from public CANElevation GeoTIFF tiles"));
-      entries.add(infoLine("with byte-range reads and cached locally. Automatic prefers"));
-      entries.add(infoLine("HRDEM 2 m in Canada where available and falls back to MRDEM 30 m elsewhere."));
-      entries.add(infoSubtle("High Resolution Digital Elevation Model (HRDEM) 2 m DTM and"));
-      entries.add(infoSubtle("Multi-Resolution Digital Elevation Model (MRDEM) 30 m DTM"));
-      entries.add(infoSubtle("provided by Natural Resources Canada under the Open Government Licence - Canada."));
-      entries.add(infoSpacer());
-      entries.add(infoHeader("Norway DTM1 1 m"));
-      entries.add(infoLine("Kartverket / Geonorge DTM 1 Høydedata"));
-      entries.add(infoLine("Accessed on " + formatLocalDate() + " from"));
-      entries.add(infoLink("https://nedlasting.geonorge.no/geonorge/ATOM/hoydedata/Hoydedata_ServiceFeed.atom"));
-      entries.add(infoLink("https://nedlasting.geonorge.no/geonorge/ATOM/hoydedata/datasett/DTM1.atom"));
-      entries.add(infoLink("https://data.norge.no/nlod/en/2.0"));
-      entries.add(infoLine("In-game processing: sampled from official Geonorge DTM1 GeoTIFF tiles"));
-      entries.add(infoLine("with byte-range reads and cached locally. Automatic prefers"));
-      entries.add(infoLine("Norway DTM1 across published mainland Norway coverage."));
-      entries.add(infoSubtle("Terrain data provided by Kartverket under the Norwegian Licence for Open Government Data (NLOD) 2.0."));
-      entries.add(infoSpacer());
-      entries.add(infoHeader("Japan GSI elevation tiles"));
-      entries.add(infoLine("Geospatial Information Authority of Japan (GSI) elevation tiles"));
-      entries.add(infoLine("Accessed on " + formatLocalDate() + " from"));
-      entries.add(infoLink("https://maps.gsi.go.jp/development/ichiran.html#dem"));
-      entries.add(infoLink("https://maps.gsi.go.jp/development/demtile.html"));
-      entries.add(infoLink("https://maps.gsi.go.jp/development/hyokochi.html"));
-      entries.add(infoLink("https://maps.gsi.go.jp/help/termsofuse.html"));
-      entries.add(infoLine("In-game processing: sampled from official GSI PNG elevation tiles"));
-      entries.add(infoLine("with internal DEM1A/5A/5B/5C/10B fallback and cached locally."));
-      entries.add(infoLine("Automatic prefers Japan GSI in Japan and falls through to the next"));
-      entries.add(infoLine("best DEM when higher-resolution GSI tiles are missing or nodata."));
-      entries.add(infoSubtle("Terrain data provided by the Geospatial Information Authority of Japan under GSI tile terms of use."));
-      entries.add(infoSpacer());
-      entries.add(infoHeader("Polar Geospatial Center DEMs"));
-      entries.add(infoLine("ArcticDEM and REMA mosaic DEMs"));
-      entries.add(infoLine("Accessed on " + formatLocalDate() + " from"));
-      entries.add(infoLink("https://registry.opendata.aws/pgc-arcticdem/"));
-      entries.add(infoLink("https://registry.opendata.aws/pgc-rema/"));
-      entries.add(infoLine("In-game processing: sampled from public PGC mosaic GeoTIFF tiles"));
-      entries.add(infoLine("with byte-range reads and cached locally for reuse."));
-      entries.add(infoSubtle("ArcticDEM terrain data: DEM(s) were created from DigitalGlobe, Inc. imagery"));
-      entries.add(infoSubtle("and funded under National Science Foundation awards 1043681, 1559691, and 1542736."));
-      entries.add(infoSubtle("REMA terrain data: Reference Elevation Model of Antarctica provided by"));
-      entries.add(infoSubtle("the Polar Geospatial Center and collaborators."));
-      entries.add(infoSpacer());
-      entries.add(infoHeader("USGS 3DEP Bare-Earth DEM"));
-      entries.add(infoLine("USGS 3DEP Bare-Earth DEM Dynamic Service"));
-      entries.add(infoLine("Accessed on " + formatLocalDate() + " from"));
-      entries.add(infoLink("https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer?f=pjson"));
-      entries.add(infoLine("In-game processing: sampled from public USGS 3DEP dynamic GeoTIFF tiles"));
-      entries.add(infoLine("and cached locally. Automatic uses USGS across the U.S."));
-      entries.add(infoSubtle("USGS 3DEP products and services:"));
-      entries.add(infoLink("https://www.usgs.gov/3d-elevation-program/about-3dep-products-services"));
-      entries.add(infoSpacer());
-      entries.add(infoHeader("Copernicus DEM GLO-30 / GLO-90"));
-      entries.add(infoLine("Copernicus Digital Elevation Model (GLO-30 / GLO-90)"));
-      entries.add(infoLine("Accessed on " + formatLocalDate() + " from"));
-      entries.add(infoLink("https://registry.opendata.aws/copernicus-dem/"));
-      entries.add(infoLine("In-game processing: sampled from public Copernicus COG tiles"));
-      entries.add(infoLine("with Terrain Tiles retained automatically where its footprint metadata"));
-      entries.add(infoLine("indicates higher native resolution outside regional DEM coverage."));
+      entries.add(infoLink("https://github.com/openwatersio/openwaters.io"));
+      entries.add(infoLine("In-game processing: used where the ocean mask agrees with missing or"));
+      entries.add(infoLine("non-positive Mapterhorn terrain; positive terrain overrides the mask."));
       entries.add(infoSpacer());
       entries.add(infoHeader("Open-Meteo (weather)"));
       entries.add(infoLine("Weather data provided by Open-Meteo.com."));
@@ -1225,10 +1093,6 @@ public class EarthCustomizeScreen extends Screen {
       return String.format(Locale.ROOT, "%.0f blocks", value);
    }
 
-   private static String formatSeaLevel(double value) {
-      return value <= -63.5 ? "Automatic" : String.format(Locale.ROOT, "%.0f blocks", value);
-   }
-
    private static String formatPercent(double value) {
       return String.format(Locale.ROOT, "%.0f%%", value);
    }
@@ -1255,9 +1119,6 @@ public class EarthCustomizeScreen extends Screen {
    }
 
    
-   private static Component formatDemProvider(EarthGeneratorSettings.DemProvider provider) {
-      return Objects.requireNonNull(Component.translatable("property.tellus.dem_provider.value." + provider.id()), "demProviderLabel");
-   }
 
    private static String formatAltitude(double value, double autoValue) {
       return value <= autoValue + 0.5 ? "Automatic" : String.format(Locale.ROOT, "%.0f blocks", value);
@@ -1329,14 +1190,6 @@ public class EarthCustomizeScreen extends Screen {
       return Objects.requireNonNull(Component.translatable("property.tellus." + key + ".tooltip").withStyle(ChatFormatting.GRAY), "settingTooltip");
    }
 
-   private static Component gebcoOutageTooltip() {
-      return Objects.requireNonNull(
-         Component.translatable("tellus.dem_provider.force_disabled.gebco_outage").withStyle(ChatFormatting.RED),
-         "gebcoOutageTooltip"
-      );
-   }
-
-   
    private static Component requiresModTooltip( String modId) {
       return Objects.requireNonNull(
          Component.translatable("tellus.compatibility.requires_mod", new Object[]{compatibilityModName(modId)}).withStyle(ChatFormatting.GRAY),
@@ -1365,6 +1218,39 @@ public class EarthCustomizeScreen extends Screen {
       );
    }
 
+   private static Component experimentalIncreaseHeightTooltip() {
+      return Objects.requireNonNull(
+         Component.translatable("property.tellus.experimental_increase_height.tooltip")
+            .withStyle(ChatFormatting.GRAY)
+            .append(Component.literal("\n"))
+            .append(Component.translatable("property.tellus.experimental_increase_height.warning").withStyle(ChatFormatting.RED)),
+         "experimentalIncreaseHeightTooltip"
+      );
+   }
+
+   private static Component experimentalHeightControlsDisabledTooltip() {
+      return Objects.requireNonNull(
+         Component.translatable("tellus.experimental_increase_height.controls_disabled.tooltip").withStyle(ChatFormatting.GRAY),
+         "experimentalHeightControlsDisabledTooltip"
+      );
+   }
+
+   private static Component experimentalHeightRuntimeDisabledTooltip() {
+      return Objects.requireNonNull(
+         Component.translatable("tellus.experimental_increase_height.runtime_disabled.tooltip", ExperimentalHeightSupport.launchPropertyInstruction())
+            .withStyle(ChatFormatting.GRAY),
+         "experimentalHeightRuntimeDisabledTooltip"
+      );
+   }
+
+   private static Component experimentalHeightValidationFailedTooltip() {
+      return Objects.requireNonNull(
+         Component.translatable("tellus.experimental_increase_height.validation_failed", ExperimentalHeightSupport.launchPropertyInstruction())
+            .withStyle(ChatFormatting.RED),
+         "experimentalHeightValidationFailedTooltip"
+      );
+   }
+
    private static String describeDimensionType(DimensionType type) {
       return "minY=" + type.minY() + ",height=" + type.height() + ",logicalHeight=" + type.logicalHeight();
    }
@@ -1372,11 +1258,6 @@ public class EarthCustomizeScreen extends Screen {
    private int resolveAltitudeSetting(String key, double autoValue) {
       double value = this.findSliderValue(key, autoValue);
       return value <= autoValue + 0.5 ? Integer.MIN_VALUE : (int)Math.round(value);
-   }
-
-   private int resolveSeaLevelSetting(String key, double autoValue) {
-      double value = this.findSliderValue(key, autoValue);
-      return value <= autoValue + 0.5 ? -2147483647 : (int)Math.round(value);
    }
 
    private static EarthCustomizeScreen.RegistryUpdate updateDimensionTypeRegistry(
@@ -1520,7 +1401,7 @@ public class EarthCustomizeScreen extends Screen {
       }
 
       Runnable onChange = this::onSettingsChanged;
-      if ("distant_horizons".equals(category.getId()) || "voxy".equals(category.getId()) || "dem_providers".equals(category.getId())) {
+        if ("world".equals(category.getId()) || "distant_horizons".equals(category.getId()) || "voxy".equals(category.getId())) {
          onChange = () -> {
             this.onSettingsChanged();
             this.showCategory(category);
@@ -1594,7 +1475,28 @@ public class EarthCustomizeScreen extends Screen {
       boolean bothCompatibilityModsInstalled = FabricLoader.getInstance().isModLoaded("distanthorizons") && FabricLoader.getInstance().isModLoaded("voxy");
       boolean voxyEnabled = bothCompatibilityModsInstalled
          && this.findToggleValue("voxy_chunk_pregen_enabled", EarthGeneratorSettings.DEFAULT.voxyChunkPregenEnabled());
-      if ("openstreetmaps_features".equals(category.getId())) {
+      if ("world".equals(category.getId())) {
+         boolean experimentalIncreaseHeight = this.isExperimentalIncreaseHeightEnabled();
+         Component tooltip = experimentalHeightControlsDisabledTooltip();
+         for (EarthCustomizeScreen.SettingDefinition setting : category.getSettings()) {
+            if (setting instanceof EarthCustomizeScreen.SliderDefinition slider && isExperimentalAltitudeControl(slider.key)) {
+               slider.forceDisabled(experimentalIncreaseHeight, tooltip);
+            }
+         }
+      } else if ("network".equals(category.getId())) {
+         EarthCustomizeScreen.ToggleDefinition managedDownloads = null;
+         EarthCustomizeScreen.ToggleDefinition overlay = null;
+         for (EarthCustomizeScreen.SettingDefinition setting : category.getSettings()) {
+            if (setting instanceof EarthCustomizeScreen.ToggleDefinition toggle && toggle.key.equals("tellus_managed_terrain_downloads")) {
+               managedDownloads = toggle;
+            } else if (setting instanceof EarthCustomizeScreen.ToggleDefinition toggle && toggle.key.equals("show_terrain_download_overlay")) {
+               overlay = toggle;
+            }
+         }
+         if (managedDownloads != null && overlay != null) {
+            overlay.forceDisabled(!managedDownloads.value);
+         }
+      } else if ("openstreetmaps_features".equals(category.getId())) {
          EarthCustomizeScreen.ToggleDefinition roads = null;
          EarthCustomizeScreen.ToggleDefinition buildings = null;
 
@@ -1621,56 +1523,6 @@ public class EarthCustomizeScreen extends Screen {
                !scaleSupported,
                Component.translatable("property.tellus.enable_buildings.scale_limit.tooltip").withStyle(ChatFormatting.GRAY)
             );
-         }
-      } else if ("dem_providers".equals(category.getId())) {
-         EarthCustomizeScreen.ToggleDefinition automatic = null;
-         Map<EarthGeneratorSettings.DemProvider, EarthCustomizeScreen.DemProviderToggleDefinition> providerToggles = new LinkedHashMap<>();
-
-         for (EarthCustomizeScreen.SettingDefinition setting : category.getSettings()) {
-            if (setting instanceof EarthCustomizeScreen.ToggleDefinition toggle && toggle.key.equals("dem_automatic")) {
-               automatic = toggle;
-            }
-
-            if (setting instanceof EarthCustomizeScreen.DemProviderToggleDefinition providerToggle) {
-               providerToggles.put(providerToggle.provider, providerToggle);
-            }
-         }
-
-         Component automaticTooltip = Component.translatable("tellus.dem_provider.force_disabled.automatic").withStyle(ChatFormatting.GRAY);
-         Component outageTooltip = gebcoOutageTooltip();
-         if (automatic != null && automatic.value) {
-            for (EarthCustomizeScreen.DemProviderToggleDefinition providerToggle : providerToggles.values()) {
-               boolean gebco = providerToggle.provider == EarthGeneratorSettings.DemProvider.GEBCO2026;
-               providerToggle.value = !gebco;
-               providerToggle.forceDisabled(true, gebco ? outageTooltip : automaticTooltip);
-            }
-            return;
-         }
-
-         for (EarthCustomizeScreen.DemProviderToggleDefinition providerToggle : providerToggles.values()) {
-            providerToggle.forceDisabled(false);
-         }
-
-         EarthCustomizeScreen.DemProviderToggleDefinition gebco = providerToggles.get(EarthGeneratorSettings.DemProvider.GEBCO2026);
-         if (gebco != null) {
-            gebco.value = false;
-            gebco.forceDisabled(true, outageTooltip);
-         }
-
-         EarthCustomizeScreen.DemProviderToggleDefinition terrainTiles = providerToggles.get(EarthGeneratorSettings.DemProvider.TERRARIUM);
-         EarthCustomizeScreen.DemProviderToggleDefinition copernicus = providerToggles.get(EarthGeneratorSettings.DemProvider.COPERNICUS);
-         if (terrainTiles != null && copernicus != null) {
-            if (!terrainTiles.value) {
-               copernicus.value = true;
-               copernicus.forceDisabled(
-                  true, Component.translatable("tellus.dem_provider.force_disabled.copernicus_required").withStyle(ChatFormatting.GRAY)
-               );
-            } else if (!copernicus.value) {
-               terrainTiles.value = true;
-               terrainTiles.forceDisabled(
-                  true, Component.translatable("tellus.dem_provider.force_disabled.terrain_tiles_required").withStyle(ChatFormatting.GRAY)
-               );
-            }
          }
       } else if ("voxy".equals(category.getId())) {
          EarthCustomizeScreen.ToggleDefinition enabled = null;
@@ -1722,6 +1574,25 @@ public class EarthCustomizeScreen extends Screen {
       }
    }
 
+   private void updatePreviewAutoAdjustState() {
+      if (this.previewWidget != null) {
+         boolean experimentalIncreaseHeight = this.isExperimentalIncreaseHeightEnabled();
+         this.previewWidget.setAutoAdjustDisabled(experimentalIncreaseHeight, experimentalHeightControlsDisabledTooltip());
+      }
+   }
+
+   private boolean isExperimentalIncreaseHeightEnabled() {
+      return this.findToggleValue("experimental_increase_height", EarthGeneratorSettings.DEFAULT.experimentalIncreaseHeight());
+   }
+
+   private static boolean isExperimentalAltitudeControl(String key) {
+      return "terrestrial_height_scale".equals(key)
+         || "oceanic_height_scale".equals(key)
+         || "height_offset".equals(key)
+         || "min_altitude".equals(key)
+         || "max_altitude".equals(key);
+   }
+
    private boolean roadsAndBuildingsSupportedForSelectedScale() {
       return roadsAndBuildingsSupportedForWorldScale(this.findSliderValue("world_scale", EarthGeneratorSettings.DEFAULT.worldScale()));
    }
@@ -1731,7 +1602,7 @@ public class EarthCustomizeScreen extends Screen {
    }
 
    private static boolean isPreviewHiddenCategory(String id) {
-      return "cache".equals(id) || "data_sources".equals(id) || "hma_access".equals(id);
+      return "cache".equals(id) || "data_sources".equals(id);
    }
 
    private void setPreviewVisible(boolean visible) {
@@ -1941,236 +1812,6 @@ public class EarthCustomizeScreen extends Screen {
    }
 
    @Environment(EnvType.CLIENT)
-   private static final class HmaAccessManager {
-      private static final String TEST_URL
-         = "https://data.nsidc.earthdatacloud.nasa.gov/nsidc-cumulus-prod-protected/HMA/HMA_DEM8m_MOS/1/2002/01/28/HMA_DEM8m_MOS_20170716_tile-677.tif";
-      private static final int TEST_SUCCESS_COLOR = 5635925;
-      private static final int CONNECT_TIMEOUT_MS = 8000;
-      private static final int READ_TIMEOUT_MS = 12000;
-      private static final ExecutorService EXECUTOR = Executors.newSingleThreadExecutor(runnable -> {
-         Thread thread = new Thread(runnable, "tellus-hma-access");
-         thread.setDaemon(true);
-         return thread;
-      });
-      private static final AtomicReference<EarthCustomizeScreen.HmaAccessState> STATE = new AtomicReference<>(initialState());
-      private static final AtomicBoolean TEST_IN_FLIGHT = new AtomicBoolean(false);
-      private static final AtomicReference<String> VERIFIED_TOKEN = new AtomicReference<>("");
-
-      private static EarthCustomizeScreen.HmaAccessState state() {
-         return STATE.get();
-      }
-
-      private static String savedToken() {
-         return HmaAccessConfig.bearerToken();
-      }
-
-      private static boolean isTesting() {
-         return state().testing();
-      }
-
-      private static boolean canSaveToken(String token) {
-         String normalized = normalizeToken(token);
-         return !normalized.isBlank() && !Objects.equals(normalized, savedToken()) && Objects.equals(normalized, VERIFIED_TOKEN.get());
-      }
-
-      private static void onTokenEdited(String token) {
-         String normalized = normalizeToken(token);
-         if (state().testing() || Objects.equals(normalized, VERIFIED_TOKEN.get())) {
-            return;
-         }
-
-         if (Objects.equals(normalized, savedToken())) {
-            STATE.set(initialState());
-         } else if (!normalized.isBlank()) {
-            STATE.set(testBeforeSaveState());
-         } else if (HmaAccessConfig.hasBearerToken()) {
-            STATE.set(savedState());
-         } else {
-            STATE.set(notConfiguredState());
-         }
-      }
-
-      private static void saveToken(String token) {
-         String normalized = normalizeToken(token);
-
-         try {
-            if (normalized.isBlank()) {
-               VERIFIED_TOKEN.set("");
-               HmaAccessConfig.clearBearerToken();
-               STATE.set(notConfiguredState());
-            } else if (Objects.equals(normalized, savedToken())) {
-               STATE.set(savedState());
-            } else if (!canSaveToken(normalized)) {
-               STATE.set(testBeforeSaveState());
-            } else {
-               HmaAccessConfig.setBearerToken(normalized);
-               VERIFIED_TOKEN.set(normalized);
-               STATE.set(savedState());
-            }
-         } catch (RuntimeException error) {
-            Tellus.LOGGER.warn("Failed to save HMA access token", error);
-            STATE.set(new EarthCustomizeScreen.HmaAccessState(false, Component.translatable("tellus.hma_access.status.save_failed"), -65536));
-         }
-      }
-
-      private static void clearToken() {
-         try {
-            VERIFIED_TOKEN.set("");
-            HmaAccessConfig.clearBearerToken();
-            STATE.set(notConfiguredState());
-         } catch (RuntimeException error) {
-            Tellus.LOGGER.warn("Failed to clear HMA access token", error);
-            STATE.set(new EarthCustomizeScreen.HmaAccessState(false, Component.translatable("tellus.hma_access.status.save_failed"), -65536));
-         }
-      }
-
-      private static void testToken(String token) {
-         String normalized = normalizeToken(token);
-         if (normalized.isBlank()) {
-            STATE.set(new EarthCustomizeScreen.HmaAccessState(false, Component.translatable("tellus.hma_access.status.token_missing"), -6250336));
-         } else if (TEST_IN_FLIGHT.compareAndSet(false, true)) {
-            STATE.set(new EarthCustomizeScreen.HmaAccessState(true, Component.translatable("tellus.hma_access.status.testing"), -11167233));
-            CompletableFuture.<EarthCustomizeScreen.HmaAccessState>supplyAsync(() -> performAccessTest(normalized), EXECUTOR).whenComplete((state, error) -> {
-               if (error != null || state == null) {
-                  Tellus.LOGGER.warn("Failed to test HMA access token", error);
-                  STATE.set(new EarthCustomizeScreen.HmaAccessState(false, Component.translatable("tellus.hma_access.status.network_failed"), -65536));
-               } else {
-                  STATE.set(state);
-               }
-
-               TEST_IN_FLIGHT.set(false);
-            });
-         }
-      }
-
-      private static EarthCustomizeScreen.HmaAccessState performAccessTest(String token) {
-         HttpURLConnection connection = null;
-
-         try {
-            connection = openProbeConnection(TEST_URL);
-            connection.setRequestProperty("Authorization", "Bearer " + token);
-            int status = connection.getResponseCode();
-            if (isSuccessStatus(status)) {
-               VERIFIED_TOKEN.set(token);
-               return successState();
-            } else if (status == 401 || status == 403) {
-               VERIFIED_TOKEN.compareAndSet(token, "");
-               return new EarthCustomizeScreen.HmaAccessState(false, Component.translatable("tellus.hma_access.status.test_failed_auth"), -65536);
-            } else if (isRedirectStatus(status)) {
-               return probeRedirectTarget(connection.getHeaderField("Location"), token);
-            } else {
-               VERIFIED_TOKEN.compareAndSet(token, "");
-               return new EarthCustomizeScreen.HmaAccessState(false, Component.translatable("tellus.hma_access.status.http_error", status), -65536);
-            }
-         } catch (IOException error) {
-            Tellus.LOGGER.debug("HMA token test failed", error);
-            VERIFIED_TOKEN.compareAndSet(token, "");
-            return new EarthCustomizeScreen.HmaAccessState(false, Component.translatable("tellus.hma_access.status.network_failed"), -65536);
-         } finally {
-            if (connection != null) {
-               connection.disconnect();
-            }
-         }
-      }
-
-      private static HttpURLConnection openProbeConnection(String targetUrl) throws IOException {
-         HttpURLConnection connection = (HttpURLConnection)URI.create(targetUrl).toURL().openConnection();
-         connection.setInstanceFollowRedirects(false);
-         connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
-         connection.setReadTimeout(READ_TIMEOUT_MS);
-         connection.setRequestMethod("GET");
-         connection.setRequestProperty("User-Agent", "Tellus/1.0 (Minecraft Mod)");
-         connection.setRequestProperty("Range", "bytes=0-0");
-         return connection;
-      }
-
-      private static EarthCustomizeScreen.HmaAccessState probeRedirectTarget(String location, String token) {
-         if (location == null || location.isBlank()) {
-            VERIFIED_TOKEN.compareAndSet(token, "");
-            return new EarthCustomizeScreen.HmaAccessState(false, Component.translatable("tellus.hma_access.status.network_failed"), -65536);
-         } else if (isEarthdataLoginRedirect(location)) {
-            VERIFIED_TOKEN.compareAndSet(token, "");
-            return new EarthCustomizeScreen.HmaAccessState(false, Component.translatable("tellus.hma_access.status.test_failed_auth"), -65536);
-         } else {
-            HttpURLConnection redirectConnection = null;
-
-            try {
-               redirectConnection = openProbeConnection(location);
-               int status = redirectConnection.getResponseCode();
-               if (isSuccessStatus(status)) {
-                  VERIFIED_TOKEN.set(token);
-                  return successState();
-               } else if (status == 401 || status == 403) {
-                  VERIFIED_TOKEN.compareAndSet(token, "");
-                  return new EarthCustomizeScreen.HmaAccessState(false, Component.translatable("tellus.hma_access.status.test_failed_auth"), -65536);
-               } else {
-                  VERIFIED_TOKEN.compareAndSet(token, "");
-                  return new EarthCustomizeScreen.HmaAccessState(false, Component.translatable("tellus.hma_access.status.http_error", status), -65536);
-               }
-            } catch (IOException error) {
-               Tellus.LOGGER.debug("HMA token redirect probe failed", error);
-               VERIFIED_TOKEN.compareAndSet(token, "");
-               return new EarthCustomizeScreen.HmaAccessState(false, Component.translatable("tellus.hma_access.status.network_failed"), -65536);
-            } finally {
-               if (redirectConnection != null) {
-                  redirectConnection.disconnect();
-               }
-            }
-         }
-      }
-
-      private static boolean isEarthdataLoginRedirect(String location) {
-         try {
-            String host = URI.create(location).getHost();
-            return host != null && host.equals("urs.earthdata.nasa.gov");
-         } catch (IllegalArgumentException error) {
-            return false;
-         }
-      }
-
-      private static boolean isRedirectStatus(int status) {
-         return status >= 300 && status < 400;
-      }
-
-      private static boolean isSuccessStatus(int status) {
-         return status == 200 || status == 206;
-      }
-
-      private static EarthCustomizeScreen.HmaAccessState successState() {
-         return new EarthCustomizeScreen.HmaAccessState(false, Component.translatable("tellus.hma_access.status.test_success"), TEST_SUCCESS_COLOR);
-      }
-
-      private static EarthCustomizeScreen.HmaAccessState savedState() {
-         return new EarthCustomizeScreen.HmaAccessState(false, Component.translatable("tellus.hma_access.status.saved"), -10461088);
-      }
-
-      private static EarthCustomizeScreen.HmaAccessState notConfiguredState() {
-         return new EarthCustomizeScreen.HmaAccessState(false, Component.translatable("tellus.hma_access.status.not_configured"), -6250336);
-      }
-
-      private static EarthCustomizeScreen.HmaAccessState testBeforeSaveState() {
-         return new EarthCustomizeScreen.HmaAccessState(false, Component.translatable("tellus.hma_access.status.test_before_save"), -6250336);
-      }
-
-      private static EarthCustomizeScreen.HmaAccessState initialState() {
-         return HmaAccessConfig.hasBearerToken()
-            ? savedState()
-            : notConfiguredState();
-      }
-
-      private static String normalizeToken(String token) {
-         return token == null ? "" : token.trim();
-      }
-   }
-
-   @Environment(EnvType.CLIENT)
-   private record HmaAccessState(boolean testing, Component message, int color) {
-      private HmaAccessState {
-         Objects.requireNonNull(message, "message");
-      }
-   }
-
-   @Environment(EnvType.CLIENT)
    private static final class CacheManager {
       private static final ExecutorService EXECUTOR = Executors.newSingleThreadExecutor(new EarthCustomizeScreen.CacheThreadFactory());
       private static final AtomicReference<EarthCustomizeScreen.CacheSnapshot> SNAPSHOT = new AtomicReference<>(EarthCustomizeScreen.CacheSnapshot.empty());
@@ -2240,35 +1881,21 @@ public class EarthCustomizeScreen extends Screen {
 
       private static EarthCustomizeScreen.CacheSnapshot computeSnapshot() {
          long osmBytes = sizeFor(EarthCustomizeScreen.CacheMetric.OSM);
-         long esaBytes = sizeFor(EarthCustomizeScreen.CacheMetric.ESA);
+         long landCoverBytes = sizeFor(EarthCustomizeScreen.CacheMetric.LAND_COVER);
          long koppenBytes = sizeFor(EarthCustomizeScreen.CacheMetric.KOPPEN);
          long terrainBytes = sizeFor(EarthCustomizeScreen.CacheMetric.TERRAIN);
-         long swissAlti3dBytes = sizeFor(EarthCustomizeScreen.CacheMetric.SWISSALTI3D);
-         long ahnBytes = sizeFor(EarthCustomizeScreen.CacheMetric.AHN);
-         long canElevationBytes = sizeFor(EarthCustomizeScreen.CacheMetric.CANELEVATION);
-         long norwayDtm1Bytes = sizeFor(EarthCustomizeScreen.CacheMetric.NORWAYDTM1);
-         long japanGsiBytes = sizeFor(EarthCustomizeScreen.CacheMetric.JAPANGSI);
-         long arcticDemBytes = sizeFor(EarthCustomizeScreen.CacheMetric.ARCTICDEM);
-         long usgsBytes = sizeFor(EarthCustomizeScreen.CacheMetric.USGS);
-         long copernicusBytes = sizeFor(EarthCustomizeScreen.CacheMetric.COPERNICUS);
-         long gebco2026Bytes = sizeFor(EarthCustomizeScreen.CacheMetric.GEBCO2026);
+         long openWatersBytes = sizeFor(EarthCustomizeScreen.CacheMetric.OPENWATERS);
          long oisstBytes = sizeFor(EarthCustomizeScreen.CacheMetric.OISST);
+         long preloadedTerrainBytes = sizeFor(EarthCustomizeScreen.CacheMetric.PRELOADED_TERRAIN);
          return new EarthCustomizeScreen.CacheSnapshot(
             true,
             osmBytes,
-            esaBytes,
+            landCoverBytes,
             koppenBytes,
             terrainBytes,
-            swissAlti3dBytes,
-            ahnBytes,
-            canElevationBytes,
-            norwayDtm1Bytes,
-            japanGsiBytes,
-            arcticDemBytes,
-            usgsBytes,
-            copernicusBytes,
-            gebco2026Bytes,
-            oisstBytes
+            openWatersBytes,
+            oisstBytes,
+            preloadedTerrainBytes
          );
       }
 
@@ -2351,30 +1978,22 @@ public class EarthCustomizeScreen extends Screen {
    @Environment(EnvType.CLIENT)
    private static enum CacheMetric {
       OSM("tellus.cache.section.osm", "tellus/cache/map", TellusCacheDomain.OSM),
-      ESA("tellus.cache.section.esa", "tellus/cache/worldcover2021", TellusCacheDomain.LAND_COVER),
+      LAND_COVER(
+         "tellus.cache.section.land_cover",
+         new String[]{"tellus/cache/land-cover-overture", "tellus/cache/worldcover2021"},
+         new TellusCacheDomain[]{TellusCacheDomain.LAND_COVER}
+      ),
       KOPPEN("tellus.cache.section.koppen", "tellus/cache/koppen", TellusCacheDomain.KOPPEN),
       TERRAIN(
          "tellus.cache.section.terrain",
-         new String[]{"tellus/cache/elevation-tellus", "tellus/cache/elevation-normalized"},
+         new String[]{"tellus/cache/elevation-mapterhorn", "tellus/cache/elevation-tellus", "tellus/cache/elevation-normalized"},
          new TellusCacheDomain[]{TellusCacheDomain.TERRAIN, TellusCacheDomain.NORMALIZED_TERRAIN}
       ),
-      SWISSALTI3D("tellus.cache.section.swissalti3d", "tellus/cache/elevation-swissalti3d", TellusCacheDomain.SWISSALTI3D),
-      AHN("tellus.cache.section.ahn", "tellus/cache/elevation-ahn", TellusCacheDomain.AHN),
-      CANELEVATION("tellus.cache.section.canelevation", "tellus/cache/elevation-canelevation", TellusCacheDomain.CANELEVATION),
-      NORWAYDTM1("tellus.cache.section.norwaydtm1", "tellus/cache/elevation-norway-dtm1", TellusCacheDomain.NORWAYDTM1),
-      JAPANGSI("tellus.cache.section.japangsi", "tellus/cache/elevation-japangsi", TellusCacheDomain.JAPANGSI),
-      ARCTICDEM(
-         "tellus.cache.section.arcticdem",
-         new String[]{"tellus/cache/elevation-arcticdem", "tellus/cache/elevation-rema"},
-         new TellusCacheDomain[]{TellusCacheDomain.ARCTICDEM, TellusCacheDomain.REMA}
-      ),
-      USGS("tellus.cache.section.usgs", "tellus/cache/elevation-usgs3dep", TellusCacheDomain.USGS),
-      COPERNICUS("tellus.cache.section.copernicus", "tellus/cache/elevation-copernicus", TellusCacheDomain.COPERNICUS),
-      GEBCO2026("tellus.cache.section.gebco2026", "tellus/cache/elevation-gebco2026", TellusCacheDomain.GEBCO2026),
+      OPENWATERS("tellus.cache.section.openwaters", "tellus/cache/elevation-openwaters", TellusCacheDomain.OPENWATERS),
       OISST("tellus.cache.section.oisst", "tellus/cache/ocean-oisst-v21", TellusCacheDomain.OISST),
+      PRELOADED_TERRAIN("tellus.cache.section.preloaded_terrain", "tellus/cache/preloaded-terrain/v1", TellusCacheDomain.PRELOADED_TERRAIN),
       TOTAL("tellus.cache.section.total", new String[0], new TellusCacheDomain[0]);
 
-      
       private final String labelKey;
       private final String[] relativePaths;
       private final TellusCacheDomain[] domains;
@@ -2393,12 +2012,10 @@ public class EarthCustomizeScreen extends Screen {
          this.domains = domains;
       }
 
-      
       private Component label() {
          return Objects.requireNonNull(Component.translatable(this.labelKey), "cacheLabel");
       }
 
-      
       private List<Path> resolvePaths() {
          if (this.relativePaths == null || this.relativePaths.length == 0) {
             return List.of();
@@ -2430,59 +2047,38 @@ public class EarthCustomizeScreen extends Screen {
    private record CacheSnapshot(
       boolean ready,
       long osmBytes,
-      long esaBytes,
+      long landCoverBytes,
       long koppenBytes,
       long terrainBytes,
-      long swissAlti3dBytes,
-      long ahnBytes,
-      long canElevationBytes,
-      long norwayDtm1Bytes,
-      long japanGsiBytes,
-      long arcticDemBytes,
-      long usgsBytes,
-      long copernicusBytes,
-      long gebco2026Bytes,
-      long oisstBytes
+      long openWatersBytes,
+      long oisstBytes,
+      long preloadedTerrainBytes
    ) {
       private static EarthCustomizeScreen.CacheSnapshot empty() {
-         return new EarthCustomizeScreen.CacheSnapshot(false, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L);
+         return new EarthCustomizeScreen.CacheSnapshot(false, 0L, 0L, 0L, 0L, 0L, 0L, 0L);
       }
 
       private long bytesFor(EarthCustomizeScreen.CacheMetric metric) {
          return switch (metric) {
             case OSM -> this.osmBytes;
-            case ESA -> this.esaBytes;
+            case LAND_COVER -> this.landCoverBytes;
             case KOPPEN -> this.koppenBytes;
             case TERRAIN -> this.terrainBytes;
-            case SWISSALTI3D -> this.swissAlti3dBytes;
-            case AHN -> this.ahnBytes;
-            case CANELEVATION -> this.canElevationBytes;
-            case NORWAYDTM1 -> this.norwayDtm1Bytes;
-            case JAPANGSI -> this.japanGsiBytes;
-            case ARCTICDEM -> this.arcticDemBytes;
-            case USGS -> this.usgsBytes;
-            case COPERNICUS -> this.copernicusBytes;
-            case GEBCO2026 -> this.gebco2026Bytes;
+            case OPENWATERS -> this.openWatersBytes;
             case OISST -> this.oisstBytes;
+            case PRELOADED_TERRAIN -> this.preloadedTerrainBytes;
             case TOTAL -> this.totalBytes();
          };
       }
 
       private long totalBytes() {
          return this.osmBytes
-            + this.esaBytes
+            + this.landCoverBytes
             + this.koppenBytes
             + this.terrainBytes
-            + this.swissAlti3dBytes
-            + this.ahnBytes
-            + this.canElevationBytes
-            + this.norwayDtm1Bytes
-            + this.japanGsiBytes
-            + this.arcticDemBytes
-            + this.usgsBytes
-            + this.copernicusBytes
-            + this.gebco2026Bytes
-            + this.oisstBytes;
+            + this.openWatersBytes
+            + this.oisstBytes
+            + this.preloadedTerrainBytes;
       }
    }
 
@@ -2556,7 +2152,6 @@ public class EarthCustomizeScreen extends Screen {
       private final EarthCustomizeScreen.CategoryDefinition targetCategory;
       private boolean active = true;
       
-      private Component label;
       private Component tooltip;
 
       private CategoryLinkDefinition( EarthCustomizeScreen.CategoryDefinition targetCategory) {
@@ -2568,11 +2163,6 @@ public class EarthCustomizeScreen extends Screen {
          return this;
       }
 
-      private EarthCustomizeScreen.CategoryLinkDefinition withLabel(Component label) {
-         this.label = Objects.requireNonNull(label, "label");
-         return this;
-      }
-
       private EarthCustomizeScreen.CategoryLinkDefinition withTooltip( Component tooltip) {
          this.tooltip = tooltip;
          return this;
@@ -2580,57 +2170,13 @@ public class EarthCustomizeScreen extends Screen {
 
       @Override
       public AbstractWidget createWidget(Runnable onChange) {
-         Component label = this.label != null ? this.label : this.targetCategory.getLabel();
+         Component label = this.targetCategory.getLabel();
          Button button = Button.builder(label, btn -> EarthCustomizeScreen.this.showCategory(this.targetCategory)).bounds(0, 0, 0, 20).build();
          button.active = this.active;
          if (this.tooltip != null) {
             button.setTooltip(Tooltip.create(this.tooltip));
          }
 
-         return button;
-      }
-   }
-
-   @Environment(EnvType.CLIENT)
-   private static final class DemProviderToggleDefinition implements EarthCustomizeScreen.SettingDefinition {
-      private final EarthGeneratorSettings.DemProvider provider;
-      private boolean value;
-      private boolean forceDisabled;
-      private Component forceDisabledTooltip;
-
-      private DemProviderToggleDefinition(EarthGeneratorSettings.DemProvider provider, boolean defaultValue) {
-         this.provider = Objects.requireNonNull(provider, "provider");
-         this.value = defaultValue;
-      }
-
-      private EarthCustomizeScreen.DemProviderToggleDefinition forceDisabled(boolean forceDisabled) {
-         this.forceDisabled = forceDisabled;
-         if (!forceDisabled) {
-            this.forceDisabledTooltip = null;
-         }
-
-         return this;
-      }
-
-      private EarthCustomizeScreen.DemProviderToggleDefinition forceDisabled(boolean forceDisabled, Component tooltip) {
-         this.forceDisabled = forceDisabled;
-         this.forceDisabledTooltip = forceDisabled ? Objects.requireNonNull(tooltip, "forceDisabledTooltip") : null;
-         return this;
-      }
-
-      @Override
-      public AbstractWidget createWidget(Runnable onChange) {
-         Component name = EarthCustomizeScreen.formatDemProvider(this.provider);
-         Component tooltip = this.forceDisabled && this.forceDisabledTooltip != null
-            ? this.forceDisabledTooltip
-            : EarthCustomizeScreen.settingTooltip("dem_provider");
-         Builder<Boolean> builder = CycleButton.booleanBuilder(EarthCustomizeScreen.YES, EarthCustomizeScreen.NO, this.value)
-            .withTooltip(value -> Tooltip.create(tooltip));
-         CycleButton<Boolean> button = builder.create(0, 0, 0, 20, name, (btn, value) -> {
-            this.value = value;
-            onChange.run();
-         });
-         button.active = !this.forceDisabled;
          return button;
       }
    }
@@ -2695,160 +2241,6 @@ public class EarthCustomizeScreen extends Screen {
       }
 
       protected void updateWidgetNarration( NarrationElementOutput narration) {
-      }
-   }
-
-   @Environment(EnvType.CLIENT)
-   private static final class HmaTokenDefinition implements EarthCustomizeScreen.SettingDefinition {
-      private String value;
-      private EditBox widget;
-
-      private HmaTokenDefinition(String initialValue) {
-         this.value = HmaAccessManager.savedToken();
-         this.setValue(initialValue);
-      }
-
-      private String value() {
-         return this.value;
-      }
-
-      private void setValue(String value) {
-         String normalized = HmaAccessManager.normalizeToken(value);
-         this.value = normalized;
-         EditBox widget = this.widget;
-         if (widget != null && !Objects.equals(widget.getValue(), normalized)) {
-            widget.setValue(normalized);
-         }
-      }
-
-      @Override
-      public AbstractWidget createWidget(Runnable onChange) {
-         EditBox widget = new EditBox(Minecraft.getInstance().font, 0, 0, 0, 20, Component.literal("Earthdata bearer token"));
-         widget.setMaxLength(4096);
-         widget.setHint(Component.translatable("tellus.hma_access.token.hint"));
-         widget.setTooltip(Tooltip.create(Component.translatable("tellus.hma_access.token.tooltip")));
-         widget.setValue(this.value);
-         widget.setResponder(value -> {
-            String normalized = HmaAccessManager.normalizeToken(value);
-            this.value = normalized;
-            HmaAccessManager.onTokenEdited(normalized);
-         });
-         this.widget = widget;
-         return widget;
-      }
-   }
-
-   @Environment(EnvType.CLIENT)
-   private static final class HmaAccessButtonsDefinition implements EarthCustomizeScreen.SettingDefinition {
-      private final EarthCustomizeScreen.HmaTokenDefinition tokenDefinition;
-
-      private HmaAccessButtonsDefinition(EarthCustomizeScreen.HmaTokenDefinition tokenDefinition) {
-         this.tokenDefinition = Objects.requireNonNull(tokenDefinition, "tokenDefinition");
-      }
-
-      @Override
-      public AbstractWidget createWidget(Runnable onChange) {
-         return new EarthCustomizeScreen.HmaAccessButtonsWidget(this.tokenDefinition);
-      }
-   }
-
-   @Environment(EnvType.CLIENT)
-   private static final class HmaAccessButtonsWidget extends AbstractWidget {
-      private final EarthCustomizeScreen.HmaTokenDefinition tokenDefinition;
-      private final Button saveButton;
-      private final Button testButton;
-      private final Button clearButton;
-
-      private HmaAccessButtonsWidget(EarthCustomizeScreen.HmaTokenDefinition tokenDefinition) {
-         super(0, 0, 0, 20, Component.empty());
-         this.tokenDefinition = Objects.requireNonNull(tokenDefinition, "tokenDefinition");
-         this.saveButton = Button.builder(Component.translatable("tellus.hma_access.action.save"), btn -> {
-            HmaAccessManager.saveToken(this.tokenDefinition.value());
-         }).bounds(0, 0, 0, 20).build();
-         this.testButton = Button.builder(Component.translatable("tellus.hma_access.action.test"), btn -> {
-            HmaAccessManager.testToken(this.tokenDefinition.value());
-         }).bounds(0, 0, 0, 20).build();
-         this.clearButton = Button.builder(Component.translatable("tellus.hma_access.action.clear"), btn -> {
-            this.tokenDefinition.setValue("");
-            HmaAccessManager.clearToken();
-         }).bounds(0, 0, 0, 20).build();
-      }
-
-      protected void extractWidgetRenderState(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float delta) {
-         String currentToken = HmaAccessManager.normalizeToken(this.tokenDefinition.value());
-         String savedToken = HmaAccessManager.savedToken();
-         this.saveButton.active = HmaAccessManager.canSaveToken(currentToken);
-         this.testButton.active = !currentToken.isBlank() && !HmaAccessManager.isTesting();
-         this.clearButton.active = !currentToken.isBlank() || !savedToken.isBlank();
-         int gap = 4;
-         int buttonWidth = Math.max(0, (this.width - gap * 2) / 3);
-         int remaining = Math.max(0, this.width - buttonWidth * 3 - gap * 2);
-         int x = this.getX();
-         int y = this.getY();
-         this.saveButton.setX(x);
-         this.saveButton.setY(y);
-         this.saveButton.setWidth(buttonWidth);
-         this.saveButton.setHeight(this.height);
-         this.testButton.setX(x + buttonWidth + gap);
-         this.testButton.setY(y);
-         this.testButton.setWidth(buttonWidth);
-         this.testButton.setHeight(this.height);
-         this.clearButton.setX(x + (buttonWidth + gap) * 2);
-         this.clearButton.setY(y);
-         this.clearButton.setWidth(buttonWidth + remaining);
-         this.clearButton.setHeight(this.height);
-         this.saveButton.extractRenderState(graphics, mouseX, mouseY, delta);
-         this.testButton.extractRenderState(graphics, mouseX, mouseY, delta);
-         this.clearButton.extractRenderState(graphics, mouseX, mouseY, delta);
-      }
-
-      public boolean mouseClicked(MouseButtonEvent event, boolean isPrimary) {
-         boolean saveClicked = this.saveButton.mouseClicked(event, isPrimary);
-         boolean testClicked = this.testButton.mouseClicked(event, isPrimary);
-         boolean clearClicked = this.clearButton.mouseClicked(event, isPrimary);
-         return saveClicked || testClicked || clearClicked;
-      }
-
-      protected void onDrag(MouseButtonEvent event, double deltaX, double deltaY) {
-         this.saveButton.mouseDragged(event, deltaX, deltaY);
-         this.testButton.mouseDragged(event, deltaX, deltaY);
-         this.clearButton.mouseDragged(event, deltaX, deltaY);
-      }
-
-      public void onRelease(MouseButtonEvent event) {
-         this.saveButton.mouseReleased(event);
-         this.testButton.mouseReleased(event);
-         this.clearButton.mouseReleased(event);
-      }
-
-      protected void updateWidgetNarration(NarrationElementOutput narration) {
-      }
-   }
-
-   @Environment(EnvType.CLIENT)
-   private static final class HmaAccessStatusDefinition implements EarthCustomizeScreen.SettingDefinition {
-      @Override
-      public AbstractWidget createWidget(Runnable onChange) {
-         return new EarthCustomizeScreen.HmaAccessStatusWidget();
-      }
-   }
-
-   @Environment(EnvType.CLIENT)
-   private static final class HmaAccessStatusWidget extends AbstractWidget {
-      private HmaAccessStatusWidget() {
-         super(0, 0, 0, 20, Component.empty());
-      }
-
-      protected void extractWidgetRenderState(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float delta) {
-         EarthCustomizeScreen.HmaAccessState state = HmaAccessManager.state();
-         Font font = Minecraft.getInstance().font;
-         int textWidth = font.width(state.message());
-         int textX = this.getX() + Math.max(0, (this.width - textWidth) / 2);
-         int textY = this.getY() + (this.height - 9) / 2;
-         graphics.text(font, state.message(), textX, textY, state.color(), false);
-      }
-
-      protected void updateWidgetNarration(NarrationElementOutput narration) {
       }
    }
 
@@ -3006,6 +2398,7 @@ public class EarthCustomizeScreen extends Screen {
       private boolean unavailable;
       
       private Component unavailableTooltip;
+      private Component forceDisabledTooltip;
 
       private SliderDefinition(String key, double defaultValue, double min, double max, double step) {
          this.key = key;
@@ -3032,6 +2425,16 @@ public class EarthCustomizeScreen extends Screen {
 
       private EarthCustomizeScreen.SliderDefinition forceDisabled(boolean forceDisabled) {
          this.forceDisabled = forceDisabled;
+         if (!forceDisabled) {
+            this.forceDisabledTooltip = null;
+         }
+
+         return this;
+      }
+
+      private EarthCustomizeScreen.SliderDefinition forceDisabled(boolean forceDisabled, Component tooltip) {
+         this.forceDisabled = forceDisabled;
+         this.forceDisabledTooltip = forceDisabled ? Objects.requireNonNull(tooltip, "forceDisabledTooltip") : null;
          return this;
       }
 
@@ -3046,7 +2449,9 @@ public class EarthCustomizeScreen extends Screen {
          EarthCustomizeScreen.EarthSlider slider = new EarthCustomizeScreen.EarthSlider(0, 0, 0, 20, this, onChange);
          Component tooltip = this.unavailableTooltip != null
             ? this.unavailableTooltip
-            : (this.locked ? EarthCustomizeScreen.workInProgressTooltip(this.key) : EarthCustomizeScreen.settingTooltip(this.key));
+            : (this.forceDisabled && this.forceDisabledTooltip != null
+               ? this.forceDisabledTooltip
+               : (this.locked ? EarthCustomizeScreen.workInProgressTooltip(this.key) : EarthCustomizeScreen.settingTooltip(this.key)));
          slider.setTooltip(Tooltip.create(tooltip));
          slider.active = !this.locked && !this.forceDisabled && !this.unavailable;
          return slider;
@@ -3194,6 +2599,7 @@ public class EarthCustomizeScreen extends Screen {
       private Component unavailableTooltip;
       
       private Component forceDisabledTooltip;
+      private Component tooltipOverride;
 
       private ToggleDefinition(String key, boolean defaultValue) {
          this.key = key;
@@ -3202,6 +2608,11 @@ public class EarthCustomizeScreen extends Screen {
 
       private EarthCustomizeScreen.ToggleDefinition locked(boolean locked) {
          this.locked = locked;
+         return this;
+      }
+
+      private EarthCustomizeScreen.ToggleDefinition withTooltip(Component tooltip) {
+         this.tooltipOverride = Objects.requireNonNull(tooltip, "tooltipOverride");
          return this;
       }
 
@@ -3233,14 +2644,12 @@ public class EarthCustomizeScreen extends Screen {
             ? this.unavailableTooltip
             : (this.forceDisabled && this.forceDisabledTooltip != null
                ? this.forceDisabledTooltip
-               : (this.locked ? EarthCustomizeScreen.workInProgressTooltip(this.key) : EarthCustomizeScreen.settingTooltip(this.key)));
-         Component enabledLabel = "enable_water".equals(this.key)
-            ? Component.translatable("property.tellus.enable_water.value.openstreetmap")
-            : EarthCustomizeScreen.YES;
-         Component disabledLabel = "enable_water".equals(this.key)
-            ? Component.translatable("property.tellus.enable_water.value.esa")
-            : EarthCustomizeScreen.NO;
-         Builder<Boolean> builder = CycleButton.booleanBuilder(enabledLabel, disabledLabel, this.value)
+               : (
+                  this.tooltipOverride != null
+                     ? this.tooltipOverride
+                     : (this.locked ? EarthCustomizeScreen.workInProgressTooltip(this.key) : EarthCustomizeScreen.settingTooltip(this.key))
+               ));
+         Builder<Boolean> builder = CycleButton.booleanBuilder(EarthCustomizeScreen.YES, EarthCustomizeScreen.NO, this.value)
             .withTooltip(value -> Tooltip.create(tooltip));
          CycleButton<Boolean> button = builder.create(0, 0, 0, 20, name, (btn, value) -> {
             this.value = value;

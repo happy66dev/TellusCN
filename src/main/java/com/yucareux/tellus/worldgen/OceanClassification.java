@@ -27,10 +27,22 @@ final class OceanClassification {
       int coverClass,
       int seaLevel
    ) {
-      if (oceanHint) {
+      return isOcean(oceanHint, strictOverture, landMaskSample, surface, coverClass, seaLevel, false);
+   }
+
+   static boolean isOcean(
+      boolean oceanHint,
+      boolean strictOverture,
+      TellusLandMaskSource.LandMaskSample landMaskSample,
+      int surface,
+      int coverClass,
+      int seaLevel,
+      boolean mapterhornLandOverride
+   ) {
+      if (strictOverture) {
+         return oceanHint;
+      } else if (oceanHint) {
          return true;
-      } else if (strictOverture) {
-         return false;
       } else if (landMaskSample != null && landMaskSample.known()) {
          return !landMaskSample.land() && (surface <= seaLevel || coverClass == ESA_NO_DATA || coverClass == ESA_WATER);
       } else {

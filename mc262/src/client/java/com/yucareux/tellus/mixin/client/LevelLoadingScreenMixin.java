@@ -33,9 +33,9 @@ public abstract class LevelLoadingScreenMixin {
    private static final int LOADING_WIDGET_HALF_HEIGHT = 42;
    private static final int LOADING_WIDGET_TEXT_GAP = 16;
    private static final List<Component> CONTRIBUTIONS = List.of(
-      Component.literal("Land cover: © ESA WorldCover project / Contains modified Copernicus Sentinel data (2021) processed by ESA WorldCover consortium."),
+      Component.literal("Land cover: © Overture Maps Foundation and OpenStreetMap contributors; derived from ESA WorldCover 2020 / modified Copernicus Sentinel data."),
       Component.literal("Climate zones: Köppen–Geiger climate classification (Beck et al., 2018) — CC BY 4.0."),
-      Component.literal("Elevation: swissALTI3D / Terrain Tiles / AHN / CANElevation / USGS 3DEP / Copernicus DEM / ArcticDEM/REMA — see Data Sources for required DEM attributions."),
+      Component.literal("Elevation: Mapterhorn terrain / OpenWaters bathymetry — see Data Sources for required DEM attributions."),
       Component.literal("Weather: Weather data by Open-Meteo.com (https://open-meteo.com/)")
    );
    @Shadow

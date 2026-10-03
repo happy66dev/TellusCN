@@ -7,6 +7,7 @@ def minecraftVersion = '1.21.1'
 def loaderVersion = '0.15.11'
 def fabricVersion = '0.115.4+1.21.1'
 def distantHorizonsApiVersion = '7.0.0'
+def twelveMonkeysImageioVersion = '3.13.1'
 def javaVersion = 21
 def distantHorizonsRuntimePath = providers.gradleProperty('mc1211_distant_horizons_runtime_path').orNull
 
@@ -74,6 +75,18 @@ dependencies {
 	include 'io.github.sebasbaumh:mapbox-vector-tile-java:24.1.1'
 	implementation 'com.google.protobuf:protobuf-java:4.28.2'
 	include 'com.google.protobuf:protobuf-java:4.28.2'
+	implementation "com.twelvemonkeys.imageio:imageio-webp:${twelveMonkeysImageioVersion}"
+	implementation "com.twelvemonkeys.imageio:imageio-core:${twelveMonkeysImageioVersion}"
+	implementation "com.twelvemonkeys.imageio:imageio-metadata:${twelveMonkeysImageioVersion}"
+	implementation "com.twelvemonkeys.common:common-lang:${twelveMonkeysImageioVersion}"
+	implementation "com.twelvemonkeys.common:common-io:${twelveMonkeysImageioVersion}"
+	implementation "com.twelvemonkeys.common:common-image:${twelveMonkeysImageioVersion}"
+	include "com.twelvemonkeys.imageio:imageio-webp:${twelveMonkeysImageioVersion}"
+	include "com.twelvemonkeys.imageio:imageio-core:${twelveMonkeysImageioVersion}"
+	include "com.twelvemonkeys.imageio:imageio-metadata:${twelveMonkeysImageioVersion}"
+	include "com.twelvemonkeys.common:common-lang:${twelveMonkeysImageioVersion}"
+	include "com.twelvemonkeys.common:common-io:${twelveMonkeysImageioVersion}"
+	include "com.twelvemonkeys.common:common-image:${twelveMonkeysImageioVersion}"
 
 	testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
 	testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.10.2'

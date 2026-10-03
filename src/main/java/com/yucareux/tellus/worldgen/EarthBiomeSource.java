@@ -119,15 +119,13 @@ public final class EarthBiomeSource extends BiomeSource {
    
    private final WaterSurfaceResolver waterResolver;
    private final RandomBiomeMixer randomBiomeMixer;
-   private final boolean remaSnowEnabled;
-   private final double remaSnowBoundaryZ;
    private final int deepDarkCeiling;
    private volatile boolean fastSpawnMode = true;
 
    public EarthBiomeSource(HolderGetter<Biome> biomeLookup, EarthGeneratorSettings settings) {
       this.biomeLookup = Objects.requireNonNull(biomeLookup, "biomeLookup");
       this.settings = Objects.requireNonNull(settings, "settings");
-      this.deepDarkCeiling = settings.resolveSeaLevel() - DEEP_DARK_Y_OFFSET;
+      this.deepDarkCeiling = settings.effectiveHeightOffset() - DEEP_DARK_Y_OFFSET;
       this.plains = this.biomeLookup.getOrThrow(Biomes.PLAINS);
       this.sunflowerPlains = this.resolveBiome(Biomes.SUNFLOWER_PLAINS, this.plains);
       this.flowerForest = this.resolveBiome(Biomes.FLOWER_FOREST, this.plains);
@@ -149,8 +147,6 @@ public final class EarthBiomeSource extends BiomeSource {
       this.deepDark = this.resolveOptionalBiome(Biomes.DEEP_DARK);
       this.waterResolver = TellusWorldgenSources.waterResolver(this.settings);
       this.randomBiomeMixer = new RandomBiomeMixer(this.biomeLookup, this.settings);
-      this.remaSnowEnabled = TellusElevationSource.usesPolarDem(settings.demSelection()) && settings.worldScale() > 0.0;
-      this.remaSnowBoundaryZ = this.remaSnowEnabled ? TellusElevationSource.remaBoundaryBlockZ(settings.worldScale()) : Double.POSITIVE_INFINITY;
       this.possibleBiomes = this.buildPossibleBiomes();
    }
 
@@ -194,9 +190,7 @@ public final class EarthBiomeSource extends BiomeSource {
    public Holder<Biome> getBiomeAtBlock(
       int blockX, int blockZ, int rawCoverClass, int visualCoverClass, boolean hasWater, boolean isOcean
    ) {
-      return this.fastSpawnMode
-         ? this.resolveFastSpawnSurfaceBiome(blockX, blockZ)
-         : this.resolveSurfaceBiomeAtBlock(blockX, blockZ, rawCoverClass, visualCoverClass, hasWater, isOcean, null);
+      return this.resolveSurfaceBiomeAtBlock(blockX, blockZ, rawCoverClass, visualCoverClass, hasWater, isOcean, null);
    }
 
    public Holder<Biome> getLodBiomeAtBlock(
@@ -205,12 +199,18 @@ public final class EarthBiomeSource extends BiomeSource {
       return this.resolveSurfaceBiomeAtBlock(blockX, blockZ, rawCoverClass, visualCoverClass, hasWater, isOcean, null);
    }
 
+   public Holder<Biome> getLodBiomeAtBlock(
+      int blockX, int blockZ, int rawCoverClass, int visualCoverClass, boolean hasWater, boolean isOcean, double previewResolutionMeters
+   ) {
+      return this.resolveSurfaceBiomeAtBlock(
+         blockX, blockZ, rawCoverClass, visualCoverClass, hasWater, isOcean, null, previewResolutionMeters
+      );
+   }
+
    Holder<Biome> getBiomeAtBlock(
       int blockX, int blockZ, int rawCoverClass, int visualCoverClass, WaterSurfaceResolver.WaterColumnData column, String koppenCode
    ) {
-      return this.fastSpawnMode
-         ? this.resolveFastSpawnSurfaceBiome(blockX, blockZ)
-         : this.resolveSurfaceBiomeAtBlock(blockX, blockZ, rawCoverClass, visualCoverClass, column, koppenCode);
+      return this.resolveSurfaceBiomeAtBlock(blockX, blockZ, rawCoverClass, visualCoverClass, column, koppenCode);
    }
 
    
@@ -248,18 +248,17 @@ public final class EarthBiomeSource extends BiomeSource {
    private Holder<Biome> resolveFastSpawnSurfaceBiome(int blockX, int blockZ) {
       int rawCoverClass = LAND_COVER_SOURCE.sampleCoverClass(blockX, blockZ, this.settings.worldScale());
       int visualCoverClass = this.sampleVisualCoverClass(blockX, blockZ, rawCoverClass);
-      boolean remaSnowTerrain = this.isRemaSnowTerrain(blockZ);
       if (rawCoverClass == ESA_MANGROVES) {
          return this.mangrove;
       } else if (this.settings.enableWater()) {
          WaterSurfaceResolver.WaterInfo waterInfo = this.waterResolver.resolveFastWaterInfo(blockX, blockZ, rawCoverClass);
          return waterInfo.isWater()
             ? (waterInfo.isOcean() ? this.ocean : this.river)
-            : (remaSnowTerrain || visualCoverClass == ESA_SNOW_ICE ? this.frozenPeaks : this.plains);
+            : (visualCoverClass == ESA_SNOW_ICE ? this.frozenPeaks : this.plains);
       } else if (rawCoverClass == ESA_WATER) {
          return this.ocean;
       } else {
-         return remaSnowTerrain || visualCoverClass == ESA_SNOW_ICE ? this.frozenPeaks : (rawCoverClass == ESA_NO_DATA ? this.ocean : this.plains);
+         return visualCoverClass == ESA_SNOW_ICE ? this.frozenPeaks : (rawCoverClass == ESA_NO_DATA ? this.ocean : this.plains);
       }
    }
 
@@ -290,11 +289,26 @@ public final class EarthBiomeSource extends BiomeSource {
    private Holder<Biome> resolveSurfaceBiomeAtBlock(
       int blockX, int blockZ, int rawCoverClass, int visualCoverClass, boolean hasWater, boolean isOcean, String precomputedKoppen
    ) {
+      return this.resolveSurfaceBiomeAtBlock(
+         blockX, blockZ, rawCoverClass, visualCoverClass, hasWater, isOcean, precomputedKoppen, Double.NaN
+      );
+   }
+
+   private Holder<Biome> resolveSurfaceBiomeAtBlock(
+      int blockX,
+      int blockZ,
+      int rawCoverClass,
+      int visualCoverClass,
+      boolean hasWater,
+      boolean isOcean,
+      String precomputedKoppen,
+      double previewResolutionMeters
+   ) {
       if (rawCoverClass == ESA_MANGROVES) {
          return this.mangrove;
       }
       if ((this.settings.enableWater() || rawCoverClass == ESA_NO_DATA || rawCoverClass == ESA_WATER) && hasWater) {
-         return isOcean ? this.resolveOceanBiome(blockX, blockZ, null) : this.river;
+         return isOcean ? this.resolveOceanBiome(blockX, blockZ, null, previewResolutionMeters) : this.river;
       }
       if (this.settings.enableWater() && !hasWater) {
          visualCoverClass = this.resolveDryOsmVisualCoverClass(blockX, blockZ, rawCoverClass, visualCoverClass);
@@ -314,8 +328,14 @@ public final class EarthBiomeSource extends BiomeSource {
    }
 
    private Holder<Biome> resolveOceanBiome(int blockX, int blockZ, WaterSurfaceResolver.WaterColumnData column) {
+      return this.resolveOceanBiome(blockX, blockZ, column, Double.NaN);
+   }
+
+   private Holder<Biome> resolveOceanBiome(
+      int blockX, int blockZ, WaterSurfaceResolver.WaterColumnData column, double previewResolutionMeters
+   ) {
       OisstOceanClimateSource.Sample climate = OCEAN_CLIMATE_SOURCE.sample(blockX, blockZ, this.settings.worldScale());
-      boolean deep = this.isDeepOcean(blockX, blockZ, column);
+      boolean deep = this.isDeepOcean(blockX, blockZ, column, previewResolutionMeters);
       Holder<Biome> biome;
       if (climate.maxIceFraction() >= FROZEN_OCEAN_ICE_FRACTION || climate.meanSstC() <= FROZEN_OCEAN_SST_C) {
          biome = deep ? this.deepFrozenOcean : this.frozenOcean;
@@ -331,14 +351,30 @@ public final class EarthBiomeSource extends BiomeSource {
    }
 
    private boolean isDeepOcean(int blockX, int blockZ, WaterSurfaceResolver.WaterColumnData column) {
-      double depthMeters = this.sampleOceanDepthMeters(blockX, blockZ, column);
+      return this.isDeepOcean(blockX, blockZ, column, Double.NaN);
+   }
+
+   private boolean isDeepOcean(
+      int blockX, int blockZ, WaterSurfaceResolver.WaterColumnData column, double previewResolutionMeters
+   ) {
+      double depthMeters = this.sampleOceanDepthMeters(blockX, blockZ, column, previewResolutionMeters);
       return Double.isFinite(depthMeters) && depthMeters >= DEEP_OCEAN_DEPTH_METERS;
    }
 
    private double sampleOceanDepthMeters(int blockX, int blockZ, WaterSurfaceResolver.WaterColumnData column) {
-      double oceanElevation = ELEVATION_SOURCE.sampleOceanElevationMeters(
-         blockX, blockZ, this.settings.worldScale(), this.settings.demSelection()
-      );
+      return this.sampleOceanDepthMeters(blockX, blockZ, column, Double.NaN);
+   }
+
+   private double sampleOceanDepthMeters(
+      int blockX, int blockZ, WaterSurfaceResolver.WaterColumnData column, double previewResolutionMeters
+   ) {
+      double oceanElevation = Double.isFinite(previewResolutionMeters) && previewResolutionMeters > 0.0
+         ? ELEVATION_SOURCE.samplePreviewOceanElevationMeters(
+            blockX, blockZ, this.settings.worldScale(), this.settings.demSelection(), previewResolutionMeters
+         )
+         : ELEVATION_SOURCE.sampleOceanElevationMeters(
+            blockX, blockZ, this.settings.worldScale(), this.settings.demSelection()
+         );
       if (Double.isFinite(oceanElevation) && oceanElevation < 0.0) {
          return -oceanElevation;
       } else if (column != null && column.hasWater()) {
@@ -349,7 +385,7 @@ public final class EarthBiomeSource extends BiomeSource {
    }
 
    private Holder<Biome> resolveSurfaceBiomeAfterWater(int blockX, int blockZ, int visualCoverClass, String precomputedKoppen) {
-      if (this.isRemaSnowTerrain(blockZ) || visualCoverClass == ESA_SNOW_ICE) {
+      if (visualCoverClass == ESA_SNOW_ICE) {
          return this.applyRandomLandBiome(this.frozenPeaks, blockX, blockZ, null);
       }
 
@@ -455,10 +491,6 @@ public final class EarthBiomeSource extends BiomeSource {
 
       double relief = max - min;
       return samples >= 3 && relief >= CHERRY_GROVE_MIN_RELIEF_METERS && relief <= CHERRY_GROVE_MAX_RELIEF_METERS;
-   }
-
-   private boolean isRemaSnowTerrain(int blockZ) {
-      return this.remaSnowEnabled && blockZ >= this.remaSnowBoundaryZ;
    }
 
    private int sampleVisualCoverClass(int blockX, int blockZ, int rawCoverClass) {

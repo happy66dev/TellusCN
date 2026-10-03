@@ -27,12 +27,21 @@ final class TellusConfiguredCarvers {
       this.orderedCarvers = orderedCarvers;
    }
 
-   static TellusConfiguredCarvers create(Registry<Block> blockRegistry, int tellusMinY, int tellusHeight) {
+   static TellusConfiguredCarvers create(Registry<Block> blockRegistry, int tellusMinY, int tellusHeight, boolean fullHeightCarvers) {
       HolderSet<Block> replaceables = blockRegistry.getOrThrow(BlockTags.OVERWORLD_CARVER_REPLACEABLES);
-      int caveCeilingY = TellusHeightRemapper.remapVanillaAbsolute(220, tellusMinY, tellusHeight);
-      int caveExtraCeilingY = TellusHeightRemapper.remapVanillaAbsolute(96, tellusMinY, tellusHeight);
-      int canyonFloorY = TellusHeightRemapper.remapVanillaAbsolute(24, tellusMinY, tellusHeight);
-      int canyonCeilingY = TellusHeightRemapper.remapVanillaAbsolute(110, tellusMinY, tellusHeight);
+      int tellusMaxY = tellusMinY + tellusHeight - 1;
+      int caveCeilingY = fullHeightCarvers
+         ? Math.max(tellusMinY + 8, tellusMaxY - 8)
+         : TellusHeightRemapper.remapVanillaAbsolute(220, tellusMinY, tellusHeight);
+      int caveExtraCeilingY = fullHeightCarvers
+         ? Math.max(tellusMinY + 8, tellusMaxY - 32)
+         : TellusHeightRemapper.remapVanillaAbsolute(96, tellusMinY, tellusHeight);
+      int canyonFloorY = fullHeightCarvers
+         ? Math.min(tellusMaxY - 32, tellusMinY + 16)
+         : TellusHeightRemapper.remapVanillaAbsolute(24, tellusMinY, tellusHeight);
+      int canyonCeilingY = fullHeightCarvers
+         ? Math.max(canyonFloorY, tellusMaxY - 64)
+         : TellusHeightRemapper.remapVanillaAbsolute(110, tellusMinY, tellusHeight);
       if (canyonFloorY > canyonCeilingY) {
          int tmp = canyonFloorY;
          canyonFloorY = canyonCeilingY;

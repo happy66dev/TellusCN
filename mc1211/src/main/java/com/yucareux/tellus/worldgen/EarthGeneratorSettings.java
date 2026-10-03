@@ -8,7 +8,6 @@ import com.mojang.serialization.MapLike;
 import com.mojang.serialization.RecordBuilder;
 import com.mojang.serialization.MapEncoder.Implementation;
 import com.mojang.serialization.codecs.RecordCodecBuilder;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -21,7 +20,6 @@ public record EarthGeneratorSettings(
    double terrestrialHeightScale,
    double oceanicHeightScale,
    int heightOffset,
-   int seaLevel,
    double spawnLatitude,
    double spawnLongitude,
    int minAltitude,
@@ -71,16 +69,21 @@ public record EarthGeneratorSettings(
    boolean climateBasedBuiltUpTerrain,
    boolean randomBiomes,
    double randomBiomeDensity,
-   long randomBiomeSeed
+   long randomBiomeSeed,
+   boolean experimentalIncreaseHeight,
+   boolean tellusManagedTerrainDownloads,
+   boolean showTerrainDownloadOverlay
 ) {
    public static final double DEFAULT_SPAWN_LATITUDE = 27.9881;
    public static final double DEFAULT_SPAWN_LONGITUDE = 86.925;
    public static final int AUTO_ALTITUDE = Integer.MIN_VALUE;
-   public static final int AUTO_SEA_LEVEL = -2147483647;
    public static final int MIN_WORLD_Y = -2032;
    public static final int MAX_WORLD_HEIGHT = 4064;
    public static final int MAX_WORLD_Y = 2031;
+   public static final int EXPERIMENTAL_HEIGHT_OFFSET = 0;
+   public static final int EXPERIMENTAL_TERRAIN_SHELL_DEPTH = 128;
    private static final int ALTITUDE_TOLERANCE = 50;
+   private static final int EXPERIMENTAL_TOP_MARGIN = 128;
    private static final int HEIGHT_ALIGNMENT = 16;
    private static final double EVEREST_ELEVATION_METERS = 8848.0;
    private static final double MARIANA_TRENCH_METERS = -11034.0;
@@ -101,7 +104,6 @@ public record EarthGeneratorSettings(
       1.0,
       1.0,
       64,
-      -2147483647,
       27.9881,
       86.925,
       -64,
@@ -112,25 +114,25 @@ public record EarthGeneratorSettings(
       false,
       false,
       false,
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
       false,
       FIXED_DH_OSM_FEATURES,
       FIXED_DH_OSM_ROAD_MAX_DETAIL,
@@ -143,7 +145,7 @@ public record EarthGeneratorSettings(
       96,
       4,
       EarthGeneratorSettings.DistantHorizonsRenderMode.FAST,
-      EarthGeneratorSettings.DemSelection.automaticSelection(),
+      EarthGeneratorSettings.DemSelection.mapterhornSelection(),
       false,
       false,
       true,
@@ -151,7 +153,10 @@ public record EarthGeneratorSettings(
       false,
       false,
       DEFAULT_RANDOM_BIOME_DENSITY,
-      DEFAULT_RANDOM_BIOME_SEED
+      DEFAULT_RANDOM_BIOME_SEED,
+      false,
+      false,
+      false
    );
    private static final MapCodec<EarthGeneratorSettings.BaseToggles> BASE_TOGGLES_CODEC = RecordCodecBuilder.mapCodec(
       instance -> instance.group(
@@ -223,7 +228,6 @@ public record EarthGeneratorSettings(
             )
          )
    );
-   private static final MapCodec<Optional<Integer>> SEA_LEVEL_CODEC = Codec.INT.optionalFieldOf("sea_level");
    private static final MapCodec<EarthGeneratorSettings.DistantHorizonsRenderMode> DISTANT_HORIZONS_RENDER_MODE_CODEC = EarthGeneratorSettings.DistantHorizonsRenderMode.CODEC
       .fieldOf("distant_horizons_render_mode")
       .orElse(DEFAULT.distantHorizonsRenderMode());
@@ -287,6 +291,12 @@ public record EarthGeneratorSettings(
    private static final MapCodec<Boolean> DISTANT_HORIZONS_OSM_NON_BLOCKING_FETCH_CODEC = Codec.BOOL
       .fieldOf("distant_horizons_osm_non_blocking_fetch")
       .orElse(DEFAULT.distantHorizonsOsmNonBlockingFetch());
+   private static final MapCodec<Boolean> TELLUS_MANAGED_TERRAIN_DOWNLOADS_CODEC = Codec.BOOL
+      .fieldOf("tellus_managed_terrain_downloads")
+      .orElse(false);
+   private static final MapCodec<Boolean> SHOW_TERRAIN_DOWNLOAD_OVERLAY_CODEC = Codec.BOOL
+      .fieldOf("show_terrain_download_overlay")
+      .orElse(false);
    private static final MapCodec<Boolean> REALTIME_TIME_CODEC = Codec.BOOL.fieldOf("realtime_time").orElse(DEFAULT.realtimeTime());
    private static final MapCodec<Boolean> REALTIME_WEATHER_CODEC = Codec.BOOL.fieldOf("realtime_weather").orElse(DEFAULT.realtimeWeather());
    private static final MapCodec<Boolean> HISTORICAL_SNOW_CODEC = Codec.BOOL.fieldOf("historical_snow").orElse(DEFAULT.historicalSnow());
@@ -302,6 +312,11 @@ public record EarthGeneratorSettings(
       .fieldOf("random_biome_density")
       .orElse(DEFAULT.randomBiomeDensity());
    private static final MapCodec<Long> RANDOM_BIOME_SEED_CODEC = Codec.LONG.fieldOf("random_biome_seed").orElse(DEFAULT.randomBiomeSeed());
+   private static final MapCodec<Boolean> EXPERIMENTAL_INCREASE_HEIGHT_CODEC = Codec.BOOL
+      .fieldOf("experimental_increase_height")
+      .orElse(DEFAULT.experimentalIncreaseHeight());
+   private static final MapCodec<Optional<String>> EXPERIMENTAL_HEIGHT_COORDINATE_PROFILE_CODEC = Codec.STRING
+      .optionalFieldOf("experimental_height_coordinate_profile");
    private static final MapCodec<Boolean> VOXY_CHUNK_PREGEN_ENABLED_CODEC = Codec.BOOL
       .fieldOf("voxy_chunk_pregen_enabled")
       .orElse(DEFAULT.voxyChunkPregenEnabled());
@@ -351,8 +366,6 @@ public record EarthGeneratorSettings(
       new Implementation<EarthGeneratorSettings>() {
          public <T> RecordBuilder<T> encode(EarthGeneratorSettings input, DynamicOps<T> ops, RecordBuilder<T> prefix) {
             RecordBuilder<T> builder = EarthGeneratorSettings.BASE_CODEC.encode(EarthGeneratorSettings.SettingsBase.fromSettings(input), ops, prefix);
-            Optional<Integer> seaLevel = input.seaLevel() == -2147483647 ? Optional.empty() : Optional.of(input.seaLevel());
-            builder = EarthGeneratorSettings.SEA_LEVEL_CODEC.encode(seaLevel, ops, builder);
             builder = EarthGeneratorSettings.DISTANT_HORIZONS_RENDER_MODE_CODEC.encode(input.distantHorizonsRenderMode(), ops, builder);
             builder = EarthGeneratorSettings.DEM_SELECTION_CODEC.encode(input.demSelection(), ops, builder);
             builder = EarthGeneratorSettings.DISTANT_HORIZONS_WATER_RESOLVER_CODEC.encode(input.distantHorizonsWaterResolver(), ops, builder);
@@ -371,17 +384,23 @@ public record EarthGeneratorSettings(
             builder = EarthGeneratorSettings.RANDOM_BIOMES_CODEC.encode(input.randomBiomes(), ops, builder);
             builder = EarthGeneratorSettings.RANDOM_BIOME_DENSITY_CODEC.encode(input.randomBiomeDensity(), ops, builder);
             builder = EarthGeneratorSettings.RANDOM_BIOME_SEED_CODEC.encode(input.randomBiomeSeed(), ops, builder);
+            builder = EarthGeneratorSettings.EXPERIMENTAL_INCREASE_HEIGHT_CODEC.encode(input.experimentalIncreaseHeight(), ops, builder);
+            builder = EarthGeneratorSettings.EXPERIMENTAL_HEIGHT_COORDINATE_PROFILE_CODEC.encode(
+               input.experimentalIncreaseHeight() ? Optional.of(HighYPackedCoordinateProfile.PROFILE_ID) : Optional.empty(), ops, builder
+            );
             builder = EarthGeneratorSettings.VOXY_CHUNK_PREGEN_ENABLED_CODEC.encode(input.voxyChunkPregenEnabled(), ops, builder);
             builder = EarthGeneratorSettings.VOXY_CHUNK_PREGEN_MAX_RADIUS_CODEC.encode(input.voxyChunkPregenMaxRadius(), ops, builder);
             builder = EarthGeneratorSettings.VOXY_CHUNK_PREGEN_CHUNKS_PER_TICK_CODEC.encode(input.voxyChunkPregenChunksPerTick(), ops, builder);
             builder = EarthGeneratorSettings.DEEP_DARK_CODEC.encode(input.deepDark(), ops, builder);
             builder = EarthGeneratorSettings.GEODES_CODEC.encode(input.geodes(), ops, builder);
             builder = EarthGeneratorSettings.STRUCTURE_CODEC.encode(EarthGeneratorSettings.StructureSettings.fromSettings(input), ops, builder);
-            return EarthGeneratorSettings.TRAIL_RUINS_CODEC.encode(input.addTrailRuins(), ops, builder);
+            builder = EarthGeneratorSettings.TRAIL_RUINS_CODEC.encode(input.addTrailRuins(), ops, builder);
+            builder = EarthGeneratorSettings.TELLUS_MANAGED_TERRAIN_DOWNLOADS_CODEC.encode(input.tellusManagedTerrainDownloads(), ops, builder);
+            return EarthGeneratorSettings.SHOW_TERRAIN_DOWNLOAD_OVERLAY_CODEC.encode(input.showTerrainDownloadOverlay(), ops, builder);
          }
 
          public <T> Stream<T> keys(DynamicOps<T> ops) {
-            Stream<T> baseKeys = Stream.concat(EarthGeneratorSettings.BASE_CODEC.keys(ops), EarthGeneratorSettings.SEA_LEVEL_CODEC.keys(ops));
+            Stream<T> baseKeys = EarthGeneratorSettings.BASE_CODEC.keys(ops);
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.DISTANT_HORIZONS_RENDER_MODE_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.DEM_SELECTION_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.DISTANT_HORIZONS_WATER_RESOLVER_CODEC.keys(ops));
@@ -400,11 +419,15 @@ public record EarthGeneratorSettings(
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.RANDOM_BIOMES_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.RANDOM_BIOME_DENSITY_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.RANDOM_BIOME_SEED_CODEC.keys(ops));
+            baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.EXPERIMENTAL_INCREASE_HEIGHT_CODEC.keys(ops));
+            baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.EXPERIMENTAL_HEIGHT_COORDINATE_PROFILE_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.VOXY_CHUNK_PREGEN_ENABLED_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.VOXY_CHUNK_PREGEN_MAX_RADIUS_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.VOXY_CHUNK_PREGEN_CHUNKS_PER_TICK_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.DEEP_DARK_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.GEODES_CODEC.keys(ops));
+            baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.TELLUS_MANAGED_TERRAIN_DOWNLOADS_CODEC.keys(ops));
+            baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.SHOW_TERRAIN_DOWNLOAD_OVERLAY_CODEC.keys(ops));
             Stream<T> structureKeys = Stream.concat(baseKeys, EarthGeneratorSettings.STRUCTURE_CODEC.keys(ops));
             return Stream.concat(structureKeys, EarthGeneratorSettings.TRAIL_RUINS_CODEC.keys(ops));
          }
@@ -412,7 +435,6 @@ public record EarthGeneratorSettings(
       new com.mojang.serialization.MapDecoder.Implementation<EarthGeneratorSettings>() {
          public <T> DataResult<EarthGeneratorSettings> decode(DynamicOps<T> ops, MapLike<T> input) {
             DataResult<EarthGeneratorSettings.SettingsBase> base = EarthGeneratorSettings.BASE_CODEC.decode(ops, input);
-            DataResult<Optional<Integer>> seaLevel = EarthGeneratorSettings.SEA_LEVEL_CODEC.decode(ops, input);
             DataResult<EarthGeneratorSettings.DistantHorizonsRenderMode> distantHorizonsRenderMode = EarthGeneratorSettings.DISTANT_HORIZONS_RENDER_MODE_CODEC
                .decode(ops, input);
             DataResult<EarthGeneratorSettings.DemSelection> demSelection = EarthGeneratorSettings.DEM_SELECTION_CODEC.decode(ops, input);
@@ -432,6 +454,11 @@ public record EarthGeneratorSettings(
             DataResult<Boolean> randomBiomes = EarthGeneratorSettings.RANDOM_BIOMES_CODEC.decode(ops, input);
             DataResult<Double> randomBiomeDensity = EarthGeneratorSettings.RANDOM_BIOME_DENSITY_CODEC.decode(ops, input);
             DataResult<Long> randomBiomeSeed = EarthGeneratorSettings.RANDOM_BIOME_SEED_CODEC.decode(ops, input);
+            DataResult<Boolean> managedTerrainDownloads = EarthGeneratorSettings.TELLUS_MANAGED_TERRAIN_DOWNLOADS_CODEC.decode(ops, input);
+            DataResult<Boolean> showTerrainDownloadOverlay = EarthGeneratorSettings.SHOW_TERRAIN_DOWNLOAD_OVERLAY_CODEC.decode(ops, input);
+            DataResult<Boolean> experimentalIncreaseHeight = EarthGeneratorSettings.EXPERIMENTAL_INCREASE_HEIGHT_CODEC.decode(ops, input);
+            DataResult<Optional<String>> experimentalHeightCoordinateProfile = EarthGeneratorSettings.EXPERIMENTAL_HEIGHT_COORDINATE_PROFILE_CODEC
+               .decode(ops, input);
             DataResult<Boolean> voxyChunkPregenEnabled = EarthGeneratorSettings.VOXY_CHUNK_PREGEN_ENABLED_CODEC.decode(ops, input);
             DataResult<Integer> voxyChunkPregenMaxRadius = EarthGeneratorSettings.VOXY_CHUNK_PREGEN_MAX_RADIUS_CODEC.decode(ops, input);
             DataResult<Integer> voxyChunkPregenChunksPerTick = EarthGeneratorSettings.VOXY_CHUNK_PREGEN_CHUNKS_PER_TICK_CODEC.decode(ops, input);
@@ -439,8 +466,7 @@ public record EarthGeneratorSettings(
             DataResult<Boolean> geodes = EarthGeneratorSettings.GEODES_CODEC.decode(ops, input);
             DataResult<EarthGeneratorSettings.StructureSettings> structures = EarthGeneratorSettings.STRUCTURE_CODEC.decode(ops, input);
             DataResult<Boolean> trailRuins = EarthGeneratorSettings.TRAIL_RUINS_CODEC.decode(ops, input);
-            DataResult<EarthGeneratorSettings.SettingsBase> withSeaLevel = base.apply2(EarthGeneratorSettings::applySeaLevel, seaLevel);
-            DataResult<EarthGeneratorSettings.SettingsBase> withRenderMode = withSeaLevel.apply2(
+            DataResult<EarthGeneratorSettings.SettingsBase> withRenderMode = base.apply2(
                EarthGeneratorSettings::applyDistantHorizonsRenderMode, distantHorizonsRenderMode
             );
             DataResult<EarthGeneratorSettings.SettingsBase> withDemSelection = withRenderMode.apply2(EarthGeneratorSettings::applyDemSelection, demSelection);
@@ -481,11 +507,23 @@ public record EarthGeneratorSettings(
             settings = settings.apply2(EarthGeneratorSettings::applyThinShellTerrain, thinShellTerrain);
             settings = settings.apply2(EarthGeneratorSettings::applyRandomBiomes, randomBiomes);
             settings = settings.apply2(EarthGeneratorSettings::applyRandomBiomeDensity, randomBiomeDensity);
-            return settings.apply2(EarthGeneratorSettings::applyRandomBiomeSeed, randomBiomeSeed);
+            settings = settings.apply2(EarthGeneratorSettings::applyRandomBiomeSeed, randomBiomeSeed);
+            DataResult<EarthGeneratorSettings> withExperimentalHeight = settings.apply2(
+               EarthGeneratorSettings::applyExperimentalIncreaseHeight, experimentalIncreaseHeight
+            );
+            DataResult<EarthGeneratorSettings> validated = withExperimentalHeight.flatMap(
+               decodedSettings -> experimentalHeightCoordinateProfile.flatMap(
+                  profile -> validateExperimentalHeightCoordinateProfile(decodedSettings, profile)
+               )
+            );
+            DataResult<EarthGeneratorSettings.NetworkSettings> networkSettings = managedTerrainDownloads.apply2(
+               EarthGeneratorSettings.NetworkSettings::new, showTerrainDownloadOverlay
+            );
+            return validated.apply2(EarthGeneratorSettings::applyNetworkSettings, networkSettings);
          }
 
          public <T> Stream<T> keys(DynamicOps<T> ops) {
-            Stream<T> baseKeys = Stream.concat(EarthGeneratorSettings.BASE_CODEC.keys(ops), EarthGeneratorSettings.SEA_LEVEL_CODEC.keys(ops));
+            Stream<T> baseKeys = EarthGeneratorSettings.BASE_CODEC.keys(ops);
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.DISTANT_HORIZONS_RENDER_MODE_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.DEM_SELECTION_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.DISTANT_HORIZONS_WATER_RESOLVER_CODEC.keys(ops));
@@ -504,11 +542,15 @@ public record EarthGeneratorSettings(
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.RANDOM_BIOMES_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.RANDOM_BIOME_DENSITY_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.RANDOM_BIOME_SEED_CODEC.keys(ops));
+            baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.EXPERIMENTAL_INCREASE_HEIGHT_CODEC.keys(ops));
+            baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.EXPERIMENTAL_HEIGHT_COORDINATE_PROFILE_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.VOXY_CHUNK_PREGEN_ENABLED_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.VOXY_CHUNK_PREGEN_MAX_RADIUS_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.VOXY_CHUNK_PREGEN_CHUNKS_PER_TICK_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.DEEP_DARK_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.GEODES_CODEC.keys(ops));
+            baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.TELLUS_MANAGED_TERRAIN_DOWNLOADS_CODEC.keys(ops));
+            baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.SHOW_TERRAIN_DOWNLOAD_OVERLAY_CODEC.keys(ops));
             Stream<T> structureKeys = Stream.concat(baseKeys, EarthGeneratorSettings.STRUCTURE_CODEC.keys(ops));
             return Stream.concat(structureKeys, EarthGeneratorSettings.TRAIL_RUINS_CODEC.keys(ops));
          }
@@ -521,7 +563,6 @@ public record EarthGeneratorSettings(
       double terrestrialHeightScale,
       double oceanicHeightScale,
       int heightOffset,
-      int seaLevel,
       double spawnLatitude,
       double spawnLongitude,
       int minAltitude,
@@ -571,12 +612,23 @@ public record EarthGeneratorSettings(
       boolean climateBasedBuiltUpTerrain,
       boolean randomBiomes,
       double randomBiomeDensity,
-      long randomBiomeSeed
+      long randomBiomeSeed,
+      boolean experimentalIncreaseHeight,
+      boolean tellusManagedTerrainDownloads,
+      boolean showTerrainDownloadOverlay
    ) {
       worldScale = clampWorldScale(worldScale);
       randomBiomeDensity = Mth.clamp(randomBiomeDensity, MIN_RANDOM_BIOME_DENSITY, MAX_RANDOM_BIOME_DENSITY);
       voxyChunkPregenMaxRadius = Mth.clamp(voxyChunkPregenMaxRadius, 0, MAX_VOXY_PREGEN_RADIUS);
       voxyChunkPregenChunksPerTick = Mth.clamp(voxyChunkPregenChunksPerTick, 1, MAX_VOXY_PREGEN_CHUNKS_PER_TICK);
+      if (experimentalIncreaseHeight) {
+         terrestrialHeightScale = 1.0;
+         oceanicHeightScale = 1.0;
+         heightOffset = EXPERIMENTAL_HEIGHT_OFFSET;
+         minAltitude = AUTO_ALTITUDE;
+         maxAltitude = AUTO_ALTITUDE;
+      }
+
       distantHorizonsOsmFeatures = FIXED_DH_OSM_FEATURES;
       distantHorizonsOsmRoadMaxDetail = FIXED_DH_OSM_ROAD_MAX_DETAIL;
       distantHorizonsOsmBuildingMaxDetail = FIXED_DH_OSM_BUILDING_MAX_DETAIL;
@@ -585,7 +637,6 @@ public record EarthGeneratorSettings(
       this.terrestrialHeightScale = terrestrialHeightScale;
       this.oceanicHeightScale = oceanicHeightScale;
       this.heightOffset = heightOffset;
-      this.seaLevel = seaLevel;
       this.spawnLatitude = spawnLatitude;
       this.spawnLongitude = spawnLongitude;
       this.minAltitude = minAltitude;
@@ -630,20 +681,48 @@ public record EarthGeneratorSettings(
       this.demSelection = Objects.requireNonNull(demSelection, "demSelection");
       this.enableRoads = enableRoads;
       this.enableBuildings = enableBuildings;
-      this.enableWater = enableWater;
+      // Retain the serialized field for old worlds, but Overture vector water is now the only supported source.
+      this.enableWater = true;
       this.thinShellTerrain = thinShellTerrain;
       this.climateBasedBuiltUpTerrain = climateBasedBuiltUpTerrain;
       this.randomBiomes = randomBiomes;
       this.randomBiomeDensity = randomBiomeDensity;
       this.randomBiomeSeed = randomBiomeSeed;
+      this.experimentalIncreaseHeight = experimentalIncreaseHeight;
+      this.tellusManagedTerrainDownloads = tellusManagedTerrainDownloads;
+      this.showTerrainDownloadOverlay = showTerrainDownloadOverlay;
    }
 
-   public boolean isSeaLevelAutomatic() {
-      return this.seaLevel == -2147483647;
+   public double effectiveTerrestrialHeightScale() {
+      return this.experimentalIncreaseHeight ? 1.0 : this.terrestrialHeightScale;
    }
 
-   public int resolveSeaLevel() {
-      return this.seaLevel == -2147483647 ? this.heightOffset : this.seaLevel;
+   public double effectiveOceanicHeightScale() {
+      return this.experimentalIncreaseHeight ? 1.0 : this.oceanicHeightScale;
+   }
+
+   public int effectiveHeightOffset() {
+      return this.experimentalIncreaseHeight ? EXPERIMENTAL_HEIGHT_OFFSET : this.heightOffset;
+   }
+
+   public int effectiveMinAltitude() {
+      return this.experimentalIncreaseHeight ? AUTO_ALTITUDE : this.minAltitude;
+   }
+
+   public int effectiveMaxAltitude() {
+      return this.experimentalIncreaseHeight ? AUTO_ALTITUDE : this.maxAltitude;
+   }
+
+   public double effectiveVerticalWorldScale() {
+      return this.experimentalIncreaseHeight ? 1.0 : this.worldScale;
+   }
+
+   public boolean usesTerrainShell() {
+      return this.thinShellTerrain || this.experimentalIncreaseHeight;
+   }
+
+   public boolean suppressesUndergroundGenerationForTerrainShell() {
+      return this.thinShellTerrain && !this.experimentalIncreaseHeight;
    }
 
    private static EarthGeneratorSettings.StructureSettings createStructureSettings(
@@ -701,14 +780,12 @@ public record EarthGeneratorSettings(
       Boolean lavaPools
    ) {
       int resolvedHeightOffset = Objects.requireNonNull(heightOffset, "heightOffset");
-      int resolvedSeaLevel = -2147483647;
       double resolvedWorldScale = clampWorldScale(Objects.requireNonNull(worldScale, "worldScale"));
       return new EarthGeneratorSettings.SettingsBase(
          resolvedWorldScale,
          Objects.requireNonNull(terrestrialHeightScale, "terrestrialHeightScale"),
          Objects.requireNonNull(oceanicHeightScale, "oceanicHeightScale"),
          resolvedHeightOffset,
-         resolvedSeaLevel,
          Objects.requireNonNull(spawnLatitude, "spawnLatitude"),
          Objects.requireNonNull(spawnLongitude, "spawnLongitude"),
          Objects.requireNonNull(minAltitude, "minAltitude"),
@@ -754,16 +831,6 @@ public record EarthGeneratorSettings(
       return worldScale <= 0.0 ? worldScale : Math.min(worldScale, MAX_WORLD_SCALE);
    }
 
-   private static EarthGeneratorSettings.SettingsBase applySeaLevel(EarthGeneratorSettings.SettingsBase settings, Optional<Integer> seaLevel) {
-      Optional<Integer> value = Objects.requireNonNull(seaLevel, "seaLevel");
-      if (value.isEmpty()) {
-         return settings;
-      } else {
-         int resolved = value.get();
-         return resolved == -2147483647 ? settings.withSeaLevel(-2147483647) : settings.withSeaLevel(resolved);
-      }
-   }
-
    private static EarthGeneratorSettings.SettingsBase applyDistantHorizonsRenderMode(
       EarthGeneratorSettings.SettingsBase settings, EarthGeneratorSettings.DistantHorizonsRenderMode renderMode
    ) {
@@ -773,7 +840,8 @@ public record EarthGeneratorSettings(
    private static EarthGeneratorSettings.SettingsBase applyDemSelection(
       EarthGeneratorSettings.SettingsBase settings, EarthGeneratorSettings.DemSelection demSelection
    ) {
-      return settings.withDemSelection(Objects.requireNonNull(demSelection, "demSelection"));
+      Objects.requireNonNull(demSelection, "demSelection");
+      return settings.withDemSelection(EarthGeneratorSettings.DemSelection.mapterhornSelection());
    }
 
    private static EarthGeneratorSettings.SettingsBase applyDistantHorizonsWaterResolver(EarthGeneratorSettings.SettingsBase settings, Boolean enabled) {
@@ -840,6 +908,29 @@ public record EarthGeneratorSettings(
       return settings.withRandomBiomeSeed(Objects.requireNonNull(seed, "randomBiomeSeed"));
    }
 
+   private static EarthGeneratorSettings applyNetworkSettings(EarthGeneratorSettings settings, EarthGeneratorSettings.NetworkSettings network) {
+      Objects.requireNonNull(network, "network");
+      return settings.withNetworkSettings(network.managedTerrainDownloads(), network.showOverlay());
+   }
+
+   public EarthGeneratorSettings withNetworkSettings(boolean managedTerrainDownloads, boolean showOverlay) {
+      return new EarthGeneratorSettings(
+         this.worldScale, this.terrestrialHeightScale, this.oceanicHeightScale, this.heightOffset,
+         this.spawnLatitude, this.spawnLongitude, this.minAltitude, this.maxAltitude, this.riverLakeShorelineBlend,
+         this.oceanShorelineBlend, this.shorelineBlendCliffLimit, this.caveGeneration, this.oreDistribution, this.lavaPools,
+         this.addStrongholds, this.addVillages, this.addMineshafts, this.addOceanMonuments, this.addWoodlandMansions,
+         this.addDesertTemples, this.addJungleTemples, this.addPillagerOutposts, this.addRuinedPortals, this.addShipwrecks,
+         this.addOceanRuins, this.addBuriedTreasure, this.addIgloos, this.addWitchHuts, this.addAncientCities,
+         this.addTrialChambers, this.addTrailRuins, this.deepDark, this.geodes, this.distantHorizonsWaterResolver,
+         this.distantHorizonsOsmFeatures, this.distantHorizonsOsmRoadMaxDetail, this.distantHorizonsOsmBuildingMaxDetail,
+         this.distantHorizonsOsmNonBlockingFetch, this.realtimeTime, this.realtimeWeather, this.historicalSnow,
+         this.voxyChunkPregenEnabled, this.voxyChunkPregenMaxRadius, this.voxyChunkPregenChunksPerTick,
+         this.distantHorizonsRenderMode, this.demSelection, this.enableRoads, this.enableBuildings, this.enableWater,
+         this.thinShellTerrain, this.climateBasedBuiltUpTerrain, this.randomBiomes, this.randomBiomeDensity,
+         this.randomBiomeSeed, this.experimentalIncreaseHeight, managedTerrainDownloads, showOverlay
+      );
+   }
+
    private static EarthGeneratorSettings.SettingsBase applyVoxyChunkPregenEnabled(EarthGeneratorSettings.SettingsBase settings, Boolean enabled) {
       return settings.withVoxyChunkPregenEnabled(Objects.requireNonNull(enabled, "voxyChunkPregenEnabled"));
    }
@@ -858,7 +949,6 @@ public record EarthGeneratorSettings(
          this.terrestrialHeightScale,
          this.oceanicHeightScale,
          this.heightOffset,
-         this.seaLevel,
          this.spawnLatitude,
          this.spawnLongitude,
          this.minAltitude,
@@ -908,7 +998,10 @@ public record EarthGeneratorSettings(
          this.climateBasedBuiltUpTerrain,
          this.randomBiomes,
          this.randomBiomeDensity,
-         this.randomBiomeSeed
+         this.randomBiomeSeed,
+         this.experimentalIncreaseHeight,
+         this.tellusManagedTerrainDownloads,
+         this.showTerrainDownloadOverlay
       );
    }
 
@@ -930,7 +1023,6 @@ public record EarthGeneratorSettings(
          this.terrestrialHeightScale,
          this.oceanicHeightScale,
          this.heightOffset,
-         this.seaLevel,
          this.spawnLatitude,
          this.spawnLongitude,
          this.minAltitude,
@@ -980,7 +1072,10 @@ public record EarthGeneratorSettings(
          this.climateBasedBuiltUpTerrain,
          this.randomBiomes,
          this.randomBiomeDensity,
-         this.randomBiomeSeed
+         this.randomBiomeSeed,
+         this.experimentalIncreaseHeight,
+         this.tellusManagedTerrainDownloads,
+         this.showTerrainDownloadOverlay
       );
    }
 
@@ -990,7 +1085,6 @@ public record EarthGeneratorSettings(
          this.terrestrialHeightScale,
          this.oceanicHeightScale,
          this.heightOffset,
-         this.seaLevel,
          this.spawnLatitude,
          this.spawnLongitude,
          this.minAltitude,
@@ -1040,7 +1134,10 @@ public record EarthGeneratorSettings(
          this.climateBasedBuiltUpTerrain,
          this.randomBiomes,
          this.randomBiomeDensity,
-         this.randomBiomeSeed
+         this.randomBiomeSeed,
+         this.experimentalIncreaseHeight,
+         this.tellusManagedTerrainDownloads,
+         this.showTerrainDownloadOverlay
       );
    }
 
@@ -1050,7 +1147,6 @@ public record EarthGeneratorSettings(
          this.terrestrialHeightScale,
          this.oceanicHeightScale,
          this.heightOffset,
-         this.seaLevel,
          this.spawnLatitude,
          this.spawnLongitude,
          this.minAltitude,
@@ -1100,7 +1196,10 @@ public record EarthGeneratorSettings(
          this.climateBasedBuiltUpTerrain,
          this.randomBiomes,
          this.randomBiomeDensity,
-         this.randomBiomeSeed
+         this.randomBiomeSeed,
+         this.experimentalIncreaseHeight,
+         this.tellusManagedTerrainDownloads,
+         this.showTerrainDownloadOverlay
       );
    }
 
@@ -1110,7 +1209,6 @@ public record EarthGeneratorSettings(
          this.terrestrialHeightScale,
          this.oceanicHeightScale,
          this.heightOffset,
-         this.seaLevel,
          this.spawnLatitude,
          this.spawnLongitude,
          this.minAltitude,
@@ -1160,7 +1258,10 @@ public record EarthGeneratorSettings(
          this.climateBasedBuiltUpTerrain,
          this.randomBiomes,
          this.randomBiomeDensity,
-         this.randomBiomeSeed
+         this.randomBiomeSeed,
+         this.experimentalIncreaseHeight,
+         this.tellusManagedTerrainDownloads,
+         this.showTerrainDownloadOverlay
       );
    }
 
@@ -1170,7 +1271,6 @@ public record EarthGeneratorSettings(
          this.terrestrialHeightScale,
          this.oceanicHeightScale,
          this.heightOffset,
-         this.seaLevel,
          this.spawnLatitude,
          this.spawnLongitude,
          this.minAltitude,
@@ -1220,7 +1320,10 @@ public record EarthGeneratorSettings(
          this.climateBasedBuiltUpTerrain,
          this.randomBiomes,
          this.randomBiomeDensity,
-         this.randomBiomeSeed
+         this.randomBiomeSeed,
+         this.experimentalIncreaseHeight,
+         this.tellusManagedTerrainDownloads,
+         this.showTerrainDownloadOverlay
       );
    }
 
@@ -1230,7 +1333,6 @@ public record EarthGeneratorSettings(
          this.terrestrialHeightScale,
          this.oceanicHeightScale,
          this.heightOffset,
-         this.seaLevel,
          this.spawnLatitude,
          this.spawnLongitude,
          this.minAltitude,
@@ -1280,7 +1382,10 @@ public record EarthGeneratorSettings(
          this.climateBasedBuiltUpTerrain,
          this.randomBiomes,
          this.randomBiomeDensity,
-         this.randomBiomeSeed
+         this.randomBiomeSeed,
+         this.experimentalIncreaseHeight,
+         this.tellusManagedTerrainDownloads,
+         this.showTerrainDownloadOverlay
       );
    }
 
@@ -1290,7 +1395,6 @@ public record EarthGeneratorSettings(
          this.terrestrialHeightScale,
          this.oceanicHeightScale,
          this.heightOffset,
-         this.seaLevel,
          this.spawnLatitude,
          this.spawnLongitude,
          this.minAltitude,
@@ -1340,7 +1444,10 @@ public record EarthGeneratorSettings(
          this.climateBasedBuiltUpTerrain,
          this.randomBiomes,
          this.randomBiomeDensity,
-         this.randomBiomeSeed
+         this.randomBiomeSeed,
+         this.experimentalIncreaseHeight,
+         this.tellusManagedTerrainDownloads,
+         this.showTerrainDownloadOverlay
       );
    }
 
@@ -1350,7 +1457,6 @@ public record EarthGeneratorSettings(
          this.terrestrialHeightScale,
          this.oceanicHeightScale,
          this.heightOffset,
-         this.seaLevel,
          this.spawnLatitude,
          this.spawnLongitude,
          this.minAltitude,
@@ -1400,7 +1506,10 @@ public record EarthGeneratorSettings(
          this.climateBasedBuiltUpTerrain,
          this.randomBiomes,
          this.randomBiomeDensity,
-         this.randomBiomeSeed
+         this.randomBiomeSeed,
+         this.experimentalIncreaseHeight,
+         this.tellusManagedTerrainDownloads,
+         this.showTerrainDownloadOverlay
       );
    }
 
@@ -1410,7 +1519,6 @@ public record EarthGeneratorSettings(
          this.terrestrialHeightScale,
          this.oceanicHeightScale,
          this.heightOffset,
-         this.seaLevel,
          this.spawnLatitude,
          this.spawnLongitude,
          this.minAltitude,
@@ -1460,7 +1568,10 @@ public record EarthGeneratorSettings(
          this.climateBasedBuiltUpTerrain,
          this.randomBiomes,
          this.randomBiomeDensity,
-         this.randomBiomeSeed
+         this.randomBiomeSeed,
+         this.experimentalIncreaseHeight,
+         this.tellusManagedTerrainDownloads,
+         this.showTerrainDownloadOverlay
       );
    }
 
@@ -1470,7 +1581,6 @@ public record EarthGeneratorSettings(
          this.terrestrialHeightScale,
          this.oceanicHeightScale,
          this.heightOffset,
-         this.seaLevel,
          this.spawnLatitude,
          this.spawnLongitude,
          this.minAltitude,
@@ -1520,7 +1630,10 @@ public record EarthGeneratorSettings(
          this.climateBasedBuiltUpTerrain,
          this.randomBiomes,
          this.randomBiomeDensity,
-         this.randomBiomeSeed
+         this.randomBiomeSeed,
+         this.experimentalIncreaseHeight,
+         this.tellusManagedTerrainDownloads,
+         this.showTerrainDownloadOverlay
       );
    }
 
@@ -1530,7 +1643,6 @@ public record EarthGeneratorSettings(
          this.terrestrialHeightScale,
          this.oceanicHeightScale,
          this.heightOffset,
-         this.seaLevel,
          this.spawnLatitude,
          this.spawnLongitude,
          this.minAltitude,
@@ -1580,7 +1692,10 @@ public record EarthGeneratorSettings(
          climateBasedBuiltUpTerrain,
          this.randomBiomes,
          this.randomBiomeDensity,
-         this.randomBiomeSeed
+         this.randomBiomeSeed,
+         this.experimentalIncreaseHeight,
+         this.tellusManagedTerrainDownloads,
+         this.showTerrainDownloadOverlay
       );
    }
 
@@ -1602,7 +1717,6 @@ public record EarthGeneratorSettings(
          this.terrestrialHeightScale,
          this.oceanicHeightScale,
          this.heightOffset,
-         this.seaLevel,
          this.spawnLatitude,
          this.spawnLongitude,
          this.minAltitude,
@@ -1652,18 +1766,118 @@ public record EarthGeneratorSettings(
          this.climateBasedBuiltUpTerrain,
          randomBiomes,
          randomBiomeDensity,
-         randomBiomeSeed
+         randomBiomeSeed,
+         this.experimentalIncreaseHeight,
+         this.tellusManagedTerrainDownloads,
+         this.showTerrainDownloadOverlay
+      );
+   }
+
+   private static EarthGeneratorSettings applyExperimentalIncreaseHeight(EarthGeneratorSettings settings, Boolean enabled) {
+      return settings.withExperimentalIncreaseHeight(Objects.requireNonNull(enabled, "experimentalIncreaseHeight"));
+   }
+
+   private static DataResult<EarthGeneratorSettings> validateExperimentalHeightCoordinateProfile(
+      EarthGeneratorSettings settings, Optional<String> serializedProfile
+   ) {
+      if (!settings.experimentalIncreaseHeight()) {
+         return DataResult.success(settings);
+      }
+
+      if (serializedProfile.isEmpty()) {
+         return DataResult.error(
+            () -> "Increase Height world is missing experimental_height_coordinate_profile; it may use an incompatible legacy BlockPos encoding"
+         );
+      }
+
+      String profile = serializedProfile.get();
+      if (!HighYPackedCoordinateProfile.PROFILE_ID.equals(profile)) {
+         return DataResult.error(
+            () -> "Increase Height world uses incompatible coordinate profile '"
+               + profile
+               + "'; expected '"
+               + HighYPackedCoordinateProfile.PROFILE_ID
+               + "'"
+         );
+      }
+
+      return DataResult.success(settings);
+   }
+
+   private EarthGeneratorSettings withExperimentalIncreaseHeight(boolean experimentalIncreaseHeight) {
+      return new EarthGeneratorSettings(
+         this.worldScale,
+         this.terrestrialHeightScale,
+         this.oceanicHeightScale,
+         this.heightOffset,
+         this.spawnLatitude,
+         this.spawnLongitude,
+         this.minAltitude,
+         this.maxAltitude,
+         this.riverLakeShorelineBlend,
+         this.oceanShorelineBlend,
+         this.shorelineBlendCliffLimit,
+         this.caveGeneration,
+         this.oreDistribution,
+         this.lavaPools,
+         this.addStrongholds,
+         this.addVillages,
+         this.addMineshafts,
+         this.addOceanMonuments,
+         this.addWoodlandMansions,
+         this.addDesertTemples,
+         this.addJungleTemples,
+         this.addPillagerOutposts,
+         this.addRuinedPortals,
+         this.addShipwrecks,
+         this.addOceanRuins,
+         this.addBuriedTreasure,
+         this.addIgloos,
+         this.addWitchHuts,
+         this.addAncientCities,
+         this.addTrialChambers,
+         this.addTrailRuins,
+         this.deepDark,
+         this.geodes,
+         this.distantHorizonsWaterResolver,
+         this.distantHorizonsOsmFeatures,
+         this.distantHorizonsOsmRoadMaxDetail,
+         this.distantHorizonsOsmBuildingMaxDetail,
+         this.distantHorizonsOsmNonBlockingFetch,
+         this.realtimeTime,
+         this.realtimeWeather,
+         this.historicalSnow,
+         this.voxyChunkPregenEnabled,
+         this.voxyChunkPregenMaxRadius,
+         this.voxyChunkPregenChunksPerTick,
+         this.distantHorizonsRenderMode,
+         this.demSelection,
+         this.enableRoads,
+         this.enableBuildings,
+         this.enableWater,
+         this.thinShellTerrain,
+         this.climateBasedBuiltUpTerrain,
+         this.randomBiomes,
+         this.randomBiomeDensity,
+         this.randomBiomeSeed,
+         experimentalIncreaseHeight,
+         this.tellusManagedTerrainDownloads,
+         this.showTerrainDownloadOverlay
       );
    }
 
    public static EarthGeneratorSettings.HeightLimits resolveHeightLimits(EarthGeneratorSettings settings) {
+      if (settings.experimentalIncreaseHeight()) {
+         return resolveExperimentalHeightLimits(settings);
+      }
+
       int autoMin = computeAutoMinAltitude(settings);
       int autoMax = computeAutoMaxAltitude(settings);
-      boolean autoMinEnabled = settings.minAltitude() == Integer.MIN_VALUE;
-      boolean autoMaxEnabled = settings.maxAltitude() == Integer.MIN_VALUE;
+      boolean autoMinEnabled = settings.effectiveMinAltitude() == Integer.MIN_VALUE;
+      boolean autoMaxEnabled = settings.effectiveMaxAltitude() == Integer.MIN_VALUE;
       if ((!autoMinEnabled || autoMin >= MIN_WORLD_Y) && (!autoMaxEnabled || autoMax <= MAX_WORLD_Y)) {
-         int resolvedMin = autoMinEnabled ? autoMin : settings.minAltitude();
-         int resolvedMax = autoMaxEnabled ? autoMax : settings.maxAltitude();
+         int resolvedMin = autoMinEnabled ? autoMin : settings.effectiveMinAltitude();
+         int resolvedMax = autoMaxEnabled ? autoMax : settings.effectiveMaxAltitude();
          if (resolvedMin > resolvedMax) {
             int swap = resolvedMin;
             resolvedMin = resolvedMax;
@@ -1693,22 +1907,33 @@ public record EarthGeneratorSettings(
       }
    }
 
+   private static EarthGeneratorSettings.HeightLimits resolveExperimentalHeightLimits(EarthGeneratorSettings settings) {
+      int resolvedMin = HighYPackedCoordinateProfile.TELLUS_DIMENSION_MIN_Y;
+      int resolvedMax = computeAutoMaxAltitude(settings) + EXPERIMENTAL_TOP_MARGIN;
+      int alignedMin = alignDown(resolvedMin, HEIGHT_ALIGNMENT);
+      int alignedTop = alignUp(resolvedMax + 1, HEIGHT_ALIGNMENT);
+      int height = Math.max(HEIGHT_ALIGNMENT, alignedTop - alignedMin);
+      return new EarthGeneratorSettings.HeightLimits(alignedMin, height, height);
+   }
+
    private static int computeAutoMaxAltitude(EarthGeneratorSettings settings) {
-      if (settings.worldScale() <= 0.0) {
-         return settings.heightOffset();
+      double verticalScale = settings.effectiveVerticalWorldScale();
+      if (verticalScale <= 0.0) {
+         return settings.effectiveHeightOffset();
       } else {
-         double scaled = EVEREST_ELEVATION_METERS * settings.terrestrialHeightScale() / settings.worldScale();
-         int maxSurface = Mth.ceil(scaled) + settings.heightOffset();
+         double scaled = EVEREST_ELEVATION_METERS * settings.effectiveTerrestrialHeightScale() / verticalScale;
+         int maxSurface = Mth.ceil(scaled) + settings.effectiveHeightOffset();
          return maxSurface + ALTITUDE_TOLERANCE;
       }
    }
 
    private static int computeAutoMinAltitude(EarthGeneratorSettings settings) {
-      if (settings.worldScale() <= 0.0) {
-         return settings.heightOffset();
+      double verticalScale = settings.effectiveVerticalWorldScale();
+      if (verticalScale <= 0.0) {
+         return settings.effectiveHeightOffset();
       } else {
-         double scaled = MARIANA_TRENCH_METERS * settings.oceanicHeightScale() / settings.worldScale();
-         int minSurface = Mth.floor(scaled) + settings.heightOffset();
+         double scaled = MARIANA_TRENCH_METERS * settings.effectiveOceanicHeightScale() / verticalScale;
+         int minSurface = Mth.floor(scaled) + settings.effectiveHeightOffset();
          return minSurface - ALTITUDE_TOLERANCE;
       }
    }
@@ -1765,16 +1990,7 @@ public record EarthGeneratorSettings(
 
    public static enum DemProvider {
       AUTO("auto", false, 0),
-      TERRARIUM("terrarium", true, 1),
-      SWISSALTI3D("swissalti3d", true, 1 << 1),
-      AHN("ahn", true, 1 << 2),
-      CANELEVATION("canelevation", true, 1 << 3),
-      NORWAYDTM1("norwaydtm1", true, 1 << 4),
-      JAPANGSI("japangsi", true, 1 << 5),
-      USGS("usgs", true, 1 << 6),
-      COPERNICUS("copernicus", true, 1 << 7),
-      ARCTICDEM("arcticdem", true, 1 << 8),
-      GEBCO2026("gebco2026", true, 1 << 9);
+      TERRARIUM("terrarium", true, 1);
 
       public static final Codec<EarthGeneratorSettings.DemProvider> CODEC = Codec.STRING
          .xmap(EarthGeneratorSettings.DemProvider::fromId, EarthGeneratorSettings.DemProvider::id);
@@ -1797,7 +2013,7 @@ public record EarthGeneratorSettings(
       }
 
       public boolean available() {
-         return this != GEBCO2026;
+         return true;
       }
 
       public int selectionBit() {
@@ -1805,120 +2021,67 @@ public record EarthGeneratorSettings(
       }
 
       public static EarthGeneratorSettings.DemProvider fromId(String id) {
-         if (id == null) {
-            return AUTO;
-         } else {
-            if ("hma".equalsIgnoreCase(id)) {
-               return AUTO;
-            }
-
-            for (EarthGeneratorSettings.DemProvider provider : values()) {
-               if (provider.id.equalsIgnoreCase(id)) {
-                  return provider;
-               }
-            }
-
-            return AUTO;
-         }
+         return "terrarium".equalsIgnoreCase(id) ? TERRARIUM : AUTO;
       }
    }
 
    public record DemSelection(boolean automatic, int enabledProviderMask) {
-      private static final List<EarthGeneratorSettings.DemProvider> USER_SELECTABLE_PROVIDERS = List.of(
-         EarthGeneratorSettings.DemProvider.TERRARIUM,
-         EarthGeneratorSettings.DemProvider.GEBCO2026,
-         EarthGeneratorSettings.DemProvider.SWISSALTI3D,
-         EarthGeneratorSettings.DemProvider.AHN,
-         EarthGeneratorSettings.DemProvider.CANELEVATION,
-         EarthGeneratorSettings.DemProvider.NORWAYDTM1,
-         EarthGeneratorSettings.DemProvider.JAPANGSI,
-         EarthGeneratorSettings.DemProvider.USGS,
-         EarthGeneratorSettings.DemProvider.COPERNICUS,
-         EarthGeneratorSettings.DemProvider.ARCTICDEM
-      );
-      private static final int GLOBAL_COVERAGE_MASK = EarthGeneratorSettings.DemProvider.TERRARIUM.selectionBit()
-         | EarthGeneratorSettings.DemProvider.COPERNICUS.selectionBit();
-      private static final int FULL_USER_SELECTABLE_MASK = computeFullUserSelectableMask();
-      private static final List<String> FULL_PROVIDER_IDS = USER_SELECTABLE_PROVIDERS.stream()
-         .filter(EarthGeneratorSettings.DemProvider::available)
-         .map(EarthGeneratorSettings.DemProvider::id)
-         .toList();
-      private static final EarthGeneratorSettings.DemSelection AUTOMATIC_SELECTION = new EarthGeneratorSettings.DemSelection(true, FULL_USER_SELECTABLE_MASK);
+      private static final List<EarthGeneratorSettings.DemProvider> USER_SELECTABLE_PROVIDERS = List.of(EarthGeneratorSettings.DemProvider.TERRARIUM);
+      private static final int MAPTERHORN_PROVIDER_MASK = EarthGeneratorSettings.DemProvider.TERRARIUM.selectionBit();
+      private static final List<String> PROVIDER_IDS = List.of(EarthGeneratorSettings.DemProvider.TERRARIUM.id());
+      private static final EarthGeneratorSettings.DemSelection MAPTERHORN_SELECTION = new EarthGeneratorSettings.DemSelection(false, MAPTERHORN_PROVIDER_MASK);
 
       public DemSelection {
-         int normalizedMask = automatic ? FULL_USER_SELECTABLE_MASK : normalizeManualMask(enabledProviderMask);
-         enabledProviderMask = normalizedMask;
+         automatic = false;
+         enabledProviderMask = MAPTERHORN_PROVIDER_MASK;
       }
 
       public static EarthGeneratorSettings.DemSelection automaticSelection() {
-         return AUTOMATIC_SELECTION;
+         return MAPTERHORN_SELECTION;
+      }
+
+      public static EarthGeneratorSettings.DemSelection mapterhornSelection() {
+         return MAPTERHORN_SELECTION;
       }
 
       public static EarthGeneratorSettings.DemSelection manual(int enabledProviderMask) {
-         return new EarthGeneratorSettings.DemSelection(false, enabledProviderMask);
+         return MAPTERHORN_SELECTION;
       }
 
       public static EarthGeneratorSettings.DemSelection manual(List<EarthGeneratorSettings.DemProvider> providers) {
-         return manual(maskFromProviders(providers));
+         return MAPTERHORN_SELECTION;
       }
 
       private static EarthGeneratorSettings.DemSelection fromSerializedIds(boolean automatic, List<String> providerIds) {
-         return automatic ? automaticSelection() : manual(maskFromProviderIds(providerIds));
+         return MAPTERHORN_SELECTION;
       }
 
       public static EarthGeneratorSettings.DemSelection fromLegacyProvider(EarthGeneratorSettings.DemProvider legacyProvider) {
-         EarthGeneratorSettings.DemProvider provider = Objects.requireNonNullElse(legacyProvider, EarthGeneratorSettings.DemProvider.AUTO);
-         return switch (provider) {
-            case AUTO -> automaticSelection();
-            case TERRARIUM -> manual(List.of(EarthGeneratorSettings.DemProvider.TERRARIUM));
-            case COPERNICUS -> manual(List.of(EarthGeneratorSettings.DemProvider.COPERNICUS));
-            case USGS -> manual(List.of(EarthGeneratorSettings.DemProvider.USGS, EarthGeneratorSettings.DemProvider.COPERNICUS));
-            default -> manual(List.of(provider, EarthGeneratorSettings.DemProvider.TERRARIUM));
-         };
+         return MAPTERHORN_SELECTION;
       }
 
       public boolean isEnabled(EarthGeneratorSettings.DemProvider provider) {
-         return provider != null && provider.userSelectable() && provider.available() && (this.enabledProviderMask & provider.selectionBit()) != 0;
-      }
-
-      public boolean usesPolarDem() {
-         return this.isEnabled(EarthGeneratorSettings.DemProvider.ARCTICDEM);
+         return provider == EarthGeneratorSettings.DemProvider.TERRARIUM;
       }
 
       public boolean terrainTilesEnabled() {
-         return this.isEnabled(EarthGeneratorSettings.DemProvider.TERRARIUM);
-      }
-
-      public boolean gebco2026Enabled() {
-         return this.isEnabled(EarthGeneratorSettings.DemProvider.GEBCO2026);
-      }
-
-      public boolean copernicusEnabled() {
-         return this.isEnabled(EarthGeneratorSettings.DemProvider.COPERNICUS);
+         return true;
       }
 
       public boolean isAllEnabled() {
-         return this.enabledProviderMask == FULL_USER_SELECTABLE_MASK;
+         return true;
       }
 
       public String fingerprint() {
-         return "mask_" + Integer.toHexString(this.enabledProviderMask);
+         return "mapterhorn";
       }
 
       public List<EarthGeneratorSettings.DemProvider> enabledProvidersInUiOrder() {
-         List<EarthGeneratorSettings.DemProvider> providers = new ArrayList<>(USER_SELECTABLE_PROVIDERS.size());
-
-         for (EarthGeneratorSettings.DemProvider provider : USER_SELECTABLE_PROVIDERS) {
-            if (this.isEnabled(provider)) {
-               providers.add(provider);
-            }
-         }
-
-         return List.copyOf(providers);
+         return USER_SELECTABLE_PROVIDERS;
       }
 
       public List<String> enabledProviderIds() {
-         return this.isAllEnabled() ? FULL_PROVIDER_IDS : this.enabledProvidersInUiOrder().stream().map(EarthGeneratorSettings.DemProvider::id).toList();
+         return PROVIDER_IDS;
       }
 
       public static List<EarthGeneratorSettings.DemProvider> userSelectableProviders() {
@@ -1926,66 +2089,15 @@ public record EarthGeneratorSettings(
       }
 
       public static int fullUserSelectableMask() {
-         return FULL_USER_SELECTABLE_MASK;
+         return MAPTERHORN_PROVIDER_MASK;
       }
 
       public static int maskFromProviders(Iterable<EarthGeneratorSettings.DemProvider> providers) {
-         int mask = 0;
-         if (providers == null) {
-            return mask;
-         }
-
-         for (EarthGeneratorSettings.DemProvider provider : providers) {
-            if (provider != null && provider.userSelectable() && provider.available()) {
-               mask |= provider.selectionBit();
-            }
-         }
-
-         return mask;
+         return MAPTERHORN_PROVIDER_MASK;
       }
 
       public static int maskFromProviderIds(List<String> providerIds) {
-         int mask = 0;
-         if (providerIds == null) {
-            return mask;
-         }
-
-         for (String providerId : providerIds) {
-            EarthGeneratorSettings.DemProvider provider = EarthGeneratorSettings.DemProvider.fromId(providerId);
-            if (provider.userSelectable() && provider.available()) {
-               mask |= provider.selectionBit();
-            }
-         }
-
-         return mask;
-      }
-
-      private static int normalizeManualMask(int enabledProviderMask) {
-         int normalized = 0;
-
-         for (EarthGeneratorSettings.DemProvider provider : USER_SELECTABLE_PROVIDERS) {
-            if (provider.available() && (enabledProviderMask & provider.selectionBit()) != 0) {
-               normalized |= provider.selectionBit();
-            }
-         }
-
-         if ((normalized & GLOBAL_COVERAGE_MASK) == 0) {
-            normalized |= EarthGeneratorSettings.DemProvider.TERRARIUM.selectionBit();
-         }
-
-         return normalized;
-      }
-
-      private static int computeFullUserSelectableMask() {
-         int mask = 0;
-
-         for (EarthGeneratorSettings.DemProvider provider : USER_SELECTABLE_PROVIDERS) {
-            if (provider.available()) {
-               mask |= provider.selectionBit();
-            }
-         }
-
-         return mask;
+         return MAPTERHORN_PROVIDER_MASK;
       }
    }
 
@@ -2032,7 +2144,6 @@ public record EarthGeneratorSettings(
       double terrestrialHeightScale,
       double oceanicHeightScale,
       int heightOffset,
-      int seaLevel,
       double spawnLatitude,
       double spawnLongitude,
       int minAltitude,
@@ -2060,7 +2171,6 @@ public record EarthGeneratorSettings(
             settings.terrestrialHeightScale(),
             settings.oceanicHeightScale(),
             settings.heightOffset(),
-            settings.seaLevel(),
             settings.spawnLatitude(),
             settings.spawnLongitude(),
             settings.minAltitude(),
@@ -2084,43 +2194,12 @@ public record EarthGeneratorSettings(
          );
       }
 
-      private EarthGeneratorSettings.SettingsBase withSeaLevel(int seaLevel) {
-         return new EarthGeneratorSettings.SettingsBase(
-            this.worldScale,
-            this.terrestrialHeightScale,
-            this.oceanicHeightScale,
-            this.heightOffset,
-            seaLevel,
-            this.spawnLatitude,
-            this.spawnLongitude,
-            this.minAltitude,
-            this.maxAltitude,
-            this.riverLakeShorelineBlend,
-            this.oceanShorelineBlend,
-            this.shorelineBlendCliffLimit,
-            this.caveGeneration,
-            this.oreDistribution,
-            this.lavaPools,
-            this.distantHorizonsWaterResolver,
-            this.distantHorizonsOsmFeatures,
-            this.realtimeTime,
-            this.realtimeWeather,
-            this.historicalSnow,
-            this.voxyChunkPregenEnabled,
-            this.voxyChunkPregenMaxRadius,
-            this.voxyChunkPregenChunksPerTick,
-            this.distantHorizonsRenderMode,
-            this.demSelection
-         );
-      }
-
       private EarthGeneratorSettings.SettingsBase withDistantHorizonsWaterResolver(boolean enabled) {
          return new EarthGeneratorSettings.SettingsBase(
             this.worldScale,
             this.terrestrialHeightScale,
             this.oceanicHeightScale,
             this.heightOffset,
-            this.seaLevel,
             this.spawnLatitude,
             this.spawnLongitude,
             this.minAltitude,
@@ -2150,7 +2229,6 @@ public record EarthGeneratorSettings(
             this.terrestrialHeightScale,
             this.oceanicHeightScale,
             this.heightOffset,
-            this.seaLevel,
             this.spawnLatitude,
             this.spawnLongitude,
             this.minAltitude,
@@ -2180,7 +2258,6 @@ public record EarthGeneratorSettings(
             this.terrestrialHeightScale,
             this.oceanicHeightScale,
             this.heightOffset,
-            this.seaLevel,
             this.spawnLatitude,
             this.spawnLongitude,
             this.minAltitude,
@@ -2210,7 +2287,6 @@ public record EarthGeneratorSettings(
             this.terrestrialHeightScale,
             this.oceanicHeightScale,
             this.heightOffset,
-            this.seaLevel,
             this.spawnLatitude,
             this.spawnLongitude,
             this.minAltitude,
@@ -2240,7 +2316,6 @@ public record EarthGeneratorSettings(
             this.terrestrialHeightScale,
             this.oceanicHeightScale,
             this.heightOffset,
-            this.seaLevel,
             this.spawnLatitude,
             this.spawnLongitude,
             this.minAltitude,
@@ -2270,7 +2345,6 @@ public record EarthGeneratorSettings(
             this.terrestrialHeightScale,
             this.oceanicHeightScale,
             this.heightOffset,
-            this.seaLevel,
             this.spawnLatitude,
             this.spawnLongitude,
             this.minAltitude,
@@ -2300,7 +2374,6 @@ public record EarthGeneratorSettings(
             this.terrestrialHeightScale,
             this.oceanicHeightScale,
             this.heightOffset,
-            this.seaLevel,
             this.spawnLatitude,
             this.spawnLongitude,
             this.minAltitude,
@@ -2330,7 +2403,6 @@ public record EarthGeneratorSettings(
             this.terrestrialHeightScale,
             this.oceanicHeightScale,
             this.heightOffset,
-            this.seaLevel,
             this.spawnLatitude,
             this.spawnLongitude,
             this.minAltitude,
@@ -2360,7 +2432,6 @@ public record EarthGeneratorSettings(
             this.terrestrialHeightScale,
             this.oceanicHeightScale,
             this.heightOffset,
-            this.seaLevel,
             this.spawnLatitude,
             this.spawnLongitude,
             this.minAltitude,
@@ -2390,7 +2461,6 @@ public record EarthGeneratorSettings(
             this.terrestrialHeightScale,
             this.oceanicHeightScale,
             this.heightOffset,
-            this.seaLevel,
             this.spawnLatitude,
             this.spawnLongitude,
             this.minAltitude,
@@ -2415,13 +2485,12 @@ public record EarthGeneratorSettings(
       }
 
       private EarthGeneratorSettings toSettings() {
-         return new EarthGeneratorSettings(
-            this.worldScale,
-            this.terrestrialHeightScale,
-            this.oceanicHeightScale,
-            this.heightOffset,
-            this.seaLevel,
-            this.spawnLatitude,
+      return new EarthGeneratorSettings(
+         this.worldScale,
+         this.terrestrialHeightScale,
+         this.oceanicHeightScale,
+         this.heightOffset,
+         this.spawnLatitude,
             this.spawnLongitude,
             this.minAltitude,
             this.maxAltitude,
@@ -2470,9 +2539,15 @@ public record EarthGeneratorSettings(
             EarthGeneratorSettings.DEFAULT.climateBasedBuiltUpTerrain(),
             EarthGeneratorSettings.DEFAULT.randomBiomes(),
             EarthGeneratorSettings.DEFAULT.randomBiomeDensity(),
-            EarthGeneratorSettings.DEFAULT.randomBiomeSeed()
+            EarthGeneratorSettings.DEFAULT.randomBiomeSeed(),
+            EarthGeneratorSettings.DEFAULT.experimentalIncreaseHeight(),
+            true,
+            true
          );
       }
+   }
+
+   private record NetworkSettings(boolean managedTerrainDownloads, boolean showOverlay) {
    }
 
    private record StructureSettings(

@@ -20,6 +20,7 @@ public class SlippyMapWidget extends AbstractWidget {
    private static final String ATTRIBUTION = "(c) OpenStreetMap Contributors";
    private final SlippyMap map;
    private final List<MapComponent> components = new ArrayList<>();
+   private MapComponent dragComponent;
    private boolean mouseDown;
    private boolean mouseDragged;
    private int attributionBottomPadding;
@@ -106,13 +107,12 @@ public class SlippyMapWidget extends AbstractWidget {
          return false;
       } else {
          this.mouseDown = true;
-         if (button == 0) {
-            SlippyMapPoint mouse = this.getPointUnderMouse(mouseX, mouseY);
+         SlippyMapPoint mouse = this.getPointUnderMouse(mouseX, mouseY);
 
-            for (MapComponent component : this.components) {
-               if (component.onMouseClicked(this.map, mouse, button)) {
-                  return true;
-               }
+         for (MapComponent component : this.components) {
+            if (component.onMouseClicked(this.map, mouse, button)) {
+               this.dragComponent = component;
+               return true;
             }
          }
 
@@ -122,6 +122,14 @@ public class SlippyMapWidget extends AbstractWidget {
 
    public boolean mouseDragged(double mouseX, double mouseY, int button, double dragX, double dragY) {
       if (this.mouseDown) {
+         if (this.dragComponent != null) {
+            SlippyMapPoint mouse = this.getPointUnderMouse(mouseX, mouseY);
+            if (this.dragComponent.onMouseDragged(this.map, mouse, button, dragX, dragY)) {
+               this.mouseDragged = true;
+               return true;
+            }
+         }
+
          this.map.drag((int)(-dragX), (int)(-dragY));
          this.mouseDragged = true;
          return true;
@@ -132,17 +140,22 @@ public class SlippyMapWidget extends AbstractWidget {
 
    public boolean mouseReleased(double mouseX, double mouseY, int button) {
       boolean handled = false;
-      if (button == 0 && this.mouseDown && !this.mouseDragged && this.isMouseOver(mouseX, mouseY)) {
+      if (button == 0 && this.mouseDown && this.isMouseOver(mouseX, mouseY)) {
          SlippyMapPoint mouse = this.getPointUnderMouse(mouseX, mouseY);
 
-         for (MapComponent component : this.components) {
-            if (component.onMouseReleased(this.map, mouse, button)) {
-               handled = true;
-               break;
+         if (this.dragComponent != null) {
+            handled = this.dragComponent.onMouseReleased(this.map, mouse, button);
+         } else if (!this.mouseDragged) {
+            for (MapComponent component : this.components) {
+               if (component.onMouseReleased(this.map, mouse, button)) {
+                  handled = true;
+                  break;
+               }
             }
          }
       }
 
+      this.dragComponent = null;
       this.mouseDown = false;
       this.mouseDragged = false;
       return handled;
@@ -166,6 +179,7 @@ public class SlippyMapWidget extends AbstractWidget {
    }
 
    public void cancelInteraction() {
+      this.dragComponent = null;
       this.mouseDown = false;
       this.mouseDragged = false;
    }

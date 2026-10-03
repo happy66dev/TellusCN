@@ -4,7 +4,14 @@ import com.yucareux.tellus.world.data.elevation.TellusElevationSource.DemUsage;
 import java.util.Arrays;
 import java.util.Objects;
 
-record TellusElevationProvenance(int width, int height, int providerMask, byte[] primaryProviders, byte[] blendedFlags) {
+record TellusElevationProvenance(
+   int width,
+   int height,
+   int providerMask,
+   byte[] primaryProviders,
+   byte[] blendedFlags,
+   byte[] mapterhornAvailableFlags
+) {
    TellusElevationProvenance {
       if (width <= 0 || height <= 0) {
          throw new IllegalArgumentException("Invalid provenance dimensions");
@@ -13,6 +20,7 @@ record TellusElevationProvenance(int width, int height, int providerMask, byte[]
       int sampleCount = width * height;
       Objects.requireNonNull(primaryProviders, "primaryProviders");
       Objects.requireNonNull(blendedFlags, "blendedFlags");
+      Objects.requireNonNull(mapterhornAvailableFlags, "mapterhornAvailableFlags");
       if (primaryProviders.length != sampleCount) {
          throw new IllegalArgumentException("Invalid primary provider buffer");
       }
@@ -21,8 +29,13 @@ record TellusElevationProvenance(int width, int height, int providerMask, byte[]
          throw new IllegalArgumentException("Invalid provenance blend buffer");
       }
 
+      if (mapterhornAvailableFlags.length != bitSetLength(sampleCount)) {
+         throw new IllegalArgumentException("Invalid Mapterhorn availability buffer");
+      }
+
       primaryProviders = Arrays.copyOf(primaryProviders, primaryProviders.length);
       blendedFlags = Arrays.copyOf(blendedFlags, blendedFlags.length);
+      mapterhornAvailableFlags = Arrays.copyOf(mapterhornAvailableFlags, mapterhornAvailableFlags.length);
    }
 
    DemUsage primaryProvider(int x, int y) {
@@ -38,6 +51,11 @@ record TellusElevationProvenance(int width, int height, int providerMask, byte[]
    boolean isBlended(int x, int y) {
       int index = this.sampleIndex(x, y);
       return (this.blendedFlags[index >> 3] & 1 << (index & 7)) != 0;
+   }
+
+   boolean mapterhornAvailable(int x, int y) {
+      int index = this.sampleIndex(x, y);
+      return (this.mapterhornAvailableFlags[index >> 3] & 1 << (index & 7)) != 0;
    }
 
    private int sampleIndex(int x, int y) {

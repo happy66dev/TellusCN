@@ -139,6 +139,13 @@ class WaterSurfaceResolverTest {
    }
 
    @Test
+   void experimentalOceanClampUsesReservedWorldFloorInsteadOfLegacyShellDepth() {
+      assertEquals(-2_040, WaterSurfaceResolver.clampOceanTerrainHeight(-3_000, 0, -2_040, true));
+      assertEquals(-900, WaterSurfaceResolver.clampOceanTerrainHeight(-900, 0, -2_040, true));
+      assertEquals(-3_000, WaterSurfaceResolver.clampOceanTerrainHeight(-3_000, 0, -2_040, false));
+   }
+
+   @Test
    void landCoverWaterCandidatesIncludeEsaWaterAndNoDataOcean() {
       assertTrue(
          WaterSurfaceResolver.landCoverMayContainWater(80, TellusLandMaskSource.LandMaskSample.unknown(), Integer.MAX_VALUE, 64)

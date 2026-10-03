@@ -1,9 +1,8 @@
 package com.yucareux.tellus.worldgen;
 
-import java.lang.reflect.InvocationTargetException;
 import java.util.Locale;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.level.block.Block;
-import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 
 public final class TellusBlockReferences {
@@ -11,7 +10,7 @@ public final class TellusBlockReferences {
    }
 
    public static Block concreteBlock(String colorName) {
-      return coloredBlock("CONCRETE", colorName, legacyColorFieldName(colorName, "CONCRETE"));
+      return coloredBlock(colorName, "concrete");
    }
 
    public static BlockState concreteState(String colorName) {
@@ -19,7 +18,7 @@ public final class TellusBlockReferences {
    }
 
    public static Block terracottaBlock(String colorName) {
-      return coloredBlock("DYED_TERRACOTTA", colorName, legacyColorFieldName(colorName, "TERRACOTTA"));
+      return coloredBlock(colorName, "terracotta");
    }
 
    public static BlockState terracottaState(String colorName) {
@@ -27,7 +26,7 @@ public final class TellusBlockReferences {
    }
 
    public static Block stainedGlassBlock(String colorName) {
-      return coloredBlock("STAINED_GLASS", colorName, legacyColorFieldName(colorName, "STAINED_GLASS"));
+      return coloredBlock(colorName, "stained_glass");
    }
 
    public static BlockState stainedGlassState(String colorName) {
@@ -35,7 +34,7 @@ public final class TellusBlockReferences {
    }
 
    public static Block woolBlock(String colorName) {
-      return coloredBlock("WOOL", colorName, legacyColorFieldName(colorName, "WOOL"));
+      return coloredBlock(colorName, "wool");
    }
 
    public static BlockState woolState(String colorName) {
@@ -43,82 +42,23 @@ public final class TellusBlockReferences {
    }
 
    public static BlockState waxedOxidizedCopperState() {
-      return weatheringCopperBlock("COPPER_BLOCK", true, "oxidized", "WAXED_OXIDIZED_COPPER").defaultBlockState();
+      return blockByPath("waxed_oxidized_copper").defaultBlockState();
    }
 
    public static BlockState lightningRodState() {
-      return weatheringCopperBlock("LIGHTNING_ROD", false, "unaffected", "LIGHTNING_ROD").defaultBlockState();
+      return blockByPath("lightning_rod").defaultBlockState();
    }
 
-   private static Block coloredBlock(String collectionFieldName, String colorName, String legacyFieldName) {
-      Block legacyBlock = blockByField(legacyFieldName);
-      if (legacyBlock != null) {
-         return legacyBlock;
-      }
-
-      Object collection = fieldValue(collectionFieldName);
-      Object value = invoke(collection, colorMethodName(colorName));
-      if (value instanceof Block block) {
-         return block;
-      }
-
-      throw new IllegalStateException("Minecraft block collection " + collectionFieldName + "." + colorName + " did not resolve to a block");
+   private static Block coloredBlock(String colorName, String suffix) {
+      return blockByPath(colorName.toLowerCase(Locale.ROOT) + "_" + suffix);
    }
 
-   private static Block weatheringCopperBlock(String collectionFieldName, boolean waxed, String stateMethodName, String legacyFieldName) {
-      Block legacyBlock = blockByField(legacyFieldName);
-      if (legacyBlock != null) {
-         return legacyBlock;
-      }
-
-      Object collection = fieldValue(collectionFieldName);
-      Object byState = invoke(collection, waxed ? "waxed" : "weathering");
-      Object value = invoke(byState, stateMethodName);
-      if (value instanceof Block block) {
-         return block;
-      }
-
-      throw new IllegalStateException("Minecraft copper collection " + collectionFieldName + "." + stateMethodName + " did not resolve to a block");
-   }
-
-   private static Block blockByField(String fieldName) {
-      try {
-         Object value = Blocks.class.getField(fieldName).get(null);
-         return value instanceof Block block ? block : null;
-      } catch (IllegalAccessException | NoSuchFieldException error) {
-         return null;
-      }
-   }
-
-   private static Object fieldValue(String fieldName) {
-      try {
-         return Blocks.class.getField(fieldName).get(null);
-      } catch (IllegalAccessException | NoSuchFieldException error) {
-         throw new IllegalStateException("Missing Minecraft block field " + fieldName, error);
-      }
-   }
-
-   private static Object invoke(Object target, String methodName) {
-      try {
-         return target.getClass().getMethod(methodName).invoke(target);
-      } catch (IllegalAccessException | InvocationTargetException | NoSuchMethodException error) {
-         throw new IllegalStateException("Failed to call " + target.getClass().getName() + "." + methodName, error);
-      }
-   }
-
-   private static String colorMethodName(String colorName) {
-      String[] parts = colorName.toLowerCase(Locale.ROOT).split("_");
-      StringBuilder methodName = new StringBuilder(parts[0]);
-      for (int index = 1; index < parts.length; index++) {
-         if (!parts[index].isEmpty()) {
-            methodName.append(Character.toUpperCase(parts[index].charAt(0))).append(parts[index].substring(1));
-         }
-      }
-
-      return methodName.toString();
-   }
-
-   private static String legacyColorFieldName(String colorName, String suffix) {
-      return colorName.toUpperCase(Locale.ROOT) + "_" + suffix;
+   private static Block blockByPath(String path) {
+      String id = "minecraft:" + path;
+      return BuiltInRegistries.BLOCK
+         .stream()
+         .filter(block -> id.equals(BuiltInRegistries.BLOCK.getKey(block).toString()))
+         .findFirst()
+         .orElseThrow(() -> new IllegalStateException("Missing Minecraft block " + id));
    }
 }

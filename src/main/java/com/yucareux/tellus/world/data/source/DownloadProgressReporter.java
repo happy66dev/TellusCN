@@ -25,10 +25,23 @@ public final class DownloadProgressReporter {
       };
    }
 
+   static DownloadProgressReporter.Listener currentListener() {
+      return LISTENER.get();
+   }
+
    public static void requestStarted(long expectedBytes) {
       DownloadProgressReporter.Listener listener = LISTENER.get();
       if (listener != null) {
          listener.onRequestStarted(expectedBytes);
+      }
+   }
+
+   public static void expectedBytesKnown(long expectedBytes) {
+      if (expectedBytes > 0L) {
+         DownloadProgressReporter.Listener listener = LISTENER.get();
+         if (listener != null) {
+            listener.onExpectedBytesKnown(expectedBytes);
+         }
       }
    }
 
@@ -65,6 +78,9 @@ public final class DownloadProgressReporter {
    }
 
    public interface Listener {
+      default void onExpectedBytesKnown(long expectedBytes) {
+      }
+
       void onRequestStarted(long var1);
 
       void onBytesRead(int var1);
