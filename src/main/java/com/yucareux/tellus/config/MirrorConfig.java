@@ -30,9 +30,28 @@ import net.fabricmc.loader.api.FabricLoader;
  */
 public final class MirrorConfig {
    
+   // 配置文件名（存放在 Fabric 的 config 目录下）
    private static final String CONFIG_FILE = "telluscn-mirror.properties";
-   private static final Path CONFIG_PATH = FabricLoader.getInstance().getConfigDir().resolve(CONFIG_FILE);
    private static final Object LOCK = new Object();
+
+   /**
+    * 解析镜像配置文件路径。
+    *
+    * 喵~防御：Fabric 加载器在单元测试、数据生成等场景下可能尚未初始化，
+    * 此时 getConfigDir() 会返回 null，直接 resolve 会抛空指针，并连带拖垮调用方的整条静态初始化链
+    * （例如世界生成器在静态字段里创建数据源）。这里返回 null 表示"当前没有可用的配置文件"，
+    * 读写都会被安全跳过，内存中的默认配置照常生效。
+    */
+   private static Path resolveConfigPath() {
+      try {
+         // 向 Fabric 加载器索取 config 目录；未初始化时为 null
+         Path configDir = FabricLoader.getInstance().getConfigDir();
+         return configDir == null ? null : configDir.resolve(CONFIG_FILE);
+      } catch (Throwable error) {
+         // 喵~防御：加载器未初始化时连 getInstance 都可能抛异常，统一降级成"无配置文件"
+         return null;
+      }
+   }
    
    // 配置项 Key
    private static final String KEY_ENABLED = "mirror.enabled";
@@ -167,12 +186,18 @@ public final class MirrorConfig {
    }
    
    private static void load() {
-      if (!Files.exists(CONFIG_PATH)) {
+      // 喵~防御：拿不到配置文件路径时直接跳过读取，保留内存中的默认值
+      Path configPath = resolveConfigPath();
+      if (configPath == null) {
          return;
       }
-      
+      // 配置文件还不存在时按默认值处理
+      if (!Files.exists(configPath)) {
+         return;
+      }
+
       Properties props = new Properties();
-      try (InputStream input = Files.newInputStream(CONFIG_PATH)) {
+      try (InputStream input = Files.newInputStream(configPath)) {
          props.load(input);
          
          enabled = Boolean.parseBoolean(props.getProperty(KEY_ENABLED, "true"));
@@ -195,14 +220,19 @@ public final class MirrorConfig {
    }
    
    private static void saveLocked() throws IOException {
-      Files.createDirectories(Objects.requireNonNull(CONFIG_PATH.getParent(), "configParent"));
-      
+      // 喵~防御：拿不到配置文件路径时直接跳过写入，避免空指针；内存配置依然生效
+      Path configPath = resolveConfigPath();
+      if (configPath == null) {
+         return;
+      }
+      Files.createDirectories(Objects.requireNonNull(configPath.getParent(), "configParent"));
+
       Properties props = new Properties();
       props.setProperty(KEY_ENABLED, String.valueOf(enabled));
       props.setProperty(KEY_CUSTOM_DOMAIN, customDomain);
       props.setProperty(KEY_SELECTED_PRESET, String.valueOf(selectedPreset));
-      
-      try (OutputStream output = Files.newOutputStream(CONFIG_PATH)) {
+
+      try (OutputStream output = Files.newOutputStream(configPath)) {
          props.store(output, "TellusCN Mirror Configuration - 镜像配置");
       }
    }
