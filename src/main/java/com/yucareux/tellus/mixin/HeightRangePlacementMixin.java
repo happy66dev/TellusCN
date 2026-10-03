@@ -128,9 +128,10 @@ public abstract class HeightRangePlacementMixin {
       BlockPos origin,
       int surfaceY
    ) {
-      int searchBottom = Math.max(
-         generator.getMinY() + 1,
-         UndergroundGenerationDepthPolicy.deepestGenerationY(surfaceY, generator.settings().undergroundDepth())
+      int searchBottom = UndergroundGenerationDepthPolicy.deepestGenerationY(
+         surfaceY,
+         generator.settings().undergroundDepth(),
+         context.getLevel().dimensionType().minY()
       );
       BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos(origin.getX(), surfaceY - 1, origin.getZ());
       for (int y = surfaceY - 1; y >= searchBottom; y--) {

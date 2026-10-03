@@ -448,4 +448,139 @@ class DhLodWaterResolverTest {
    void fallsBackToSeaLevelForEmptyComponents() {
       assertEquals(64, DhLodWaterResolver.fallbackInlandComponentSurface(0, 0L, Integer.MIN_VALUE, 64));
    }
+
+   @Test
+   void detailedFastLodsReuseTheCoherentLakeBedProfile() {
+      int size = 15;
+      int area = size * size;
+      int[] terrain = new int[area];
+      int[] water = new int[area];
+      boolean[] hasWater = new boolean[area];
+      boolean[] ocean = new boolean[area];
+      boolean[] directLine = new boolean[area];
+      boolean[] waterfall = new boolean[area];
+      boolean[] river = new boolean[area];
+      boolean[] detailed = new boolean[area];
+      int[] worldXs = new int[size];
+      int[] worldZs = new int[size];
+      for (int axis = 0; axis < size; axis++) {
+         worldXs[axis] = 1_000 + axis * 4;
+         worldZs[axis] = -2_000 + axis * 4;
+      }
+      for (int z = 1; z < size - 1; z++) {
+         for (int x = 1; x < size - 1; x++) {
+            int index = z * size + x;
+            hasWater[index] = true;
+            water[index] = 100;
+         }
+      }
+
+      DhLodWaterResolver.applyInlandDepthProfile(
+         terrain,
+         water,
+         hasWater,
+         ocean,
+         directLine,
+         waterfall,
+         river,
+         detailed,
+         worldXs,
+         worldZs,
+         size,
+         4,
+         true
+      );
+
+      assertEquals(98, terrain[size + 1]);
+      int center = 7 * size + 7;
+      assertEquals(100 - LakeBedProfile.sampledDepth(6, 4, worldXs[7], worldZs[7]), terrain[center]);
+      assertTrue(detailed[center]);
+   }
+
+   @Test
+   void coarseDetailedLakeShoreCannotCollapseAgainstTheWaterSurface() {
+      int size = 3;
+      int center = size + 1;
+      int[] terrain = new int[size * size];
+      int[] water = new int[size * size];
+      boolean[] hasWater = new boolean[size * size];
+      boolean[] empty = new boolean[size * size];
+      boolean[] detailed = new boolean[size * size];
+      hasWater[center] = true;
+      water[center] = 100;
+
+      DhLodWaterResolver.applyInlandDepthProfile(
+         terrain,
+         water,
+         hasWater,
+         empty,
+         empty,
+         empty,
+         empty,
+         detailed,
+         new int[]{0, 16, 32},
+         new int[]{0, 16, 32},
+         size,
+         16,
+         true
+      );
+
+      assertEquals(92, terrain[center]);
+      assertTrue(detailed[center]);
+   }
+
+   @Test
+   void approximateFastLodsKeepTheirLegacyConstantDepth() {
+      int[] terrain = new int[]{0};
+      int[] water = new int[]{80};
+      boolean[] hasWater = new boolean[]{true};
+      boolean[] empty = new boolean[]{false};
+
+      DhLodWaterResolver.applyInlandDepthProfile(
+         terrain,
+         water,
+         hasWater,
+         empty,
+         empty,
+         empty,
+         empty,
+         null,
+         new int[]{0},
+         new int[]{0},
+         1,
+         1,
+         false
+      );
+
+      assertEquals(60, terrain[0]);
+   }
+
+   @Test
+   void detailedLakeBedsDoNotChangeFastLodRiverDepths() {
+      int[] terrain = new int[]{0};
+      int[] water = new int[]{80};
+      boolean[] hasWater = new boolean[]{true};
+      boolean[] empty = new boolean[]{false};
+      boolean[] river = new boolean[]{true};
+      boolean[] detailed = new boolean[]{false};
+
+      DhLodWaterResolver.applyInlandDepthProfile(
+         terrain,
+         water,
+         hasWater,
+         empty,
+         empty,
+         empty,
+         river,
+         detailed,
+         new int[]{0},
+         new int[]{0},
+         1,
+         1,
+         true
+      );
+
+      assertEquals(60, terrain[0]);
+      assertFalse(detailed[0]);
+   }
 }

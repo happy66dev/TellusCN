@@ -223,19 +223,51 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
    }
 
    public int sampleVisualCoverClass(double blockX, double blockZ, double worldScale) {
-      return this.sampleCoverClass(blockX, blockZ, worldScale);
+      return this.sampleVisualCoverClass(blockX, blockZ, worldScale, worldScale, managedLookupMode());
    }
 
    public int sampleVisualCoverClass(double blockX, double blockZ, double worldScale, double previewResolutionMeters) {
-      return this.sampleCoverClass(blockX, blockZ, worldScale, previewResolutionMeters);
+      return this.sampleVisualCoverClass(blockX, blockZ, worldScale, previewResolutionMeters, managedLookupMode());
    }
 
    public int sampleVisualCoverClassLocalOnly(double blockX, double blockZ, double worldScale, double previewResolutionMeters) {
-      return this.sampleCoverClassLocalOnly(blockX, blockZ, worldScale, previewResolutionMeters);
+      return this.sampleVisualCoverClass(blockX, blockZ, worldScale, previewResolutionMeters, LookupMode.LOCAL_ONLY);
    }
 
    public int sampleVisualCoverClassMemoryOnly(double blockX, double blockZ, double worldScale, double previewResolutionMeters) {
-      return this.sampleCoverClassMemoryOnly(blockX, blockZ, worldScale, previewResolutionMeters);
+      return this.sampleVisualCoverClass(blockX, blockZ, worldScale, previewResolutionMeters, LookupMode.MEMORY_ONLY);
+   }
+
+   private int sampleVisualCoverClass(
+      double blockX,
+      double blockZ,
+      double worldScale,
+      double previewResolutionMeters,
+      LookupMode lookupMode
+   ) {
+      if (!isWithinTileCoverage(blockX, blockZ, worldScale)) {
+         return NO_DATA_CLASS;
+      }
+
+      double blocksPerDegree = EarthProjection.blocksPerDegree(worldScale);
+      double lon = blockX / blocksPerDegree;
+      double lat = EarthProjection.blockZToLat(blockZ, worldScale);
+      double resolutionMeters = effectiveSampleResolutionMeters(worldScale, previewResolutionMeters);
+      WorldCoverCogSource.Sample worldCover = this.worldCoverSource.sampleVisual(
+         lon,
+         lat,
+         resolutionMeters,
+         blockX,
+         blockZ,
+         worldScale,
+         worldCoverLookupMode(lookupMode)
+      );
+      if (worldCover.available()) {
+         return worldCover.coverClass();
+      }
+
+      int zoom = this.queryZoom(resolutionMeters, lookupMode);
+      return this.sampleVisualAtLonLat(lon, lat, zoom, resolutionMeters, blockX, blockZ, worldScale, lookupMode);
    }
 
    public int sampleNearestLandCoverClass(double blockX, double blockZ, double worldScale, int fallbackCoverClass) {
@@ -476,6 +508,53 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
       int completedUnits,
       BiConsumer<Integer, String> progressConsumer
    ) {
+      return this.preloadAreaInputs(
+         minBlockX,
+         minBlockZ,
+         maxBlockX,
+         maxBlockZ,
+         worldScale,
+         previewResolutionMeters,
+         completedUnits,
+         progressConsumer,
+         false
+      );
+   }
+
+   public int preloadAreaInputsIntoMemory(
+      double minBlockX,
+      double minBlockZ,
+      double maxBlockX,
+      double maxBlockZ,
+      double worldScale,
+      double previewResolutionMeters,
+      int completedUnits,
+      BiConsumer<Integer, String> progressConsumer
+   ) {
+      return this.preloadAreaInputs(
+         minBlockX,
+         minBlockZ,
+         maxBlockX,
+         maxBlockZ,
+         worldScale,
+         previewResolutionMeters,
+         completedUnits,
+         progressConsumer,
+         true
+      );
+   }
+
+   private int preloadAreaInputs(
+      double minBlockX,
+      double minBlockZ,
+      double maxBlockX,
+      double maxBlockZ,
+      double worldScale,
+      double previewResolutionMeters,
+      int completedUnits,
+      BiConsumer<Integer, String> progressConsumer,
+      boolean loadOvertureIntoMemory
+   ) {
       BiConsumer<Integer, String> progress = progressConsumer == null ? (completed, detail) -> {
       } : progressConsumer;
       List<WorldCoverCogSource.BlockKey> worldCoverBlocks = this.worldCoverSource.areaBlockKeys(
@@ -514,15 +593,28 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
       }
 
       int overtureStartingUnits = completedUnits;
-      progress.accept(completedUnits, "Downloading " + keys.size() + " Overture land-cover source tiles");
+      progress.accept(
+         completedUnits,
+         (loadOvertureIntoMemory ? "Loading " : "Downloading ") + keys.size() + " Overture land-cover source tiles"
+      );
       return ParallelDownloadRunner.run(
-         ParallelDownloadRunner.scope("land-cover", TellusCacheRegistry.generation(TellusCacheDomain.LAND_COVER)),
+         ParallelDownloadRunner.scope(
+            loadOvertureIntoMemory ? "land-cover-memory" : "land-cover",
+            TellusCacheRegistry.generation(TellusCacheDomain.LAND_COVER)
+         ),
          keys,
          completedUnits,
-         this::downloadRawTile,
+         loadOvertureIntoMemory ? this::loadTileIntoCache : this::downloadRawTile,
          (key, completed, phaseTotal) -> progress.accept(
             completed,
-            "Cached Overture land-cover tile " + (completed - overtureStartingUnits) + "/" + phaseTotal + " (" + key.label() + ")"
+            (loadOvertureIntoMemory ? "Loaded " : "Cached ")
+               + "Overture land-cover tile "
+               + (completed - overtureStartingUnits)
+               + "/"
+               + phaseTotal
+               + " ("
+               + key.label()
+               + ")"
          )
       );
    }
@@ -606,6 +698,25 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
       }
    }
 
+   private void loadTileIntoCache(TileKey key) {
+      long generation = TellusCacheRegistry.generation(TellusCacheDomain.LAND_COVER);
+      try {
+         this.cache.get(key);
+      } catch (Exception error) {
+         if (isInterruptedLoad(error)) {
+            Thread.currentThread().interrupt();
+         }
+         throw new RuntimeException("Failed to preload Overture land-cover tile " + key, error);
+      }
+      if (Thread.currentThread().isInterrupted()) {
+         throw new java.util.concurrent.CancellationException("Interrupted while preloading Overture land-cover tile " + key);
+      }
+      if (!TellusCacheRegistry.isCurrent(TellusCacheDomain.LAND_COVER, generation)) {
+         this.cache.invalidate(key);
+         throw new IllegalStateException("Discarded stale Overture land-cover preload for " + key);
+      }
+   }
+
    private int sampleAtLonLat(double lon, double lat, int zoom, LookupMode lookupMode) {
       TilePosition position = tilePosition(lon, lat, zoom);
       if (position == null) {
@@ -617,6 +728,64 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
          return lookupMode == LookupMode.MEMORY_ONLY ? Integer.MIN_VALUE : NO_DATA_CLASS;
       }
       return tile.sample(position.pixelX(), position.pixelY());
+   }
+
+   private int sampleVisualAtLonLat(
+      double lon,
+      double lat,
+      int zoom,
+      double effectiveResolutionMeters,
+      double blockX,
+      double blockZ,
+      double worldScale,
+      LookupMode lookupMode
+   ) {
+      TilePosition center = tilePosition(lon, lat, zoom);
+      if (center == null) {
+         return NO_DATA_CLASS;
+      }
+
+      int centerClass = this.sampleGrid(zoom, center.globalPixelX(), center.globalPixelY(), lookupMode);
+      if (centerClass == Integer.MIN_VALUE) {
+         return lookupMode == LookupMode.MEMORY_ONLY ? Integer.MIN_VALUE : NO_DATA_CLASS;
+      }
+
+      double sourceResolutionMeters = WEB_MERCATOR_CIRCUMFERENCE_METERS / ((1L << zoom) * (double)RASTER_SIZE);
+      double transitionStrength = LandCoverTransition.strength(sourceResolutionMeters, effectiveResolutionMeters);
+      if (!(transitionStrength > 0.0) || LandCoverTransition.isHardClass(centerClass)) {
+         return centerClass;
+      }
+
+      double blendX = center.globalPixelCoordinateX() - 0.5;
+      double blendY = center.globalPixelCoordinateY() - 0.5;
+      int x0 = (int)Math.floor(blendX);
+      int y0 = (int)Math.floor(blendY);
+      int x1 = x0 + 1;
+      int y1 = y0 + 1;
+      int value00 = visualSampleOrCenter(zoom, x0, y0, lookupMode, centerClass);
+      int value10 = visualSampleOrCenter(zoom, x1, y0, lookupMode, centerClass);
+      int value01 = visualSampleOrCenter(zoom, x0, y1, lookupMode, centerClass);
+      int value11 = visualSampleOrCenter(zoom, x1, y1, lookupMode, centerClass);
+      return LandCoverTransition.selectVisualClass(
+         centerClass,
+         value00,
+         value10,
+         value01,
+         value11,
+         blendX - x0,
+         blendY - y0,
+         transitionStrength,
+         blockX,
+         blockZ,
+         sourceResolutionMeters / Math.max(worldScale, Double.MIN_NORMAL)
+      );
+   }
+
+   private int visualSampleOrCenter(
+      int zoom, int globalPixelX, int globalPixelY, LookupMode lookupMode, int centerClass
+   ) {
+      int sampled = this.sampleGrid(zoom, globalPixelX, globalPixelY, lookupMode);
+      return sampled == Integer.MIN_VALUE ? centerClass : sampled;
    }
 
    private int sampleGrid(int zoom, int globalPixelX, int globalPixelY, LookupMode lookupMode) {
@@ -1180,9 +1349,17 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
       tileYValue = Math.max(0.0, Math.min(Math.nextDown((double)tilesPerAxis), tileYValue));
       int tileX = (int)Math.floor(tileXValue);
       int tileY = (int)Math.floor(tileYValue);
+      double globalPixelCoordinateX = tileXValue * RASTER_SIZE;
+      double globalPixelCoordinateY = tileYValue * RASTER_SIZE;
       int pixelX = Math.min(RASTER_SIZE - 1, (int)Math.floor((tileXValue - tileX) * RASTER_SIZE));
       int pixelY = Math.min(RASTER_SIZE - 1, (int)Math.floor((tileYValue - tileY) * RASTER_SIZE));
-      return new TilePosition(new TileKey(zoom, tileX, tileY), pixelX, pixelY);
+      return new TilePosition(
+         new TileKey(zoom, tileX, tileY),
+         pixelX,
+         pixelY,
+         globalPixelCoordinateX,
+         globalPixelCoordinateY
+      );
    }
 
    private static double effectiveSampleResolutionMeters(double worldScale, double previewResolutionMeters) {
@@ -1297,7 +1474,13 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
       }
    }
 
-   private record TilePosition(TileKey key, int pixelX, int pixelY) {
+   private record TilePosition(
+      TileKey key,
+      int pixelX,
+      int pixelY,
+      double globalPixelCoordinateX,
+      double globalPixelCoordinateY
+   ) {
       private int globalPixelX() {
          return this.key.x() * RASTER_SIZE + this.pixelX;
       }

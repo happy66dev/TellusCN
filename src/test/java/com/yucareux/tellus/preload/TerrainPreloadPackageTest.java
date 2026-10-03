@@ -5,6 +5,8 @@ import java.io.DataOutputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.zip.GZIPOutputStream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -234,6 +236,55 @@ class TerrainPreloadPackageTest {
       assertFalse(landMaskSample.land());
       assertEquals(400, sourceSample.terrainHeight());
       assertTrue(sourceSample.openWatersSelected());
+   }
+
+   @Test
+   void visuallyBlendsSoftCoverClassesWithoutChangingRawPackageData() {
+      TerrainPreloadArea area = TerrainPreloadArea.fromChunkBounds(0.0, 0.0, 1, 1.0, 0, 0, 0, 0);
+      TerrainPreloadPackage pack = new TerrainPreloadPackage(
+         "visual-transition",
+         "fingerprint",
+         area,
+         16,
+         2,
+         2,
+         new int[]{64, 64, 64, 64},
+         new byte[]{10, 60, 10, 60},
+         new byte[]{1, 1, 1, 1},
+         new byte[4]
+      );
+
+      Set<Integer> visualClasses = new HashSet<>();
+      for (int z = 0; z < 16; z++) {
+         TerrainPreloadPackage.Sample sample = pack.sample(8, z);
+         assertEquals(60, sample.coverClass());
+         visualClasses.add(sample.visualCoverClass());
+      }
+
+      assertEquals(Set.of(10, 60), visualClasses);
+   }
+
+   @Test
+   void packageVisualTransitionDoesNotMoveWaterBoundaries() {
+      TerrainPreloadArea area = TerrainPreloadArea.fromChunkBounds(0.0, 0.0, 1, 1.0, 0, 0, 0, 0);
+      TerrainPreloadPackage pack = new TerrainPreloadPackage(
+         "water-transition",
+         "fingerprint",
+         area,
+         16,
+         2,
+         2,
+         new int[]{64, 64, 64, 64},
+         new byte[]{10, 80, 10, 80},
+         new byte[]{1, 0, 1, 0},
+         new byte[4]
+      );
+
+      for (int z = 0; z < 16; z++) {
+         TerrainPreloadPackage.Sample sample = pack.sample(8, z);
+         assertEquals(80, sample.coverClass());
+         assertEquals(80, sample.visualCoverClass());
+      }
    }
 
    private void writeHeader(Path path, int gridStep, int gridWidth, int gridDepth) throws Exception {

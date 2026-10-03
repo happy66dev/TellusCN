@@ -5,10 +5,12 @@ import com.yucareux.tellus.client.hud.ManagedTerrainDownloadOverlay;
 import com.yucareux.tellus.integration.distant_horizons.managed.ManagedTerrainClientState;
 import com.yucareux.tellus.integration.distant_horizons.managed.ManagedTerrainViewDistance;
 import com.yucareux.tellus.network.GeoTpOpenMapPayload;
+import com.yucareux.tellus.network.GeoTpTeleportPayload;
 import com.yucareux.tellus.network.ManagedTerrainStatusPayload;
 import com.yucareux.tellus.network.ManagedTerrainViewPayload;
 import com.yucareux.tellus.network.TellusNeoForgeClientNetworking;
 import com.yucareux.tellus.network.TellusWeatherPayload;
+import com.yucareux.tellus.platform.TellusClientPlatform;
 import com.yucareux.tellus.world.realtime.SnowGrid;
 import com.yucareux.tellus.world.realtime.TemperatureGrid;
 import com.yucareux.tellus.world.realtime.TellusRealtimeState;
@@ -36,6 +38,10 @@ public final class TellusClient {
    }
 
    public static void register(IEventBus modEventBus) {
+      TellusClientPlatform.configureGeoTeleport(
+         () -> true,
+         (latitude, longitude) -> TellusNeoForgeClientNetworking.sendToServer(new GeoTpTeleportPayload(latitude, longitude))
+      );
       modEventBus.addListener(TellusClient::registerClientPayloadHandlers);
       modEventBus.addListener(TellusClient::registerGuiLayers);
       modEventBus.addListener(TellusClient::registerKeyMappings);

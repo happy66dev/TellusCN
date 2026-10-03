@@ -16,6 +16,16 @@ class UndergroundGenerationDepthPolicyTest {
    }
 
    @Test
+   void usesTheTerrainShellBelowTheGeneratorsSamplingMinimum() {
+      assertEquals(-178, UndergroundGenerationDepthPolicy.deepestGenerationY(77, 256, -368));
+   }
+
+   @Test
+   void clampsTheUsableShellAboveTheDimensionFloor() {
+      assertEquals(-367, UndergroundGenerationDepthPolicy.deepestGenerationY(-200, 512, -368));
+   }
+
+   @Test
    void treatsTheConfiguredShellBoundaryAsProtectedTerrain() {
       assertTrue(UndergroundGenerationDepthPolicy.containsDepth(63, 512));
       assertTrue(UndergroundGenerationDepthPolicy.containsDepth(64, 512));

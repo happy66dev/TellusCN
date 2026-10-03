@@ -99,9 +99,7 @@ public class TerrainPreloadScreen extends Screen {
 
    @Override
    protected void init() {
-      if (this.mapWidget != null) {
-         this.mapWidget.close();
-      }
+      MapScreenResources.close(this.mapWidget, this.searchWidget);
 
       this.mapWidget = new SlippyMapWidget(0, 0, this.width, this.height);
       this.mapWidget.setAttributionBottomPadding(34);
@@ -580,13 +578,7 @@ public class TerrainPreloadScreen extends Screen {
 
    @Override
    public void removed() {
-      if (this.mapWidget != null) {
-         this.mapWidget.close();
-      }
-
-      if (this.searchWidget != null) {
-         this.searchWidget.close();
-      }
+      MapScreenResources.close(this.mapWidget, this.searchWidget);
    }
 
    private boolean isSearchOverlayMouseOver(double mouseX, double mouseY) {

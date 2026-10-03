@@ -12,6 +12,28 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class WaterSurfaceResolverTest {
    @Test
+   void waterDemSamplesUseTheSameAutomaticLatitudeTransformAsTerrain() {
+      EarthGeneratorSettings settings = EarthGeneratorSettings.DEFAULT;
+      double blockZ = EarthProjection.latToBlockZ(20.72, settings.worldScale());
+      double elevationMeters = 1_500.0;
+      int expected = TerrainHeightTransform.blockOffset(
+         elevationMeters,
+         blockZ,
+         settings.effectiveVerticalWorldScale(),
+         settings.effectiveTerrestrialHeightScale(),
+         settings.effectiveOceanicHeightScale(),
+         settings.experimentalIncreaseHeight(),
+         settings.automaticHeightScaling()
+      ) + settings.effectiveHeightOffset();
+      int uncorrected = (int)Math.ceil(
+         elevationMeters * settings.effectiveTerrestrialHeightScale() / settings.effectiveVerticalWorldScale()
+      ) + settings.effectiveHeightOffset();
+
+      assertEquals(expected, WaterSurfaceResolver.scaleElevationToHeight(elevationMeters, blockZ, settings));
+      assertNotEquals(uncorrected, expected);
+   }
+
+   @Test
    void transitionsConnectedWaterFromTheResolvedLocalOceanSurface() {
       assertEquals(36, WaterSurfaceResolver.transitionedWaterSurface(50, 36, 0.0));
       assertEquals(43, WaterSurfaceResolver.transitionedWaterSurface(50, 36, 0.5));
@@ -222,6 +244,49 @@ class WaterSurfaceResolverTest {
       assertEquals(85, WaterSurfaceResolver.naturalizedInlandBankSurface(90, 80, 50, 5, true));
       assertEquals(84, WaterSurfaceResolver.naturalizedInlandBankSurface(90, 80, 20, 5, false));
       assertEquals(79, WaterSurfaceResolver.naturalizedInlandBankSurface(79, 80, 10, 5, true));
+   }
+
+   @Test
+   void keepsRiverBedsShallowWhileAllowingWiderChannelsToDeepen() {
+      assertEquals(1, WaterSurfaceResolver.computeRiverDepth(1.0));
+      assertEquals(2, WaterSurfaceResolver.computeRiverDepth(5.0));
+      assertEquals(6, WaterSurfaceResolver.computeRiverDepth(200.0));
+   }
+
+   @Test
+   void waterfallDropColumnPreservesVisualTopWithoutPregeneratedWater() {
+      int[] terrain = new int[256];
+      int[] water = new int[256];
+      byte[] flags = new byte[256];
+      terrain[0] = 80;
+      water[0] = 96;
+      flags[0] = 3;
+      WaterSurfaceResolver.WaterChunkData data = WaterSurfaceResolver.WaterChunkData.fromArrays(
+         terrain, water, flags, false
+      );
+
+      assertFalse(data.hasWater(0, 0));
+      assertTrue(data.isWaterfallDrop(0, 0));
+      assertEquals(80, data.terrainSurface(0, 0));
+      assertEquals(96, data.waterSurface(0, 0));
+   }
+
+   @Test
+   void schedulesOnlyTheUpstreamSourceForConfirmedWaterfalls() {
+      WaterSurfaceResolver.WaterfallInfo waterfall = new WaterSurfaceResolver.WaterfallInfo(true, 80, 96);
+
+      assertTrue(WaterSurfaceResolver.shouldScheduleFlowSource(96, waterfall));
+      assertFalse(WaterSurfaceResolver.shouldScheduleFlowSource(95, waterfall));
+      assertFalse(WaterSurfaceResolver.shouldScheduleFlowSource(96, new WaterSurfaceResolver.WaterfallInfo(false, 80, 96)));
+   }
+
+   @Test
+   void protectsOnlyMappedInlandWaterInsideWaterfallZonesFromSourceConversion() {
+      assertTrue(WaterSurfaceResolver.isSourceConversionProtectedCell(true, true, false, true));
+      assertTrue(WaterSurfaceResolver.isSourceConversionProtectedCell(true, false, true, true));
+      assertFalse(WaterSurfaceResolver.isSourceConversionProtectedCell(false, true, true, true));
+      assertFalse(WaterSurfaceResolver.isSourceConversionProtectedCell(true, false, false, true));
+      assertFalse(WaterSurfaceResolver.isSourceConversionProtectedCell(true, true, true, false));
    }
 
 }

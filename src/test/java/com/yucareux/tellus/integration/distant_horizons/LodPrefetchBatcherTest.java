@@ -188,6 +188,6 @@ class LodPrefetchBatcherTest {
    }
 
    private static LodPrefetchBatcher.Request request(LodBlockRange range, int detail) {
-      return new LodPrefetchBatcher.Request(range, detail, true, true, true, Math.scalb(1.0, detail));
+      return new LodPrefetchBatcher.Request(range, detail, true, true, Math.scalb(1.0, detail));
    }
 }

@@ -25,7 +25,7 @@ class ExperimentalHeightSettingsTest {
            "min_altitude": -512,
            "max_altitude": 1024,
            "experimental_increase_height": true,
-           "experimental_height_coordinate_profile": "global_mercator_dense_v1"
+           "experimental_height_coordinate_profile": "global_mercator_land_v2"
          }
          """
       );
@@ -49,10 +49,10 @@ class ExperimentalHeightSettingsTest {
       assertEquals(HighYPackedCoordinateProfile.PROFILE_ID, encoded.get("experimental_height_coordinate_profile").getAsString());
       assertEquals(EarthGeneratorSettings.DEFAULT_UNDERGROUND_DEPTH, decoded.undergroundDepth());
       assertTrue(limits.minY() <= EarthGeneratorSettings.EXPERIMENTAL_HEIGHT_OFFSET - decoded.undergroundDepth());
-      assertTrue(limits.minY() + limits.height() - 1 >= Math.ceil(8848.0 / decoded.worldScale()));
-      assertTrue(limits.minY() + limits.height() - 1 < 8848);
       assertEquals(HighYPackedCoordinateProfile.TELLUS_DIMENSION_MIN_Y, limits.minY());
-      assertEquals(-2_040, limits.minY() + WaterSurfaceResolver.oceanFloorSupportBlocks());
+      assertEquals(HighYPackedCoordinateProfile.TELLUS_DIMENSION_Y_SIZE, limits.height());
+      assertEquals(HighYPackedCoordinateProfile.TELLUS_DIMENSION_MAX_Y, limits.minY() + limits.height() - 1);
+      assertEquals(-632, limits.minY() + WaterSurfaceResolver.oceanFloorSupportBlocks());
    }
 
    @Test
@@ -79,6 +79,23 @@ class ExperimentalHeightSettingsTest {
            "world_scale": 1.0,
            "experimental_increase_height": true,
            "experimental_height_coordinate_profile": "high_y_26x24z14y_shifted"
+         }
+         """
+      );
+
+      DataResult<EarthGeneratorSettings> result = EarthGeneratorSettings.CODEC.parse(JsonOps.INSTANCE, input);
+      assertTrue(result.error().isPresent());
+      assertTrue(result.error().get().message().contains("incompatible coordinate profile"));
+   }
+
+   @Test
+   void rejectsPreviousGlobalDenseProfile() {
+      JsonElement input = JsonParser.parseString(
+         """
+         {
+           "world_scale": 1.0,
+           "experimental_increase_height": true,
+           "experimental_height_coordinate_profile": "global_mercator_dense_v1"
          }
          """
       );

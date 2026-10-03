@@ -4,6 +4,7 @@ import com.mojang.datafixers.util.Pair;
 import com.mojang.serialization.MapCodec;
 import com.mojang.serialization.codecs.RecordCodecBuilder;
 import com.yucareux.tellus.world.data.biome.BiomeClassification;
+import com.yucareux.tellus.world.data.biome.BiomeClassificationProviders;
 import com.yucareux.tellus.world.data.cover.TellusLandCoverSource;
 import com.yucareux.tellus.world.data.elevation.TellusElevationSource;
 import com.yucareux.tellus.world.data.koppen.TellusKoppenSource;
@@ -26,6 +27,7 @@ import net.minecraft.resources.ResourceKey;
 import net.minecraft.util.Mth;
 import net.minecraft.world.level.LevelReader;
 import net.minecraft.world.level.biome.Biome;
+import net.minecraft.world.level.biome.BiomeResolver;
 import net.minecraft.world.level.biome.BiomeSource;
 import net.minecraft.world.level.biome.Biomes;
 import net.minecraft.world.level.biome.Climate.Sampler;
@@ -197,6 +199,24 @@ public final class EarthBiomeSource extends BiomeSource {
       int blockY = QuartPos.toBlock(y);
       int blockZ = QuartPos.toBlock(z);
       return this.resolveBiomeAtBlock(blockX, blockY, blockZ);
+   }
+
+   /**
+    * Creates a resolver confined to one vanilla chunk-biome task. Vanilla
+    * revisits each horizontal quart column for every vertical quart layer, so
+    * cache the expensive land-cover/water column while still resolving the
+    * final biome independently for every Y coordinate.
+    */
+   BiomeResolver createChunkBiomeResolver() {
+      QuartBiomeColumnCache<EarthBiomeSource.ResolvedBiomeColumn> columns = new QuartBiomeColumnCache<>(
+         (quartX, quartZ) -> this.resolveBiomeColumn(QuartPos.toBlock(quartX), QuartPos.toBlock(quartZ), false)
+      );
+      return (quartX, quartY, quartZ, sampler) -> {
+         int blockX = QuartPos.toBlock(quartX);
+         int blockY = QuartPos.toBlock(quartY);
+         int blockZ = QuartPos.toBlock(quartZ);
+         return this.resolveBiomeForColumn(columns.resolve(quartX, quartZ), blockX, blockY, blockZ);
+      };
    }
 
    /**
@@ -506,7 +526,16 @@ public final class EarthBiomeSource extends BiomeSource {
          }
       }
 
-      ResourceKey<Biome> biomeKey = BiomeClassification.findBiomeKey(visualCoverClass, koppen);
+      ResourceKey<Biome> biomeKey = BiomeClassificationProviders.findBiomeKey(
+         visualCoverClass,
+         koppen,
+         blockX,
+         blockZ,
+         this.settings.worldScale()
+      );
+      if (biomeKey == null) {
+         biomeKey = BiomeClassification.findBiomeKey(visualCoverClass, koppen);
+      }
       if (biomeKey == null) {
          biomeKey = BiomeClassification.findFallbackKey(visualCoverClass);
       }
@@ -678,6 +707,9 @@ public final class EarthBiomeSource extends BiomeSource {
       Set<Holder<Biome>> holders = new HashSet<>();
 
       for (ResourceKey<Biome> key : BiomeClassification.allBiomeKeys()) {
+         holders.add(this.resolveBiome(key, this.plains));
+      }
+      for (ResourceKey<Biome> key : BiomeClassificationProviders.allBiomeKeys()) {
          holders.add(this.resolveBiome(key, this.plains));
       }
 

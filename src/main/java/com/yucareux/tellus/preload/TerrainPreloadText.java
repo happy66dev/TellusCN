@@ -55,6 +55,7 @@ public final class TerrainPreloadText {
    private static final Map<String, String> SOURCE_KEYS = Map.ofEntries(
       Map.entry("DEM elevation", "tellus.preload.source.dem"),
       Map.entry("ESA WorldCover land cover", "tellus.preload.source.land_cover"),
+      Map.entry("ETH canopy height", "tellus.preload.source.canopy_height"),
       Map.entry("land mask", "tellus.preload.source.land_mask"),
       Map.entry("OSM sand", "tellus.preload.source.sand"),
       Map.entry("Overture water", "tellus.preload.source.water"),
@@ -73,9 +74,14 @@ public final class TerrainPreloadText {
       Map.entry(" OSM building source tiles", "tellus.preload.detail.downloading_buildings"),
       Map.entry(" OSM road source tiles", "tellus.preload.detail.downloading_roads")
    );
+   private static final Map<String, String> LOADING_PREFIX_KEYS = Map.ofEntries(
+      Map.entry(" ETH canopy-height source tiles", "tellus.preload.detail.loading_canopy_height"),
+      Map.entry(" OSM building source tiles", "tellus.preload.detail.loading_buildings")
+   );
    private static final Map<String, String> TILE_SOURCE_KEYS = Map.ofEntries(
       Map.entry("WorldCover", "tellus.preload.source.land_cover"),
       Map.entry("Overture land-cover", "tellus.preload.source.land_cover_fallback"),
+      Map.entry("ETH canopy-height", "tellus.preload.source.canopy_height"),
       Map.entry("land-mask", "tellus.preload.source.land_mask"),
       Map.entry("DEM source", "tellus.preload.source.dem"),
       Map.entry("OSM infrastructure", "tellus.preload.source.infrastructure"),
@@ -130,9 +136,14 @@ public final class TerrainPreloadText {
             }
          }
       }
-      if (detail.startsWith("Loading ") && detail.endsWith(" OSM building source tiles")) {
-         String count = detail.substring("Loading ".length(), detail.length() - " OSM building source tiles".length());
-         return Component.translatable("tellus.preload.detail.loading_buildings", count);
+      if (detail.startsWith("Loading ")) {
+         String remainder = detail.substring("Loading ".length());
+         for (Map.Entry<String, String> entry : LOADING_PREFIX_KEYS.entrySet()) {
+            if (remainder.endsWith(entry.getKey())) {
+               String count = remainder.substring(0, remainder.length() - entry.getKey().length());
+               return Component.translatable(entry.getValue(), count);
+            }
+         }
       }
 
       Component cached = translateTileProgress(detail, CACHED_TILE, "tellus.preload.detail.cached_tile");

@@ -159,6 +159,52 @@ public final class TellusOsmInfrastructureSource implements TellusCacheHandle {
       );
    }
 
+   public int preloadAreaInputs(
+      int minBlockX, int minBlockZ, int maxBlockX, int maxBlockZ, double worldScale, int marginBlocks,
+      int completedUnits, BiConsumer<Integer, String> progressConsumer
+   ) {
+      BiConsumer<Integer, String> progress = progressConsumer == null ? (completed, detail) -> {
+      } : progressConsumer;
+      List<TellusOsmInfrastructureSource.TileKey> keys = this.downloadAreaTileKeys(
+         minBlockX, minBlockZ, maxBlockX, maxBlockZ, worldScale, marginBlocks
+      );
+      if (keys.isEmpty()) {
+         progress.accept(completedUnits, "Skipping OSM infrastructure tiles because the source is unavailable");
+         return completedUnits + 1;
+      }
+      int startingUnits = completedUnits;
+      progress.accept(completedUnits, "Loading " + keys.size() + " OSM infrastructure source tiles");
+      return ParallelDownloadRunner.run(
+         ParallelDownloadRunner.scope("osm-infrastructure-memory", TellusCacheRegistry.generation(TellusCacheDomain.OSM)),
+         keys,
+         completedUnits,
+         this::loadTileIntoCache,
+         (key, completed, phaseTotal) -> progress.accept(
+            completed, "Loaded OSM infrastructure tile " + (completed - startingUnits) + "/" + phaseTotal + " (" + key.zoom() + "/" + key.x() + "/" + key.y() + ")"
+         )
+      );
+   }
+
+   private void loadTileIntoCache(TellusOsmInfrastructureSource.TileKey key) {
+      long generation = TellusCacheRegistry.generation(TellusCacheDomain.OSM);
+      try {
+         if (this.tileLoadFailures.contains(key)) {
+            this.cache.invalidate(key);
+         }
+         this.cache.get(key);
+      } catch (Exception error) {
+         this.tileLoadFailures.add(key);
+         throw new RuntimeException("Failed to preload Overture infrastructure tile " + key, error);
+      }
+      if (Thread.currentThread().isInterrupted()) {
+         throw new java.util.concurrent.CancellationException("Interrupted while preloading Overture infrastructure tile " + key);
+      }
+      if (!TellusCacheRegistry.isCurrent(TellusCacheDomain.OSM, generation)) {
+         this.cache.invalidate(key);
+         throw new IllegalStateException("Discarded stale Overture infrastructure preload for " + key);
+      }
+   }
+
    private List<TellusOsmInfrastructureSource.TileKey> downloadAreaTileKeys(
       int minBlockX, int minBlockZ, int maxBlockX, int maxBlockZ, double worldScale, int marginBlocks
    ) {

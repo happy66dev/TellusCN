@@ -1,6 +1,7 @@
 package com.yucareux.tellus.preload;
 
 import com.yucareux.tellus.Tellus;
+import com.yucareux.tellus.world.data.cover.LandCoverTransition;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.DataInputStream;
@@ -14,7 +15,7 @@ import java.util.zip.GZIPOutputStream;
 
 public final class TerrainPreloadPackage {
    public static final String FILE_NAME = "terrain.telluspack";
-   public static final int FORMAT_VERSION = 2;
+   public static final int FORMAT_VERSION = 4;
    static final int MAGIC = 0x544C504B;
    static final int SAMPLE_BYTES = Integer.BYTES + 3;
    static final int HARD_MAX_SAMPLE_COUNT = 20_000_000;
@@ -313,11 +314,25 @@ public final class TerrainPreloadPackage {
          )
          : this.terrainHeights[nearest];
       int coverClass = Byte.toUnsignedInt(this.coverClasses[nearest]);
+      int visualCoverClass = LandCoverTransition.selectVisualClass(
+         coverClass,
+         Byte.toUnsignedInt(this.coverClasses[index00]),
+         Byte.toUnsignedInt(this.coverClasses[index10]),
+         Byte.toUnsignedInt(this.coverClasses[index01]),
+         Byte.toUnsignedInt(this.coverClasses[index11]),
+         tx,
+         tz,
+         1.0,
+         blockX,
+         blockZ,
+         this.gridStep
+      );
       byte landMask = this.landMaskClasses[nearest];
       int flags = Byte.toUnsignedInt(this.elevationFlags[nearest]);
       return new TerrainPreloadPackage.Sample(
          height,
          coverClass,
+         visualCoverClass,
          landMask >= 0,
          landMask == 1,
          (flags & FLAG_OPENWATERS_SELECTED) != 0,
@@ -421,11 +436,32 @@ public final class TerrainPreloadPackage {
    public record Sample(
       int terrainHeight,
       int coverClass,
+      int visualCoverClass,
       boolean landMaskKnown,
       boolean land,
       boolean openWatersSelected,
       boolean mapterhornLandOverride,
       boolean oceanElevationSelected
    ) {
+      public Sample(
+         int terrainHeight,
+         int coverClass,
+         boolean landMaskKnown,
+         boolean land,
+         boolean openWatersSelected,
+         boolean mapterhornLandOverride,
+         boolean oceanElevationSelected
+      ) {
+         this(
+            terrainHeight,
+            coverClass,
+            coverClass,
+            landMaskKnown,
+            land,
+            openWatersSelected,
+            mapterhornLandOverride,
+            oceanElevationSelected
+         );
+      }
    }
 }

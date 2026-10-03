@@ -15,7 +15,8 @@
 		"MinecraftServerInitialSpawnMixin",
 		"OceanMonumentBuildingMixin",
 		"SerializableChunkDataHighYMixin",
-		"OceanMonumentStructureMixin"
+		"OceanMonumentStructureMixin",
+		"WaterSourceConversionMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1

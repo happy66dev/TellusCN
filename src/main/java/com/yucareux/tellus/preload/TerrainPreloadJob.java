@@ -737,10 +737,13 @@ public final class TerrainPreloadJob {
       }
    }
 
-   private static String sourceDetail(EarthGeneratorSettings settings) {
+   static String sourceDetail(EarthGeneratorSettings settings) {
       List<String> sources = new ArrayList<>();
       sources.add("DEM elevation");
       sources.add("ESA WorldCover land cover");
+      if (settings.customTrees()) {
+         sources.add("ETH canopy height");
+      }
       sources.add("land mask");
       sources.add("OSM sand");
       if (settings.enableWater()) {

@@ -16,7 +16,8 @@ public enum OsmWaterKind {
    POND(false, false),
    BASIN(false, false),
    LAGOON(false, false),
-   WETLAND(false, false);
+   WETLAND(false, false),
+   WATERFALL(false, false);
 
    private final boolean flowing;
    private final boolean ocean;
@@ -64,6 +65,7 @@ public enum OsmWaterKind {
          case "basin" -> BASIN;
          case "lagoon" -> LAGOON;
          case "wetland", "marsh", "swamp" -> WETLAND;
+         case "waterfall" -> WATERFALL;
          default -> UNKNOWN;
       };
    }

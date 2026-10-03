@@ -171,6 +171,49 @@ public final class TellusLandMaskSource implements TellusCacheHandle {
       int completedUnits,
       BiConsumer<Integer, String> progressConsumer
    ) {
+      return this.preloadAreaInputs(
+         minBlockX,
+         minBlockZ,
+         maxBlockX,
+         maxBlockZ,
+         worldScale,
+         completedUnits,
+         progressConsumer,
+         false
+      );
+   }
+
+   public int preloadAreaInputsIntoMemory(
+      double minBlockX,
+      double minBlockZ,
+      double maxBlockX,
+      double maxBlockZ,
+      double worldScale,
+      int completedUnits,
+      BiConsumer<Integer, String> progressConsumer
+   ) {
+      return this.preloadAreaInputs(
+         minBlockX,
+         minBlockZ,
+         maxBlockX,
+         maxBlockZ,
+         worldScale,
+         completedUnits,
+         progressConsumer,
+         true
+      );
+   }
+
+   private int preloadAreaInputs(
+      double minBlockX,
+      double minBlockZ,
+      double maxBlockX,
+      double maxBlockZ,
+      double worldScale,
+      int completedUnits,
+      BiConsumer<Integer, String> progressConsumer,
+      boolean loadIntoMemory
+   ) {
       BiConsumer<Integer, String> progress = progressConsumer == null ? (completed, detail) -> {
       } : progressConsumer;
       List<TellusLandMaskSource.TileKey> keys = this.areaTileKeys(minBlockX, minBlockZ, maxBlockX, maxBlockZ, worldScale);
@@ -180,15 +223,25 @@ public final class TellusLandMaskSource implements TellusCacheHandle {
       }
 
       int startingUnits = completedUnits;
-      progress.accept(completedUnits, "Downloading " + keys.size() + " land-mask source tiles");
+      progress.accept(completedUnits, (loadIntoMemory ? "Loading " : "Downloading ") + keys.size() + " land-mask source tiles");
       return ParallelDownloadRunner.run(
-         ParallelDownloadRunner.scope("land-mask", TellusCacheRegistry.generation(TellusCacheDomain.OSM)),
+         ParallelDownloadRunner.scope(
+            loadIntoMemory ? "land-mask-memory" : "land-mask",
+            TellusCacheRegistry.generation(TellusCacheDomain.OSM)
+         ),
          keys,
          completedUnits,
-         this::downloadRawTile,
+         loadIntoMemory ? this::loadTileIntoCache : this::downloadRawTile,
          (key, completed, phaseTotal) -> progress.accept(
             completed,
-            "Cached land-mask tile " + (completed - startingUnits) + "/" + phaseTotal + " (" + key.label() + ")"
+            (loadIntoMemory ? "Loaded " : "Cached ")
+               + "land-mask tile "
+               + (completed - startingUnits)
+               + "/"
+               + phaseTotal
+               + " ("
+               + key.label()
+               + ")"
          )
       );
    }
@@ -419,6 +472,22 @@ public final class TellusLandMaskSource implements TellusCacheHandle {
          this.cacheRawTile(cachePath, bytes == null ? new byte[0] : bytes, generation);
       } catch (IOException error) {
          throw new RuntimeException("Failed to download land mask tile " + key.label(), error);
+      }
+   }
+
+   private void loadTileIntoCache(TellusLandMaskSource.TileKey key) {
+      long generation = TellusCacheRegistry.generation(TellusCacheDomain.OSM);
+      try {
+         this.cache.get(key);
+      } catch (Exception error) {
+         throw new RuntimeException("Failed to preload land mask tile " + key.label(), error);
+      }
+      if (Thread.currentThread().isInterrupted()) {
+         throw new java.util.concurrent.CancellationException("Interrupted while preloading land mask tile " + key.label());
+      }
+      if (!TellusCacheRegistry.isCurrent(TellusCacheDomain.OSM, generation)) {
+         this.cache.invalidate(key);
+         throw new IllegalStateException("Discarded stale land mask preload for " + key.label());
       }
    }
 

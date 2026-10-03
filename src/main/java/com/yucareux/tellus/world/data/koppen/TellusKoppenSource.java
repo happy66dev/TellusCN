@@ -1,5 +1,7 @@
 package com.yucareux.tellus.world.data.koppen;
 
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
 import com.yucareux.tellus.cache.TellusCacheDomain;
 import com.yucareux.tellus.cache.TellusCacheFiles;
 import com.yucareux.tellus.cache.TellusCacheHandle;
@@ -18,9 +20,7 @@ import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
-import java.util.LinkedHashMap;
-import java.util.Map;
-import java.util.Map.Entry;
+import java.util.concurrent.ExecutionException;
 import java.util.zip.InflaterInputStream;
 import com.yucareux.tellus.platform.TellusPlatform;
 import net.minecraft.util.Mth;
@@ -327,7 +327,7 @@ public final class TellusKoppenSource implements TellusCacheHandle {
       private final double tieLon;
       private final double tieLat;
       private final double pixelSizeMeters;
-      private final Map<Integer, byte[]> tileCache;
+      private final Cache<Integer, byte[]> tileCache;
 
       private GeoTiffRaster() {
          this.path = null;
@@ -345,7 +345,7 @@ public final class TellusKoppenSource implements TellusCacheHandle {
          this.tieLon = 0.0;
          this.tieLat = 0.0;
          this.pixelSizeMeters = 0.0;
-         this.tileCache = Map.of();
+         this.tileCache = CacheBuilder.newBuilder().maximumSize(0L).build();
       }
 
       private GeoTiffRaster(
@@ -378,12 +378,7 @@ public final class TellusKoppenSource implements TellusCacheHandle {
          this.tieLon = tieLon;
          this.tieLat = tieLat;
          this.pixelSizeMeters = Math.abs(pixelScaleX) * (EQUATOR_CIRCUMFERENCE / 360.0);
-         this.tileCache = new LinkedHashMap<Integer, byte[]>(MAX_TILE_CACHE, 0.75F, true) {
-            @Override
-            protected boolean removeEldestEntry(Entry<Integer, byte[]> eldest) {
-               return this.size() > MAX_TILE_CACHE;
-            }
-         };
+         this.tileCache = CacheBuilder.newBuilder().maximumSize(MAX_TILE_CACHE).build();
       }
 
       static TellusKoppenSource.GeoTiffRaster open(Path path) throws IOException {
@@ -402,9 +397,8 @@ public final class TellusKoppenSource implements TellusCacheHandle {
 
       void close() {
          if (this.channel != null) {
-            synchronized (this.tileCache) {
-               this.tileCache.clear();
-            }
+            this.tileCache.invalidateAll();
+            this.tileCache.cleanUp();
 
             try {
                this.channel.close();
@@ -571,17 +565,20 @@ public final class TellusKoppenSource implements TellusCacheHandle {
       }
 
       private byte[] getTile(int tileIndex) throws IOException {
-         synchronized (this.tileCache) {
-            byte[] cached = this.tileCache.get(tileIndex);
-            if (cached != null) {
-               return cached;
+         try {
+            return this.tileCache.get(tileIndex, () -> this.readTile(tileIndex));
+         } catch (ExecutionException error) {
+            Throwable cause = error.getCause();
+            if (cause instanceof IOException io) {
+               throw io;
             }
-         }
-
-         byte[] tile = this.readTile(tileIndex);
-         synchronized (this.tileCache) {
-            this.tileCache.put(tileIndex, tile);
-            return tile;
+            if (cause instanceof RuntimeException runtime) {
+               throw runtime;
+            }
+            if (cause instanceof Error fatal) {
+               throw fatal;
+            }
+            throw new IOException("Failed to read Koppen tile " + tileIndex, cause);
          }
       }
 

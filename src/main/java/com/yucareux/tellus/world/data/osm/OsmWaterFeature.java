@@ -7,6 +7,7 @@ public final class OsmWaterFeature {
    private static final double LINE_HALF_WIDTH_BLOCKS = 0.5;
    private final long featureId;
    private final boolean lineGeometry;
+   private final boolean pointGeometry;
    private final boolean oceanHint;
    private final OsmWaterKind kind;
    private final double[][] longitudes;
@@ -23,8 +24,24 @@ public final class OsmWaterFeature {
    public OsmWaterFeature(
       long featureId, boolean lineGeometry, boolean oceanHint, OsmWaterKind kind, double[][] longitudes, double[][] latitudes
    ) {
+      this(featureId, lineGeometry, false, oceanHint, kind, longitudes, latitudes);
+   }
+
+   OsmWaterFeature(
+      long featureId,
+      boolean lineGeometry,
+      boolean pointGeometry,
+      boolean oceanHint,
+      OsmWaterKind kind,
+      double[][] longitudes,
+      double[][] latitudes
+   ) {
       this.featureId = featureId;
       this.lineGeometry = lineGeometry;
+      this.pointGeometry = pointGeometry;
+      if (lineGeometry && pointGeometry) {
+         throw new IllegalArgumentException("Water feature cannot be both a line and a point");
+      }
       this.kind = Objects.requireNonNullElse(kind, OsmWaterKind.UNKNOWN);
       this.oceanHint = oceanHint || this.kind.ocean();
       this.longitudes = copyParts(Objects.requireNonNull(longitudes, "longitudes"));
@@ -40,7 +57,7 @@ public final class OsmWaterFeature {
          for (int part = 0; part < this.longitudes.length; part++) {
             double[] lonPart = this.longitudes[part];
             double[] latPart = this.latitudes[part];
-            int minPoints = this.lineGeometry ? 2 : 4;
+            int minPoints = this.pointGeometry ? 1 : this.lineGeometry ? 2 : 4;
             if (lonPart.length != latPart.length || lonPart.length < minPoints) {
                throw new IllegalArgumentException("Water feature part has invalid point count");
             }
@@ -62,12 +79,32 @@ public final class OsmWaterFeature {
       }
    }
 
+   public static OsmWaterFeature waterfallMarker(long featureId, double longitude, double latitude) {
+      return new OsmWaterFeature(
+         featureId,
+         false,
+         true,
+         false,
+         OsmWaterKind.WATERFALL,
+         new double[][]{{longitude}},
+         new double[][]{{latitude}}
+      );
+   }
+
    public long featureId() {
       return this.featureId;
    }
 
    public boolean lineGeometry() {
       return this.lineGeometry;
+   }
+
+   public boolean pointGeometry() {
+      return this.pointGeometry;
+   }
+
+   public boolean waterfallMarker() {
+      return this.pointGeometry && this.kind == OsmWaterKind.WATERFALL;
    }
 
    public boolean oceanHint() {
@@ -79,7 +116,7 @@ public final class OsmWaterFeature {
    }
 
    public boolean flowingWater() {
-      return this.lineGeometry || this.kind.flowing();
+      return !this.pointGeometry && (this.lineGeometry || this.kind.flowing());
    }
 
    public int partCount() {
@@ -121,6 +158,8 @@ public final class OsmWaterFeature {
    public boolean containsBlock(int blockX, int blockZ, double worldScale) {
       if (worldScale <= 0.0) {
          return false;
+      } else if (this.pointGeometry) {
+         return false;
       } else if (this.lineGeometry) {
          return this.touchesBlockLine(blockX, blockZ, worldScale);
       } else {
@@ -132,7 +171,7 @@ public final class OsmWaterFeature {
    }
 
    public boolean containsLonLat(double lon, double lat) {
-      if (this.lineGeometry || lon < this.minLon || lon > this.maxLon || lat < this.minLat || lat > this.maxLat) {
+      if (this.lineGeometry || this.pointGeometry || lon < this.minLon || lon > this.maxLon || lat < this.minLat || lat > this.maxLat) {
          return false;
       } else {
          boolean inside = false;

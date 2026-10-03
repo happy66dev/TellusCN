@@ -14,8 +14,8 @@ class HighYPackedCoordinateProfileTest {
       assertPackedRoundTrip(-7_271_424, 8_848, -10_025_677);
       assertPackedRoundTrip(9_672_000, 8_848, 3_248_000);
       assertPackedRoundTrip(15_827_000, -128, 1_271_000);
-      assertPackedRoundTrip(-17_330_081, 9_039, -2_144_470);
-      assertPackedRoundTrip(16_483_591, -2_049, -1_942_616);
+      assertPackedRoundTrip(-17_330_081, 10_447, -2_144_470);
+      assertPackedRoundTrip(16_483_591, -641, -1_942_616);
       assertPackedRoundTrip(16_483_591, HighYPackedCoordinateProfile.Y_MIN, -1_942_616);
       assertPackedRoundTrip(HighYPackedCoordinateProfile.X_MAX, HighYPackedCoordinateProfile.Y_MAX, HighYPackedCoordinateProfile.Z_MAX);
       assertPackedRoundTrip(HighYPackedCoordinateProfile.X_MIN, HighYPackedCoordinateProfile.Y_MIN, HighYPackedCoordinateProfile.Z_MIN);
@@ -28,11 +28,11 @@ class HighYPackedCoordinateProfileTest {
       assertEquals(-20_037_509, HighYPackedCoordinateProfile.Z_MIN);
       assertEquals(20_037_508, HighYPackedCoordinateProfile.Z_MAX);
       assertEquals(40_075_018L, HighYPackedCoordinateProfile.X_SIZE);
-      assertEquals(-2_240, HighYPackedCoordinateProfile.Y_MIN);
-      assertEquals(9_231, HighYPackedCoordinateProfile.Y_MAX);
+      assertEquals(-832, HighYPackedCoordinateProfile.Y_MIN);
+      assertEquals(10_639, HighYPackedCoordinateProfile.Y_MAX);
       assertEquals(11_472, HighYPackedCoordinateProfile.Y_SIZE);
-      assertEquals(-2_048, HighYPackedCoordinateProfile.TELLUS_DIMENSION_MIN_Y);
-      assertEquals(9_039, HighYPackedCoordinateProfile.TELLUS_DIMENSION_MAX_Y);
+      assertEquals(-640, HighYPackedCoordinateProfile.TELLUS_DIMENSION_MIN_Y);
+      assertEquals(10_447, HighYPackedCoordinateProfile.TELLUS_DIMENSION_MAX_Y);
       assertEquals(11_088, HighYPackedCoordinateProfile.TELLUS_DIMENSION_Y_SIZE);
       assertEquals(-4_080, HighYPackedCoordinateProfile.DIMENSION_MIN_Y);
       assertEquals(12_271, HighYPackedCoordinateProfile.DIMENSION_MAX_Y);
@@ -64,7 +64,11 @@ class HighYPackedCoordinateProfileTest {
    void preservesLowFourYBitsUsedByBlockPosFlatIndex() {
       int x = -7_271_424;
       int z = -10_025_677;
-      for (int y = -2_047; y <= -2_017; y++) {
+      for (
+         int y = HighYPackedCoordinateProfile.TELLUS_DIMENSION_MIN_Y + 1;
+         y <= HighYPackedCoordinateProfile.TELLUS_DIMENSION_MIN_Y + 31;
+         y++
+      ) {
          long packed = HighYPackedCoordinateProfile.pack(x, y, z);
          long flat = packed & -16L;
          assertEquals(x, HighYPackedCoordinateProfile.unpackX(flat));
@@ -82,17 +86,17 @@ class HighYPackedCoordinateProfileTest {
    }
 
    @Test
-   void preservesExistingInDimensionPackedValues() {
+   void usesContiguousPackedValuesForPlayableDimension() {
       int x = 16_483_591;
       int z = -1_942_616;
-      int[] ys = {-2_048, -128, 0, 8_848, 9_039};
+      int[] ys = {-640, -384, 0, 10_020, 10_447};
       long column = ((long)z - HighYPackedCoordinateProfile.Z_MIN) * HighYPackedCoordinateProfile.X_SIZE
          + ((long)x - HighYPackedCoordinateProfile.X_MIN);
 
       for (int y : ys) {
-         long legacyPacked = column * HighYPackedCoordinateProfile.Y_SIZE
+         long expectedPacked = column * HighYPackedCoordinateProfile.Y_SIZE
             + (long)y - HighYPackedCoordinateProfile.TELLUS_DIMENSION_MIN_Y;
-         assertEquals(legacyPacked, HighYPackedCoordinateProfile.pack(x, y, z));
+         assertEquals(expectedPacked, HighYPackedCoordinateProfile.pack(x, y, z));
       }
    }
 

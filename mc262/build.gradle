@@ -3,116 +3,21 @@ plugins {
 	id 'maven-publish'
 }
 
-def minecraftVersion = '26.2'
-def loaderVersion = '0.19.3'
-def fabricVersion = '0.152.1+26.2'
-def distantHorizonsApiVersion = '7.0.0'
-def twelveMonkeysImageioVersion = '3.13.1'
-def javaVersion = 25
-def distantHorizonsRuntimePath = providers.gradleProperty('mc262_distant_horizons_runtime_path').orNull
+ext.tellus = [
+	minecraftVersion: '26.2',
+	loaderVersion: '0.19.3',
+	fabricVersion: '0.152.1+26.2',
+	fabricDependencyConfiguration: 'implementation',
+	javaVersion: 25,
+	distantHorizonsRuntimeProperty: 'mc262_distant_horizons_runtime_path',
+	sharedSourceLayers: ['post-1201', 'mc262', 'fabric'],
+	mapboxVersion: '24.1.1',
+	protobufVersion: '4.28.2',
+	officialMappings: false,
+	testDistantHorizonsRuntime: true,
+]
 
-base {
-	archivesName = "${rootProject.archives_base_name}-${minecraftVersion}-${rootProject.mod_version}"
-}
-
-configurations {
-	bundledLibrary
-}
-
-tasks.withType(AbstractArchiveTask).configureEach {
-	archiveVersion.set('')
-}
-
-repositories {
-	mavenCentral()
-	maven {
-		url = 'https://api.modrinth.com/maven/'
-		content {
-			includeGroup 'maven.modrinth'
-		}
-	}
-}
-
-loom {
-	splitEnvironmentSourceSets()
-
-	mods {
-		tellus {
-			sourceSet sourceSets.main
-			sourceSet sourceSets.client
-		}
-	}
-}
-
-sourceSets {
-	main {
-		java {
-			setSrcDirs([rootProject.file('src/main/java'), project.file('src/main/java')])
-		}
-		resources {
-			setSrcDirs([rootProject.file('src/main/resources'), project.file('src/main/resources')])
-		}
-	}
-	client {
-		java.setSrcDirs([project.file('src/client/java')])
-		resources.setSrcDirs([project.file('src/client/resources')])
-	}
-	test {
-		java.setSrcDirs([rootProject.file('src/test/java'), project.file('src/test/java')])
-		resources.setSrcDirs([rootProject.file('src/test/resources'), project.file('src/test/resources')])
-	}
-}
-
-dependencies {
-	minecraft "com.mojang:minecraft:${minecraftVersion}"
-	implementation "net.fabricmc:fabric-loader:${loaderVersion}"
-	implementation "net.fabricmc.fabric-api:fabric-api:${fabricVersion}"
-
-	bundledLibrary 'org.tukaani:xz:1.10'
-	implementation 'org.tukaani:xz:1.10'
-	implementation 'io.github.sebasbaumh:mapbox-vector-tile-java:24.1.1'
-	include 'io.github.sebasbaumh:mapbox-vector-tile-java:24.1.1'
-	implementation 'com.google.protobuf:protobuf-java:4.28.2'
-	include 'com.google.protobuf:protobuf-java:4.28.2'
-	implementation "com.twelvemonkeys.imageio:imageio-webp:${twelveMonkeysImageioVersion}"
-	implementation "com.twelvemonkeys.imageio:imageio-core:${twelveMonkeysImageioVersion}"
-	implementation "com.twelvemonkeys.imageio:imageio-metadata:${twelveMonkeysImageioVersion}"
-	implementation "com.twelvemonkeys.common:common-lang:${twelveMonkeysImageioVersion}"
-	implementation "com.twelvemonkeys.common:common-io:${twelveMonkeysImageioVersion}"
-	implementation "com.twelvemonkeys.common:common-image:${twelveMonkeysImageioVersion}"
-	include "com.twelvemonkeys.imageio:imageio-webp:${twelveMonkeysImageioVersion}"
-	include "com.twelvemonkeys.imageio:imageio-core:${twelveMonkeysImageioVersion}"
-	include "com.twelvemonkeys.imageio:imageio-metadata:${twelveMonkeysImageioVersion}"
-	include "com.twelvemonkeys.common:common-lang:${twelveMonkeysImageioVersion}"
-	include "com.twelvemonkeys.common:common-io:${twelveMonkeysImageioVersion}"
-	include "com.twelvemonkeys.common:common-image:${twelveMonkeysImageioVersion}"
-
-	testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
-	testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.10.2'
-	testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.10.2'
-	testRuntimeOnly "maven.modrinth:DistantHorizonsApi:${distantHorizonsApiVersion}"
-
-	compileOnly "maven.modrinth:DistantHorizonsApi:${distantHorizonsApiVersion}"
-	if (distantHorizonsRuntimePath) {
-		runtimeOnly files(distantHorizonsRuntimePath)
-	}
-}
-
-processResources {
-	inputs.property 'version', project.version
-
-	filesMatching('fabric.mod.json') {
-		expand version: inputs.properties.version
-	}
-}
-
-tasks.withType(JavaCompile).configureEach {
-	options.release = javaVersion
-}
-
-tasks.named('test').configure {
-	useJUnitPlatform()
-}
+apply from: rootProject.file('gradle/tellus-fabric.gradle')
 
 tasks.register('simulateFastLodDataLoading', JavaExec) {
 	group = 'verification'
@@ -120,7 +25,7 @@ tasks.register('simulateFastLodDataLoading', JavaExec) {
 	classpath = sourceSets.test.runtimeClasspath
 	mainClass = 'com.yucareux.tellus.worldgen.FastLodDataLoadingSimulation'
 	maxHeapSize = '2g'
-	jvmArgs '-Dtellus.experimentalHeight.coordinateProfile=global_mercator_dense_v1'
+	jvmArgs '-Dtellus.experimentalHeight.coordinateProfile=global_mercator_land_v2'
 	def defaultSimulationGameDir = layout.buildDirectory.dir('lod-simulation-game').get().asFile.absolutePath
 	def simulationGameDir = providers.gradleProperty('simGameDir').getOrElse(defaultSimulationGameDir)
 	systemProperty 'tellus.gameDir', simulationGameDir
@@ -129,41 +34,4 @@ tasks.register('simulateFastLodDataLoading', JavaExec) {
 	args "--longitude=${providers.gradleProperty('simLongitude').getOrElse('-105.2253')}"
 	args "--grid=${providers.gradleProperty('simGrid').getOrElse('64')}"
 	args "--details=${providers.gradleProperty('simDetails').getOrElse('0,4,6,8,11')}"
-}
-
-java {
-	toolchain {
-		languageVersion = JavaLanguageVersion.of(javaVersion)
-	}
-
-	withSourcesJar()
-
-	sourceCompatibility = JavaVersion.toVersion(javaVersion)
-	targetCompatibility = JavaVersion.toVersion(javaVersion)
-}
-
-jar {
-	inputs.property 'archivesName', project.base.archivesName
-
-	from({
-		configurations.bundledLibrary.collect { zipTree(it) }
-	}) {
-		exclude 'META-INF/MANIFEST.MF'
-	}
-
-	from(rootProject.file('LICENSE')) {
-		rename { "${it}_${inputs.properties.archivesName}" }
-	}
-}
-
-publishing {
-	publications {
-		create('mavenJava', MavenPublication) {
-			artifactId = project.base.archivesName.get()
-			from components.java
-		}
-	}
-
-	repositories {
-	}
 }

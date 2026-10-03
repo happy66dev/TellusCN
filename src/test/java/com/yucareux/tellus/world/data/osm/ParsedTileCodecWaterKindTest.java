@@ -32,9 +32,28 @@ class ParsedTileCodecWaterKindTest {
    }
 
    @Test
+   void roundTripsWaterfallPointMarkerWithoutTurningItIntoWaterGeometry() throws Exception {
+      OsmWaterFeature marker = OsmWaterFeature.waterfallMarker(99L, -79.0747, 43.0799);
+      Path path = this.tempDir.resolve("waterfall.tile");
+
+      ParsedTileCodec.writeWaterTile(path, new OsmWaterTile(List.of(marker), 43.0, -79.1, 43.1, -79.0));
+      OsmWaterTile decoded = ParsedTileCodec.readWaterTile(path);
+
+      assertEquals(1, decoded.features().size());
+      OsmWaterFeature decodedMarker = decoded.features().get(0);
+      assertEquals(OsmWaterKind.WATERFALL, decodedMarker.kind());
+      assertTrue(decodedMarker.pointGeometry());
+      assertTrue(decodedMarker.waterfallMarker());
+      assertFalse(decodedMarker.lineGeometry());
+      assertFalse(decodedMarker.flowingWater());
+      assertFalse(decodedMarker.containsLonLat(-79.0747, 43.0799));
+   }
+
+   @Test
    void derivesFlowingAndOceanKindsFromTags() {
       assertEquals(OsmWaterKind.RIVER, OsmWaterKind.fromTags("water", "river"));
       assertEquals(OsmWaterKind.CANAL, OsmWaterKind.fromTags("canal", null));
       assertEquals(OsmWaterKind.OCEAN, OsmWaterKind.fromTags("water", "ocean"));
+      assertEquals(OsmWaterKind.WATERFALL, OsmWaterKind.fromTags("waterfall", "physical"));
    }
 }

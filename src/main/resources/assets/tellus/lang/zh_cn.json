@@ -226,7 +226,7 @@
   "tellus.mirror_settings.status_disabled": "已禁用",
   "tellus.mirror_settings.save": "保存设置",
   "tellus.mirror_settings.back": "返回",
-  "tellus.mirror_settings.official_preset": "官方预设 (telluscn-cdn1.hopto.org)",
+  "tellus.mirror_settings.official_preset": "官方预设 (telluscn.ggff.net)",
   "tellus.mirror_settings.custom_input": "自定义输入",
   "tellus.mirror_settings.disable_mirror": "关闭镜像、使用原版源"
 }

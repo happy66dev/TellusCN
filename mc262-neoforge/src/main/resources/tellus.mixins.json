@@ -14,7 +14,8 @@
 		"OceanMonumentBuildingMixin",
 		"SerializableChunkDataAccessor",
 		"SerializableChunkDataHighYMixin",
-		"OceanMonumentStructureMixin"
+		"OceanMonumentStructureMixin",
+		"WaterSourceConversionMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1

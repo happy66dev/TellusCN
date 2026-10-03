@@ -151,6 +151,73 @@ final class WorldCoverCogSource {
       return position == null ? Sample.unavailable() : this.samplePosition(position, lookupMode);
    }
 
+   Sample sampleVisual(
+      double lon,
+      double lat,
+      double effectiveResolutionMeters,
+      double blockX,
+      double blockZ,
+      double worldScale,
+      LookupMode lookupMode
+   ) {
+      SamplePosition center = this.position(lon, lat, effectiveResolutionMeters, lookupMode);
+      if (center == null) {
+         return Sample.unavailable();
+      }
+
+      Sample centerSample = this.samplePosition(center, lookupMode);
+      if (!centerSample.available()) {
+         return centerSample;
+      }
+
+      double sourceResolutionMeters = SOURCE_RESOLUTION_METERS * center.level().factor();
+      double transitionStrength = LandCoverTransition.strength(sourceResolutionMeters, effectiveResolutionMeters);
+      if (!(transitionStrength > 0.0) || LandCoverTransition.isHardClass(centerSample.coverClass())) {
+         return centerSample;
+      }
+
+      double continuousX = continuousPixel(
+         (lon - center.tileKey().lon()) / TILE_DEGREES,
+         center.level().width()
+      );
+      double continuousY = continuousPixel(
+         (center.tileKey().lat() + TILE_DEGREES - lat) / TILE_DEGREES,
+         center.level().height()
+      );
+      double blendX = continuousX - 0.5;
+      double blendY = continuousY - 0.5;
+      int x0 = (int)Math.floor(blendX);
+      int y0 = (int)Math.floor(blendY);
+      int x1 = x0 + 1;
+      int y1 = y0 + 1;
+      int value00 = this.sampleVisualOffset(
+         center, x0 - center.pixelX(), y0 - center.pixelY(), centerSample.coverClass(), lookupMode
+      );
+      int value10 = this.sampleVisualOffset(
+         center, x1 - center.pixelX(), y0 - center.pixelY(), centerSample.coverClass(), lookupMode
+      );
+      int value01 = this.sampleVisualOffset(
+         center, x0 - center.pixelX(), y1 - center.pixelY(), centerSample.coverClass(), lookupMode
+      );
+      int value11 = this.sampleVisualOffset(
+         center, x1 - center.pixelX(), y1 - center.pixelY(), centerSample.coverClass(), lookupMode
+      );
+      int selected = LandCoverTransition.selectVisualClass(
+         centerSample.coverClass(),
+         value00,
+         value10,
+         value01,
+         value11,
+         blendX - x0,
+         blendY - y0,
+         transitionStrength,
+         blockX,
+         blockZ,
+         sourceResolutionMeters / Math.max(worldScale, Double.MIN_NORMAL)
+      );
+      return new Sample(selected, true);
+   }
+
    Sample sampleSmoothed(double lon, double lat, double effectiveResolutionMeters, LookupMode lookupMode) {
       SamplePosition center = this.position(lon, lat, effectiveResolutionMeters, lookupMode);
       if (center == null) {
@@ -468,6 +535,13 @@ final class WorldCoverCogSource {
       return this.sample(lon, lat, SOURCE_RESOLUTION_METERS * center.level().factor(), lookupMode);
    }
 
+   private int sampleVisualOffset(
+      SamplePosition center, int dx, int dy, int fallbackCoverClass, LookupMode lookupMode
+   ) {
+      Sample sample = this.sampleOffset(center, dx, dy, lookupMode);
+      return sample.available() ? sample.coverClass() : fallbackCoverClass;
+   }
+
    private CogMetadata getMetadata(SourceTileKey key, LookupMode lookupMode) {
       CogMetadata cached = this.metadataCache.getIfPresent(key);
       if (cached != null) {
@@ -764,6 +838,11 @@ final class WorldCoverCogSource {
    private static int normalizedPixel(double normalized, int rasterSize) {
       double safe = Math.max(0.0, Math.min(Math.nextDown(1.0), normalized));
       return Math.max(0, Math.min(rasterSize - 1, (int)Math.floor(safe * rasterSize)));
+   }
+
+   private static double continuousPixel(double normalized, int rasterSize) {
+      double safe = Math.max(0.0, Math.min(Math.nextDown(1.0), normalized));
+      return safe * rasterSize;
    }
 
    private static int tileIndex(CogLevel level, int blockX, int blockY) {

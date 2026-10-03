@@ -137,6 +137,19 @@ public final class TellusElevationSource implements TellusCacheHandle {
       );
    }
 
+   /**
+    * Returns the native Mapterhorn source spacing advertised at a location.
+    * Water fitting uses this once per cached region to choose conservative
+    * polygon-correction thresholds; it does not add a per-block lookup.
+    */
+   public double mapterhornSourceResolutionMeters(
+      double blockX, double blockZ, double worldScale, double requestedResolutionMeters
+   ) {
+      return this.terrainTilesResolutionMeters(
+         blockX, blockZ, worldScale, requestedResolutionMeters
+      );
+   }
+
    public double samplePreviewElevationMeters(
       double blockX,
       double blockZ,
@@ -688,6 +701,57 @@ public final class TellusElevationSource implements TellusCacheHandle {
       int completedUnits,
       BiConsumer<Integer, String> progressConsumer
    ) {
+      return this.preloadAreaInputs(
+         minBlockX,
+         minBlockZ,
+         maxBlockX,
+         maxBlockZ,
+         worldScale,
+         demSelection,
+         previewResolutionMeters,
+         completedUnits,
+         progressConsumer,
+         false
+      );
+   }
+
+   public int preloadAreaInputsIntoMemory(
+      double minBlockX,
+      double minBlockZ,
+      double maxBlockX,
+      double maxBlockZ,
+      double worldScale,
+      EarthGeneratorSettings.DemSelection demSelection,
+      double previewResolutionMeters,
+      int completedUnits,
+      BiConsumer<Integer, String> progressConsumer
+   ) {
+      return this.preloadAreaInputs(
+         minBlockX,
+         minBlockZ,
+         maxBlockX,
+         maxBlockZ,
+         worldScale,
+         demSelection,
+         previewResolutionMeters,
+         completedUnits,
+         progressConsumer,
+         true
+      );
+   }
+
+   private int preloadAreaInputs(
+      double minBlockX,
+      double minBlockZ,
+      double maxBlockX,
+      double maxBlockZ,
+      double worldScale,
+      EarthGeneratorSettings.DemSelection demSelection,
+      double previewResolutionMeters,
+      int completedUnits,
+      BiConsumer<Integer, String> progressConsumer,
+      boolean loadIntoMemory
+   ) {
       BiConsumer<Integer, String> progress = progressConsumer == null ? (completed, detail) -> {
       } : progressConsumer;
       if (worldScale <= 0.0) {
@@ -704,17 +768,22 @@ public final class TellusElevationSource implements TellusCacheHandle {
       }
 
       int startingUnits = completedUnits;
-      progress.accept(completedUnits, "Downloading " + plan.size() + " DEM source tiles with bounded parallelism");
+      progress.accept(
+         completedUnits,
+         (loadIntoMemory ? "Loading " : "Downloading ") + plan.size() + " DEM source tiles with bounded parallelism"
+      );
       return ParallelDownloadRunner.run(
          ParallelDownloadRunner.scope(
-            "elevation",
+            loadIntoMemory ? "elevation-memory" : "elevation",
             TellusCacheRegistry.generation(TellusCacheDomain.TERRAIN),
             TellusCacheRegistry.generation(TellusCacheDomain.OPENWATERS)
          ),
          plan,
          completedUnits,
          request -> {
-            if (request.openWaters()) {
+            if (loadIntoMemory) {
+               this.loadTileIntoCache(request);
+            } else if (request.openWaters()) {
                this.downloadOpenWatersTile(request.key());
             } else {
                this.downloadTerrainTile(request.key());
@@ -722,7 +791,14 @@ public final class TellusElevationSource implements TellusCacheHandle {
          },
          (request, completed, phaseTotal) -> progress.accept(
             completed,
-            "Cached DEM source tile " + (completed - startingUnits) + "/" + phaseTotal + " (" + request.label() + ")"
+            (loadIntoMemory ? "Loaded " : "Cached ")
+               + "DEM source tile "
+               + (completed - startingUnits)
+               + "/"
+               + phaseTotal
+               + " ("
+               + request.label()
+               + ")"
          )
       );
    }
@@ -940,6 +1016,31 @@ public final class TellusElevationSource implements TellusCacheHandle {
 
    private void downloadOpenWatersTile(TellusElevationSource.TileKey key) {
       this.downloadRawTile(key, this.openWatersCachePath(key), TellusCacheDomain.OPENWATERS, OPENWATERS_ENDPOINT, "OpenWaters");
+   }
+
+   private void loadTileIntoCache(TellusElevationSource.RawTileRequest request) {
+      TellusCacheDomain domain = request.openWaters() ? TellusCacheDomain.OPENWATERS : TellusCacheDomain.TERRAIN;
+      long generation = TellusCacheRegistry.generation(domain);
+      try {
+         if (request.openWaters()) {
+            this.oceanCache.get(request.key());
+         } else {
+            this.cache.get(request.key());
+         }
+      } catch (Exception error) {
+         throw new RuntimeException("Failed to preload " + request.label() + " elevation tile", error);
+      }
+      if (Thread.currentThread().isInterrupted()) {
+         throw new java.util.concurrent.CancellationException("Interrupted while preloading " + request.label());
+      }
+      if (!TellusCacheRegistry.isCurrent(domain, generation)) {
+         if (request.openWaters()) {
+            this.oceanCache.invalidate(request.key());
+         } else {
+            this.cache.invalidate(request.key());
+         }
+         throw new IllegalStateException("Discarded stale " + request.label() + " elevation preload");
+      }
    }
 
    private void downloadRawTile(

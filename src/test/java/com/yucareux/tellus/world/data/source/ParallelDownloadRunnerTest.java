@@ -124,6 +124,25 @@ class ParallelDownloadRunnerTest {
    }
 
    @Test
+   void decodedMemoryWarmupIsNotSuppressedByRecentRawDownload() {
+      String source = "raw-memory-" + System.nanoTime();
+      AtomicInteger calls = new AtomicInteger();
+      ParallelDownloadRunner.run(
+         ParallelDownloadRunner.scope(source, 1L), List.of("tile"), 0, item -> calls.incrementAndGet(), (item, completed, total) -> {
+         }
+      );
+      ParallelDownloadRunner.run(
+         ParallelDownloadRunner.scope(source + "-memory", 1L),
+         List.of("tile"),
+         0,
+         item -> calls.incrementAndGet(),
+         (item, completed, total) -> {
+         }
+      );
+      assertEquals(2, calls.get());
+   }
+
+   @Test
    void failedDownloadIsNotRemembered() {
       ParallelDownloadRunner.DownloadScope scope = ParallelDownloadRunner.scope("failure-" + System.nanoTime(), 0L);
       AtomicInteger calls = new AtomicInteger();

@@ -239,7 +239,6 @@ final class LodPrefetchBatcher implements AutoCloseable {
       int detailLevel,
       boolean includeRoadsPrefetch,
       boolean includeBuildingsPrefetch,
-      boolean includeDetailedWaterPrefetch,
       double previewResolutionMeters
    ) {
       Request {
@@ -252,7 +251,6 @@ final class LodPrefetchBatcher implements AutoCloseable {
             this.detailLevel,
             this.includeRoadsPrefetch,
             this.includeBuildingsPrefetch,
-            this.includeDetailedWaterPrefetch,
             this.previewResolutionMeters
          );
       }
@@ -280,7 +278,6 @@ final class LodPrefetchBatcher implements AutoCloseable {
       int detailLevel,
       boolean includeRoadsPrefetch,
       boolean includeBuildingsPrefetch,
-      boolean includeDetailedWaterPrefetch,
       long previewResolutionBits
    ) {
       static GroupKey forRequest(Request request) {
@@ -288,7 +285,6 @@ final class LodPrefetchBatcher implements AutoCloseable {
             request.detailLevel(),
             request.includeRoadsPrefetch(),
             request.includeBuildingsPrefetch(),
-            request.includeDetailedWaterPrefetch(),
             Double.doubleToLongBits(request.previewResolutionMeters())
          );
       }

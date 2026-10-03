@@ -18,7 +18,7 @@ final class ParsedTileCodec {
    private static final int MAGIC_SAND = 1396787524;
    private static final int MAGIC_STREET_LIGHT = 1280461908;
    private static final int ROAD_VERSION = 6;
-   private static final int WATER_VERSION = 2;
+   private static final int WATER_VERSION = 3;
    private static final int BUILDING_VERSION = 4;
    private static final int SAND_VERSION = 1;
    private static final int STREET_LIGHT_VERSION = 2;
@@ -286,7 +286,12 @@ final class ParsedTileCodec {
 
          for (int i = 0; i < featureCount; i++) {
             long featureId = input.readLong();
-            boolean lineGeometry = input.readBoolean();
+            int geometryType = Byte.toUnsignedInt(input.readByte());
+            if (geometryType > 2) {
+               throw new IOException("Invalid water geometry type " + geometryType);
+            }
+            boolean lineGeometry = geometryType == 1;
+            boolean pointGeometry = geometryType == 2;
             boolean oceanHint = input.readBoolean();
             int kindOrdinal = Byte.toUnsignedInt(input.readByte());
             OsmWaterKind kind = kindOrdinal < WATER_KINDS.length ? WATER_KINDS[kindOrdinal] : OsmWaterKind.UNKNOWN;
@@ -300,7 +305,7 @@ final class ParsedTileCodec {
 
             for (int part = 0; part < partCount; part++) {
                int pointCount = boundedCount(input.readInt(), MAX_POINTS_PER_FEATURE, "water point");
-               int minPoints = lineGeometry ? 2 : 4;
+               int minPoints = pointGeometry ? 1 : lineGeometry ? 2 : 4;
                if (pointCount < minPoints) {
                   throw new IOException("Water feature part has too few points");
                }
@@ -314,7 +319,7 @@ final class ParsedTileCodec {
                }
             }
 
-            features.add(new OsmWaterFeature(featureId, lineGeometry, oceanHint, kind, longitudes, latitudes));
+            features.add(new OsmWaterFeature(featureId, lineGeometry, pointGeometry, oceanHint, kind, longitudes, latitudes));
          }
 
          return features.isEmpty() ? OsmWaterTile.empty() : new OsmWaterTile(features, tileSouth, tileWest, tileNorth, tileEast);
@@ -337,7 +342,7 @@ final class ParsedTileCodec {
 
          for (OsmWaterFeature feature : features) {
             output.writeLong(feature.featureId());
-            output.writeBoolean(feature.lineGeometry());
+            output.writeByte(feature.pointGeometry() ? 2 : feature.lineGeometry() ? 1 : 0);
             output.writeBoolean(feature.oceanHint());
             output.writeByte(feature.kind().ordinal());
             output.writeInt(feature.partCount());

@@ -5,9 +5,11 @@ import com.yucareux.tellus.client.hud.ManagedTerrainDownloadOverlay;
 import com.yucareux.tellus.integration.distant_horizons.managed.ManagedTerrainClientState;
 import com.yucareux.tellus.integration.distant_horizons.managed.ManagedTerrainViewDistance;
 import com.yucareux.tellus.network.GeoTpOpenMapPayload;
+import com.yucareux.tellus.network.GeoTpTeleportPayload;
 import com.yucareux.tellus.network.ManagedTerrainStatusPayload;
 import com.yucareux.tellus.network.ManagedTerrainViewPayload;
 import com.yucareux.tellus.network.TellusWeatherPayload;
+import com.yucareux.tellus.platform.TellusClientPlatform;
 import com.yucareux.tellus.world.realtime.SnowGrid;
 import com.yucareux.tellus.world.realtime.TemperatureGrid;
 import com.yucareux.tellus.world.realtime.TellusRealtimeState;
@@ -36,6 +38,10 @@ public class TellusClient implements ClientModInitializer {
 
    @Override
    public void onInitializeClient() {
+      TellusClientPlatform.configureGeoTeleport(
+         () -> ClientPlayNetworking.canSend(GeoTpTeleportPayload.TYPE),
+         (latitude, longitude) -> ClientPlayNetworking.send(new GeoTpTeleportPayload(latitude, longitude))
+      );
       KeyMappingHelper.registerKeyMapping(OPEN_MAP_KEY);
       HudElementRegistry.addLast(Tellus.id("managed_terrain_status"), (graphics, deltaTracker) -> ManagedTerrainDownloadOverlay.render(graphics));
       ClientPlayNetworking.registerGlobalReceiver(Objects.requireNonNull(GeoTpOpenMapPayload.TYPE, "GeoTpOpenMapPayload.TYPE"), (payload, context) -> context.client().execute(() -> {

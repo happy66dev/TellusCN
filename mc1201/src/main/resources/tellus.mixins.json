@@ -13,7 +13,8 @@
 		"LevelHighYPackedCoordinateMixin",
 		"MinecraftServerInitialSpawnMixin",
 		"OceanMonumentBuildingMixin",
-		"OceanMonumentStructureMixin"
+		"OceanMonumentStructureMixin",
+		"WaterSourceConversionMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1

@@ -54,7 +54,6 @@ public final class FastLodDataLoadingSimulation {
       int maxZ = clampToInt((long)minZ + span - 1L);
       double previewResolutionMeters = Math.max(settings.worldScale(), cellSize * settings.worldScale());
       boolean osmFeatures = detail <= settings.distantHorizonsOsmRoadMaxDetail();
-      boolean detailedWater = detail <= 5;
 
       long prefetchStart = System.nanoTime();
       try {
@@ -65,7 +64,6 @@ public final class FastLodDataLoadingSimulation {
             maxZ,
             settings,
             osmFeatures,
-            detailedWater,
             osmFeatures,
             previewResolutionMeters
          ).join();

@@ -1,11 +1,15 @@
 package com.yucareux.tellus.worldgen;
 
+import com.yucareux.tellus.compat.MinecraftRelease;
 import java.util.Locale;
-import net.minecraft.core.registries.BuiltInRegistries;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
 
 public final class TellusBlockReferences {
+   private static final Map<String, Block> BLOCKS_BY_PATH = new ConcurrentHashMap<>();
+
    private TellusBlockReferences() {
    }
 
@@ -54,11 +58,10 @@ public final class TellusBlockReferences {
    }
 
    private static Block blockByPath(String path) {
-      String id = "minecraft:" + path;
-      return BuiltInRegistries.BLOCK
-         .stream()
-         .filter(block -> id.equals(BuiltInRegistries.BLOCK.getKey(block).toString()))
-         .findFirst()
-         .orElseThrow(() -> new IllegalStateException("Missing Minecraft block " + id));
+      return BLOCKS_BY_PATH.computeIfAbsent(path, TellusBlockReferences::findBlock);
+   }
+
+   private static Block findBlock(String path) {
+      return MinecraftRelease.block(path);
    }
 }
