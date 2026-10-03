@@ -25,19 +25,20 @@ import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
 public class NominatimGeocoder implements Geocoder {
-   // 默认 Nominatim 官方地址，镜像启用时会被替换成镜像地址
+   // 默认 Nominatim 官方地址，同时作为镜像失效时的兜底地址
    private static final String DEFAULT_BASE_URL = "https://nominatim.openstreetmap.org";
    // 延迟初始化，确保游戏内镜像配置已经加载
-   private static String getBaseUrl() {
-      return TellusEndpointConfig.getGeocodingEndpoint(DEFAULT_BASE_URL);
+   // 候选基础地址：镜像优先，官方 Nominatim 兜底；镜像路由挂掉时会自动降级到官方源
+   private static List<String> getBaseUrls() {
+      return TellusEndpointConfig.getGeocodingCandidates(DEFAULT_BASE_URL);
    }
-   // 搜索地址模板：域名部分走镜像，查询参数沿用上游的完整字段
-   private static String getSearchUrl() {
-      return getBaseUrl() + "/search?format=json&addressdetails=1&namedetails=1&dedupe=1&limit=%d&accept-language=%s&q=%s";
+   // 搜索地址模板：域名部分由调用方按候选地址填入，查询参数沿用上游的完整字段
+   private static String searchUrlPattern(String baseUrl) {
+      return baseUrl + "/search?format=json&addressdetails=1&namedetails=1&dedupe=1&limit=%d&accept-language=%s&q=%s";
    }
-   // 反向地理编码地址模板：域名部分走镜像，其余参数沿用上游
-   private static String getReverseUrl() {
-      return getBaseUrl() + "/reverse?format=jsonv2&addressdetails=1&zoom=10&accept-language=%s&lat=%.6f&lon=%.6f";
+   // 反向地理编码地址模板：域名部分由调用方按候选地址填入，其余参数沿用上游
+   private static String reverseUrlPattern(String baseUrl) {
+      return baseUrl + "/reverse?format=jsonv2&addressdetails=1&zoom=10&accept-language=%s&lat=%.6f&lon=%.6f";
    }
    private static final String DEFAULT_LANGUAGE = "en";
    private static final int GET_LIMIT = 8;
@@ -112,8 +113,15 @@ public class NominatimGeocoder implements Geocoder {
       }
       String languagePreference = this.resolveLanguagePreference();
       String encodedLanguagePreference = URLEncoder.encode(languagePreference, StandardCharsets.UTF_8);
-      URI uri = URI.create(String.format(Locale.ROOT, getReverseUrl(), encodedLanguagePreference, latitude, longitude));
-      JsonElement result = this.query(uri, languagePreference);
+      // 依次尝试候选地址：优先镜像，失败时自动回落到官方 Nominatim
+      JsonElement result = EndpointFallback.tryCandidates(
+         getBaseUrls(),
+         "Nominatim reverse geocoding",
+         baseUrl -> this.query(
+            URI.create(String.format(Locale.ROOT, reverseUrlPattern(baseUrl), encodedLanguagePreference, latitude, longitude)),
+            languagePreference
+         )
+      );
       if (!result.isJsonObject()) {
          return null;
       }
@@ -159,10 +167,19 @@ public class NominatimGeocoder implements Geocoder {
    }
 
    private JsonElement query(String place, int limit, String languagePreference) throws IOException {
+      // 把地点名转义成 URL 安全的查询串
       String encodedPlace = URLEncoder.encode(place, StandardCharsets.UTF_8);
+      // 把语言偏好也转义，避免逗号等字符破坏查询串
       String encodedLanguagePreference = URLEncoder.encode(languagePreference, StandardCharsets.UTF_8);
-      URI uri = URI.create(String.format(getSearchUrl(), limit, encodedLanguagePreference, encodedPlace));
-      return this.query(uri, languagePreference);
+      // 依次尝试候选地址：优先镜像，失败时自动回落到官方 Nominatim
+      return EndpointFallback.tryCandidates(
+         getBaseUrls(),
+         "Nominatim search",
+         baseUrl -> this.query(
+            URI.create(String.format(Locale.ROOT, searchUrlPattern(baseUrl), limit, encodedLanguagePreference, encodedPlace)),
+            languagePreference
+         )
+      );
    }
 
    private JsonElement query(URI uri, String languagePreference) throws IOException {

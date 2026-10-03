@@ -44,6 +44,8 @@ public class SlippyMapTileCache implements TellusCacheHandle {
    private static final long RETRY_BASE_NANOS = TimeUnit.SECONDS.toNanos(1L);
    private static final long RETRY_MAX_NANOS = TimeUnit.SECONDS.toNanos(30L);
    private static final String USER_AGENT = "Tellus-Minecraft-Mod (+https://github.com/Yucareux/Tellus)";
+   // 官方 OpenStreetMap 瓦片基础地址，作为镜像失效时的兜底候选
+   private static final String OFFICIAL_MAP_TILE_BASE_URL = "https://tile.openstreetmap.org";
    private final Object schedulingLock = new Object();
    private final AtomicLong taskSequence = new AtomicLong();
    private final ThreadPoolExecutor loadingService = new ThreadPoolExecutor(
@@ -291,8 +293,44 @@ public class SlippyMapTileCache implements TellusCacheHandle {
          }
       }
 
-      // 解析地图瓦片地址：优先国内镜像，未配置镜像时回落到官方 OpenStreetMap
-      String tileUrl = getTileUrl(pos);
+      // 解析地图瓦片候选地址：优先国内镜像，官方 OpenStreetMap 兜底
+      List<String> tileUrls = getTileUrls(pos);
+      // 记录最后一个失败原因，全部候选都失败时用它作为最终异常抛出
+      IOException lastError = null;
+      // 最后一个候选的下标，用于判断"还有没有下一个可以试"
+      int lastIndex = tileUrls.size() - 1;
+      for (int index = 0; index <= lastIndex; index++) {
+         // 本次要尝试的瓦片地址
+         String tileUrl = tileUrls.get(index);
+         try {
+            // 成功就直接返回，不再尝试后面的候选
+            return this.downloadTile(pos, tileUrl, cachePath, generation, task);
+         } catch (IOException error) {
+            // 喵~防御：任务被取消时必须立刻向上抛，不能继续试下一个候选，否则会白白多发一次请求
+            if (this.isCancelledLoad(error, task)) {
+               throw error;
+            }
+            lastError = error;
+            // 只有"后面还有候选"时才打降级警告，避免重复日志
+            if (index < lastIndex) {
+               Tellus.LOGGER.warn("[TellusCN] Map tile {} failed on {}, falling back to the next candidate endpoint", pos, tileUrl, error);
+            }
+         }
+      }
+
+      // 喵~防御：理论上循环至少会设置一次 lastError，这里仍做兜底判断，保证不会抛出空指针
+      throw lastError != null ? lastError : new IOException("Map tile request failed for " + pos);
+   }
+
+   /**
+    * 用指定地址下载一张地图瓦片，校验通过后写入缓存。
+    *
+    * 输入：瓦片坐标、完整瓦片地址、缓存文件路径、缓存代次与加载任务。
+    * 输出：校验通过的 PNG 字节数组。
+    * 边界条件：非 200 响应、响应体超限、PNG 校验失败或任务被取消时抛 IOException，
+    * 由调用方决定是降级到下一个候选地址还是直接失败。
+    */
+   private byte[] downloadTile(SlippyMapTilePos pos, String tileUrl, Path cachePath, long generation, SlippyMapTileCache.TileLoadTask task) throws IOException {
       Tellus.LOGGER.info("[TellusCN] Downloading map tile: {} from URL: {}", pos, tileUrl);
       URI uri = URI.create(tileUrl);
       URL url = uri.toURL();
@@ -549,21 +587,23 @@ public class SlippyMapTileCache implements TellusCacheHandle {
    }
 
    /**
-    * 解析地图瓦片地址（TellusCN 镜像支持）。
+    * 解析地图瓦片的所有候选地址（TellusCN 镜像支持）。
     *
     * 优先级：游戏内镜像设置 > JVM 启动参数 tellus.map.tiles.endpoint > 官方 OpenStreetMap。
-    * 输入：瓦片坐标对象；输出：可直接发起 HTTP 请求的 PNG 地址。
-    * 边界条件：镜像与 JVM 参数都为空或纯空白时视为未配置，回落到官方源，
-    * 避免拼出缺少主机名的坏地址。
+    * 输入：瓦片坐标对象；输出：按优先级排列、可直接发起 HTTP 请求的 PNG 地址列表。
+    * 边界条件：候选列表至少包含官方地址，因此返回值不会为空；镜像地址为空白时会被
+    * TellusEndpointConfig 过滤掉，不会拼出缺少主机名的坏地址。
     */
-   private String getTileUrl(SlippyMapTilePos pos) {
-      // 先读取镜像配置：启用镜像且配置了地图路由时返回镜像地址，否则得到空串
-      String mirrorEndpoint = TellusEndpointConfig.getMapTilesEndpoint("");
-      // 喵~防御：空白视为未配置，直接跳到官方源，避免拼出 "/z/x/y.png" 这种无效地址
-      if (!mirrorEndpoint.isBlank()) {
-         return String.format("%s/%s/%s/%s.png", mirrorEndpoint, pos.getZoom(), pos.getX(), pos.getY());
+   private List<String> getTileUrls(SlippyMapTilePos pos) {
+      // 取出候选基础地址：镜像优先、官方 OpenStreetMap 兜底
+      List<String> baseUrls = TellusEndpointConfig.getMapTilesCandidates(OFFICIAL_MAP_TILE_BASE_URL);
+      // 按候选数量预分配容量，避免扩容
+      List<String> tileUrls = new ArrayList<>(baseUrls.size());
+      for (String baseUrl : baseUrls) {
+         // 把基础地址拼成具体瓦片地址：<基础地址>/<缩放级别>/<X>/<Y>.png
+         tileUrls.add(String.format("%s/%s/%s/%s.png", baseUrl, pos.getZoom(), pos.getX(), pos.getY()));
       }
-      // 未配置镜像时使用官方 OpenStreetMap 瓦片服务
-      return String.format("https://tile.openstreetmap.org/%s/%s/%s.png", pos.getZoom(), pos.getX(), pos.getY());
+      // 返回不可变副本，防止调用方意外修改
+      return List.copyOf(tileUrls);
    }
 }

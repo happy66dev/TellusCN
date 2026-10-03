@@ -9,6 +9,7 @@ import java.io.IOException;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import net.minecraft.util.Mth;
@@ -24,16 +25,33 @@ public final class OpenMeteoClient {
    private static final String USER_AGENT = "Tellus/1.0 (open-meteo.com)";
    private static final String DEFAULT_BASE_URL = "https://api.open-meteo.com/v1";
    // 延迟初始化，确保配置已加载
-   private static String getBaseUrl() {
-      return TellusEndpointConfig.getWeatherEndpoint(DEFAULT_BASE_URL);
+   // 候选基础地址：镜像优先，官方 Open-Meteo 兜底；镜像路由挂掉时会自动降级到官方源
+   private static List<String> getBaseUrls() {
+      return TellusEndpointConfig.getWeatherCandidates(DEFAULT_BASE_URL);
    }
 
    public OpenMeteoClient.WeatherPointData fetch(double latitude, double longitude) throws IOException {
+      // 喵~防御：坐标非法属于调用方参数错误，必须在降级之前就拦下，否则会把参数错误误判成"地址挂了"白试一遍
       if (!Double.isFinite(latitude) || !Double.isFinite(longitude)
          || latitude < -90.0 || latitude > 90.0 || longitude < -180.0 || longitude > 180.0) {
          throw new IllegalArgumentException("Weather coordinates are outside the valid latitude/longitude range");
       }
-      String url = buildUrl(latitude, longitude);
+      // 依次尝试候选地址：优先镜像，失败时自动回落到官方 Open-Meteo
+      return EndpointFallback.tryCandidates(
+         getBaseUrls(), "Open-Meteo weather", baseUrl -> fetchFrom(baseUrl, latitude, longitude)
+      );
+   }
+
+   /**
+    * 用指定的基础地址请求一次天气数据。
+    *
+    * 输入：基础地址（例如镜像的 /weather 或官方 https://api.open-meteo.com/v1）与已校验的经纬度。
+    * 输出：解析后的天气点数据。
+    * 边界条件：非 200 响应、响应体超出上限、JSON 结构或数值非法时统一抛 IOException，由上层决定是否降级。
+    */
+   private static OpenMeteoClient.WeatherPointData fetchFrom(String baseUrl, double latitude, double longitude) throws IOException {
+      // 按基础地址拼出完整的预报请求地址
+      String url = buildUrl(baseUrl, latitude, longitude);
       HttpURLConnection connection = (HttpURLConnection)URI.create(url).toURL().openConnection();
       try {
          connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
@@ -145,11 +163,18 @@ public final class OpenMeteoClient {
       return Mth.clamp(snowIndex, 0.0F, 1.0F);
    }
 
-   private static String buildUrl(double latitude, double longitude) {
+   /**
+    * 按基础地址拼出预报请求地址。
+    *
+    * 输入：基础地址（镜像或官方）与经纬度。
+    * 输出：完整的 forecast 请求 URL。
+    * 边界条件：基础地址为空串时会拼出以 /forecast 开头的相对地址，随后由 URI.create 抛异常暴露配置问题。
+    */
+   private static String buildUrl(String baseUrl, double latitude, double longitude) {
       return String.format(
          Locale.ROOT,
          "%s/forecast?latitude=%.5f&longitude=%.5f&current=weather_code,temperature_2m,precipitation,snowfall&hourly=temperature_2m,snowfall&past_days=%d&forecast_days=1&timezone=auto",
-         getBaseUrl(),
+         baseUrl,
          latitude,
          longitude,
          historyDays()
