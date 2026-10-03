@@ -129,7 +129,7 @@
   "property.tellus.underground_depth.tooltip": "地形外壳及其洞穴、矿石、洞穴生物群系和地下结构向本地地表以下延伸的深度。",
   "property.tellus.automatic_height_scaling.tooltip": "按所在墨卡托纬度调整高程，使地形在垂直与水平方向上具有一致的真实比例。关闭后使用统一的高度缩放；此时「提升高度」会为珠峰预留空间，并把海洋深度从约 384 格扩展到 1,520 格。",
   "property.tellus.experimental_increase_height.tooltip": "使用扩展后的高度范围 Y=-640..10447。开启「自动高度缩放」时优先保证陆地真实比例、海平面位于 Y=0；关闭后会把海平面抬升到珠峰未使用的余量中，让海洋可以更深。",
-  "property.tellus.experimental_increase_height.warning": "该功能为实验性，且与早期「提升高度」创建的世界不兼容：可能出现异常、崩溃、存档损坏与模组冲突。",
+  "property.tellus.experimental_increase_height.warning": "该功能为实验性，且与早期「提升高度」创建的世界不兼容：可能出现异常、崩溃、存档损坏与模组冲突，也可能与 Distant Horizons 冲突。",
   "tellus.experimental_increase_height.controls_disabled.tooltip": "由于「提升高度」会自动控制高度，此项已禁用。",
   "tellus.experimental_increase_height.runtime_disabled.tooltip": "在 Minecraft 以 %s 启动之前不可用。",
   "tellus.experimental_increase_height.validation_failed": "在 Minecraft 以 %s 启动之前，「提升高度」无法保存。",
