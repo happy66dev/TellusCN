@@ -223,6 +223,70 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
       return bestClass == Integer.MIN_VALUE ? NO_DATA_CLASS : bestClass;
    }
 
+   /**
+    * 统计某个位置周围窗口内的森林覆盖率喵。
+    *
+    * <p>整体思路：把窗口的物理宽度（米）换算成该采样解析度下的像素半径，
+    * 再交给 ESA WorldCover 的窗口采样器一次性统计森林类像素占比喵。
+    * 与 {@link #sampleSmoothedCoverClass} 的区别是这里返回的是比例而不是单一的众数类喵。</p>
+    *
+    * <p>输入：世界坐标、比例尺、窗口宽度（米）。<br>
+    * 输出：森林覆盖率，单位：无量纲比例。边界条件：超出瓦片覆盖范围、WorldCover 不可用、
+    * 或窗口内没有任何有效像素时，一律返回 -1 表示"未知"，调用方必须据此回退而不是当作 0 处理喵。</p>
+    *
+    * @param blockX      采样点在世界坐标中的 X，单位：方块喵
+    * @param blockZ      采样点在世界坐标中的 Z，单位：方块喵
+    * @param worldScale  地图比例尺，即一个方块代表多少米喵
+    * @param windowMeters 统计窗口的物理宽度，单位：米喵
+    * @return 森林覆盖率，单位：无量纲比例；无法确定时返回 -1喵
+    */
+   public double sampleTreeCoverFraction(double blockX, double blockZ, double worldScale, double windowMeters) {
+      // 喵~防御：超出 WorldCover 覆盖范围（例如南极内陆）时直接返回未知，不让后续逻辑误判成"没有森林"喵。
+      if (!isWithinTileCoverage(blockX, blockZ, worldScale)) {
+         return -1.0;
+      }
+
+      // 每个经纬度对应多少方块，用于把方块坐标换算成经纬度喵。
+      double blocksPerDegree = EarthProjection.blocksPerDegree(worldScale);
+      // 采样点经度，单位：度喵。
+      double lon = blockX / blocksPerDegree;
+      // 采样点纬度，单位：度喵。
+      double lat = EarthProjection.blockZToLat(blockZ, worldScale);
+      // 当前调用方的瓦片查找模式，与其它采样方法保持一致喵。
+      LookupMode lookupMode = managedLookupMode();
+      // 实际参与采样的解析度，单位：米喵。
+      double resolutionMeters = effectiveSampleResolutionMeters(worldScale, worldScale);
+      // 把窗口宽度换算成像素半径，供底层窗口采样器使用喵。
+      int radiusPixels = windowRadiusPixels(windowMeters, resolutionMeters);
+
+      // 调用 WorldCover 的窗口采样，它会在建直方图的同时顺便算出森林占比喵。
+      WorldCoverCogSource.Sample sample = this.worldCoverSource.sampleSmoothed(
+         lon, lat, resolutionMeters, radiusPixels, worldCoverLookupMode(lookupMode)
+      );
+      // 喵~防御：采样不可用时返回未知哨兵值，绝不把缺失当成 0 覆盖率喵。
+      return sample.available() ? sample.treeCoverFraction() : -1.0;
+   }
+
+   /**
+    * 把窗口的物理宽度换算成像素半径喵。
+    *
+    * @param windowMeters     窗口的物理宽度，单位：米喵
+    * @param resolutionMeters 当前采样解析度，单位：米/像素喵
+    * @return 像素半径，单位：像素；被夹在 [1, WorldCoverCogSource.MAX_COVER_WINDOW_RADIUS] 内喵
+    */
+   private static int windowRadiusPixels(double windowMeters, double resolutionMeters) {
+      // 喵~防御：解析度非法（NaN、非正）时退化为最小窗口，避免除零产生无穷半径喵。
+      if (!(resolutionMeters > 0.0) || !(windowMeters > 0.0)) {
+         return 1;
+      }
+      // 窗口横跨的像素数除以二即得半径喵。
+      double radius = windowMeters / resolutionMeters / 2.0;
+      // 半径取整后夹到合法区间，保证单次采样的像素数有上界喵。
+      return Math.max(
+         1, Math.min(WorldCoverCogSource.MAX_COVER_WINDOW_RADIUS, (int)Math.round(radius))
+      );
+   }
+
    public int sampleVisualCoverClass(double blockX, double blockZ, double worldScale) {
       return this.sampleVisualCoverClass(blockX, blockZ, worldScale, worldScale, managedLookupMode());
    }

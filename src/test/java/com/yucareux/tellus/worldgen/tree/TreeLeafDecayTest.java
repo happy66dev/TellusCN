@@ -199,7 +199,7 @@ class TreeLeafDecayTest {
          for (long seed : new long[]{0L, 17L, 912341L}) {
             for (double height : new double[]{0.0, 5.0, 96.0}) {
                TellusCanopyHeightSource.CanopySample canopy = new TellusCanopyHeightSource.CanopySample(
-                  true, height, height, height, height, height, height, 13, 9
+                  true, height, height, height, height, height, height, 13, 9, 0.8
                );
                TellusProceduralTreeGenerator.TreePlan plan = TellusProceduralTreeGenerator.plan(profile, canopy, seed);
                TestWorld world = new TestWorld();

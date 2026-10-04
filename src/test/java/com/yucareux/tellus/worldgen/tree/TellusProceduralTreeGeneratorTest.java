@@ -76,7 +76,8 @@ class TellusProceduralTreeGeneratorTest {
          35.0,
          35.0,
          13,
-         9
+         9,
+         0.9
       );
       long redwoodHeightTotal = 0L;
       long genericHeightTotal = 0L;
@@ -298,7 +299,8 @@ class TellusProceduralTreeGeneratorTest {
          maximum,
          maximum,
          13,
-         9
+         9,
+         0.75
       );
    }
 }

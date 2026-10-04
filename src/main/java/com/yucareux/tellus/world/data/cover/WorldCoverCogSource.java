@@ -52,6 +52,12 @@ import java.util.zip.InflaterInputStream;
 final class WorldCoverCogSource {
    static final double SOURCE_RESOLUTION_METERS = 10.0;
    static final int UNAVAILABLE = Integer.MIN_VALUE;
+   // ESA WorldCover 中"森林"这一类的编号，单位：无量纲类别码；它就是树冠覆盖率的分子来源喵。
+   static final int TREE_COVER_CLASS = 10;
+   // 统计森林覆盖率的窗口半径上限，单位：像素；上限用来把单次采样的像素数钉死在 17×17 以内喵。
+   static final int MAX_COVER_WINDOW_RADIUS = 8;
+   // 覆盖率"未知"的哨兵值，单位：无量纲比例；用负数避免与合法的 0 覆盖混淆喵。
+   static final double UNKNOWN_FRACTION = -1.0;
    static final int TILE_DEGREES = 3;
    static final int MIN_TILE_LAT = -60;
    static final int MAX_TILE_LAT_EXCLUSIVE = 84;
@@ -215,10 +221,36 @@ final class WorldCoverCogSource {
          blockZ,
          sourceResolutionMeters / Math.max(worldScale, Double.MIN_NORMAL)
       );
-      return new Sample(selected, true);
+      // 该分支来自双线性混合，无法给出可靠的窗口覆盖率，所以标记为未知喵。
+      return new Sample(selected, true, UNKNOWN_FRACTION);
    }
 
    Sample sampleSmoothed(double lon, double lat, double effectiveResolutionMeters, LookupMode lookupMode) {
+      // 不指定窗口时沿用原来的 3×3 邻域，保持既有行为不变喵。
+      return this.sampleSmoothed(lon, lat, effectiveResolutionMeters, 1, lookupMode);
+   }
+
+   /**
+    * 在邻域上取众数土地覆盖类，并顺便统计该邻域内的森林覆盖率喵。
+    *
+    * <p>整体思路：以中心像素为原点，在半径 {@code windowRadiusPixels} 的方形窗口内逐像素取类，
+    * 一边累积各类计数用于取众数（原有行为），一边单独统计森林类的像素数与有效像素总数，
+    * 两者相除就是森林覆盖率。因为直方图本来就要建，覆盖率几乎是白送的喵。</p>
+    *
+    * <p>输入：经纬度、目标解析度、窗口半径（像素）。<br>
+    * 输出：中心处最可能的覆盖类 + 该窗口的森林覆盖率。边界条件：窗口内没有任何有效像素时
+    * 返回 {@link Sample#unavailable()}；窗口半径会被夹到 [0, 8] 以免开销失控喵。</p>
+    *
+    * @param lon                     查询点经度，单位：度喵
+    * @param lat                     查询点纬度，单位：度喵
+    * @param effectiveResolutionMeters 目标解析度，单位：米喵
+    * @param windowRadiusPixels      统计窗口半径，单位：像素；1 表示 3×3喵
+    * @param lookupMode              瓦片查找模式喵
+    * @return 土地覆盖采样结果，含森林覆盖率喵
+    */
+   Sample sampleSmoothed(
+      double lon, double lat, double effectiveResolutionMeters, int windowRadiusPixels, LookupMode lookupMode
+   ) {
       SamplePosition center = this.position(lon, lat, effectiveResolutionMeters, lookupMode);
       if (center == null) {
          return Sample.unavailable();
@@ -229,14 +261,25 @@ final class WorldCoverCogSource {
          return centerSample;
       }
 
+      // 喵~防御：把窗口半径夹到 [0, MAX_COVER_WINDOW_RADIUS]，避免调用方传入异常值导致采样量爆炸喵。
+      int windowRadius = Math.max(0, Math.min(MAX_COVER_WINDOW_RADIUS, windowRadiusPixels));
       int[] counts = new int[256];
       int bestClass = centerSample.coverClass();
       int bestCount = 0;
-      for (int dy = -1; dy <= 1; dy++) {
-         for (int dx = -1; dx <= 1; dx++) {
+      // 窗口内有效像素总数，单位：个；它是覆盖率的分子分母基准喵。
+      int validPixelCount = 0;
+      // 窗口内森林类像素数，单位：个；它是覆盖率的分子喵。
+      int treePixelCount = 0;
+      for (int dy = -windowRadius; dy <= windowRadius; dy++) {
+         for (int dx = -windowRadius; dx <= windowRadius; dx++) {
             Sample sample = this.sampleOffset(center, dx, dy, lookupMode);
             if (sample.available() && sample.coverClass() >= 0 && sample.coverClass() < counts.length) {
                int count = ++counts[sample.coverClass()];
+               // 顺手累计有效像素与森林像素；这两步不产生任何额外 IO喵。
+               validPixelCount++;
+               if (sample.coverClass() == TREE_COVER_CLASS) {
+                  treePixelCount++;
+               }
                if (count > bestCount || count == bestCount && sample.coverClass() == centerSample.coverClass()) {
                   bestCount = count;
                   bestClass = sample.coverClass();
@@ -244,7 +287,9 @@ final class WorldCoverCogSource {
             }
          }
       }
-      return new Sample(bestClass, true);
+      // 喵~防御：窗口内一个有效像素都没有时，覆盖率记为 -1 表示"未知"，绝不参与后续概率计算喵。
+      double treeCoverFraction = validPixelCount == 0 ? UNKNOWN_FRACTION : (double)treePixelCount / validPixelCount;
+      return new Sample(bestClass, true, treeCoverFraction);
    }
 
    Sample sampleNearestLand(
@@ -271,7 +316,8 @@ final class WorldCoverCogSource {
       );
       Integer cached = this.nearestLandCache.getIfPresent(cacheKey);
       if (cached != null) {
-         return new Sample(cached == MISSING_NEAREST_LAND ? fallbackCoverClass : cached, true);
+         // 最近陆地缓存只保证该处有陆地，不保证森林占比，所以覆盖率标记为未知喵。
+         return new Sample(cached == MISSING_NEAREST_LAND ? fallbackCoverClass : cached, true, UNKNOWN_FRACTION);
       }
 
       boolean complete = true;
@@ -339,11 +385,13 @@ final class WorldCoverCogSource {
          if (complete) {
             this.nearestLandCache.put(cacheKey, bestClass);
          }
-         return new Sample(bestClass, true);
+         // 最近陆地搜索只返回一个类，没有窗口统计，所以覆盖率标记为未知喵。
+         return new Sample(bestClass, true, UNKNOWN_FRACTION);
       }
       if (complete) {
          this.nearestLandCache.put(cacheKey, MISSING_NEAREST_LAND);
-         return new Sample(fallbackCoverClass, true);
+         // 回退类同样没有窗口统计，覆盖率标记为未知喵。
+         return new Sample(fallbackCoverClass, true, UNKNOWN_FRACTION);
       }
       return Sample.unavailable();
    }
@@ -517,7 +565,8 @@ final class WorldCoverCogSource {
          return Sample.unavailable();
       }
       int coverClass = values[index] & 255;
-      return new Sample(isWorldCoverClass(coverClass) ? coverClass : 0, true);
+      // 单像素采样无法给出邻域覆盖率，所以标记为未知，由上层决定是否改用窗口版喵。
+      return new Sample(isWorldCoverClass(coverClass) ? coverClass : 0, true, UNKNOWN_FRACTION);
    }
 
    private Sample sampleOffset(SamplePosition center, int dx, int dy, LookupMode lookupMode) {
@@ -938,9 +987,10 @@ final class WorldCoverCogSource {
       MEMORY_ONLY
    }
 
-   record Sample(int coverClass, boolean available) {
+   record Sample(int coverClass, boolean available, double treeCoverFraction) {
       static Sample unavailable() {
-         return new Sample(UNAVAILABLE, false);
+         // 不可用时把覆盖率记为未知哨兵值，调用方据此回退到"不做密度削减"喵。
+         return new Sample(UNAVAILABLE, false, UNKNOWN_FRACTION);
       }
    }
 
