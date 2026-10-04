@@ -4,6 +4,8 @@ import com.yucareux.tellus.network.GeoTpOpenMapPayload;
 import com.yucareux.tellus.network.GeoTpTeleportPayload;
 import com.yucareux.tellus.network.ManagedTerrainStatusPayload;
 import com.yucareux.tellus.network.ManagedTerrainViewPayload;
+import com.yucareux.tellus.network.TellusClientHelloPayload;
+import com.yucareux.tellus.network.TellusServerHelloPayload;
 import com.yucareux.tellus.network.TellusWeatherPayload;
 import java.util.Objects;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
