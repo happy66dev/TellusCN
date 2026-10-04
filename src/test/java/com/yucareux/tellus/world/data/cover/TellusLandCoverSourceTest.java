@@ -237,4 +237,25 @@ class TellusLandCoverSourceTest {
    private static int zigZag(int value) {
       return value << 1 ^ value >> 31;
    }
+
+   /**
+    * 覆盖率统计窗口的半径换算必须把常见的非法输入吃掉，并且永远落在合法区间内喵。
+    */
+   @Test
+   void windowRadiusPixelsClampsIllegalInputs() {
+      // 按放置格宽度换算：270 米窗口、10 米解析度，应当得到半径 14，再被上限夹到 8喵。
+      assertEquals(8, TellusLandCoverSource.windowRadiusPixels(270.0, 10.0), "超上限的窗口必须被夹到 8");
+      // 小窗口：60 米窗口、10 米解析度，半径 3，落在合法区间内喵。
+      assertEquals(3, TellusLandCoverSource.windowRadiusPixels(60.0, 10.0), "正常窗口应换算为半径 3");
+      // 极小的窗口也必须至少保留半径 1，否则统计退化成单像素、覆盖率只有 0 或 1喵。
+      assertEquals(1, TellusLandCoverSource.windowRadiusPixels(1.0, 10.0), "过小的窗口必须保底为半径 1");
+      // 喵~防御：解析度为 0 时必须保底，绝不能算出无穷大半径喵。
+      assertEquals(1, TellusLandCoverSource.windowRadiusPixels(270.0, 0.0), "解析度为 0 时必须保底为半径 1");
+      // 喵~防御：解析度为 NaN 时必须保底喵。
+      assertEquals(1, TellusLandCoverSource.windowRadiusPixels(270.0, Double.NaN), "解析度为 NaN 时必须保底为半径 1");
+      // 喵~防御：窗口宽度为 NaN 时必须保底喵。
+      assertEquals(1, TellusLandCoverSource.windowRadiusPixels(Double.NaN, 10.0), "窗口为 NaN 时必须保底为半径 1");
+      // 喵~防御：负数窗口同样必须保底，不能产生负半径喵。
+      assertEquals(1, TellusLandCoverSource.windowRadiusPixels(-50.0, 10.0), "负窗口必须保底为半径 1");
+   }
 }

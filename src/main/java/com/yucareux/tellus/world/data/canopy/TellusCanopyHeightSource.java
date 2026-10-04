@@ -286,7 +286,7 @@ public final class TellusCanopyHeightSource implements TellusCacheHandle {
     * @param level 栅格层级喵
     * @return 像素宽度，单位：米喵
     */
-   private static double resolutionMetersAtLevel(int level) {
+   static double resolutionMetersAtLevel(int level) {
       // 每降一级，像素物理尺寸翻倍，所以用 2 的 (原生层级 - 当前层级) 次方做缩放喵。
       double levelScale = Math.pow(2.0, NATIVE_LEVEL - level);
       // 原生像素宽度乘以缩放系数即得当前层级的像素宽度喵。
@@ -756,7 +756,7 @@ public final class TellusCanopyHeightSource implements TellusCacheHandle {
       int validSampleCount,
       double coverFraction
    ) {
-      private static CanopySample unavailable() {
+      static CanopySample unavailable() {
          // 不可用时把覆盖率记为 0，调用方据此走"无数据、不削减树木"的回退路径喵。
          return new CanopySample(false, Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, -1, 0, 0.0);
       }

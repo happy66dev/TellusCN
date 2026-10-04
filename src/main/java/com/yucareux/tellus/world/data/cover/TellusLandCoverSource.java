@@ -274,7 +274,7 @@ public final class TellusLandCoverSource implements TellusCacheHandle {
     * @param resolutionMeters 当前采样解析度，单位：米/像素喵
     * @return 像素半径，单位：像素；被夹在 [1, WorldCoverCogSource.MAX_COVER_WINDOW_RADIUS] 内喵
     */
-   private static int windowRadiusPixels(double windowMeters, double resolutionMeters) {
+   static int windowRadiusPixels(double windowMeters, double resolutionMeters) {
       // 喵~防御：解析度非法（NaN、非正）时退化为最小窗口，避免除零产生无穷半径喵。
       if (!(resolutionMeters > 0.0) || !(windowMeters > 0.0)) {
          return 1;
