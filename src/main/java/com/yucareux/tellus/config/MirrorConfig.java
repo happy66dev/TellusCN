@@ -9,6 +9,7 @@
 package com.yucareux.tellus.config;
 
 import com.yucareux.tellus.Tellus;
+import com.yucareux.tellus.platform.TellusPlatform;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -16,7 +17,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Objects;
 import java.util.Properties;
-import net.fabricmc.loader.api.FabricLoader;
 
 /**
  * TellusCN 镜像配置管理类
@@ -37,18 +37,22 @@ public final class MirrorConfig {
    /**
     * 解析镜像配置文件路径。
     *
-    * 喵~防御：Fabric 加载器在单元测试、数据生成等场景下可能尚未初始化，
-    * 此时 getConfigDir() 会返回 null，直接 resolve 会抛空指针，并连带拖垮调用方的整条静态初始化链
+    * 目录来源由 {@link TellusPlatform#configDir()} 提供，而不是直接调用 FabricLoader：
+    * 这样共享源码里不再出现 net.fabricmc 的 import（Forge / NeoForge 目标也能编译），
+    * 同时获得 -Dtellus.configDir 目录覆盖能力，方便测试与自定义部署。
+    *
+    * 喵~防御：Fabric / Forge 加载器在单元测试、数据生成等场景下可能尚未初始化，
+    * 此时底层会抛异常，直接 resolve 会连带拖垮调用方的整条静态初始化链
     * （例如世界生成器在静态字段里创建数据源）。这里返回 null 表示"当前没有可用的配置文件"，
     * 读写都会被安全跳过，内存中的默认配置照常生效。
     */
    private static Path resolveConfigPath() {
       try {
-         // 向 Fabric 加载器索取 config 目录；未初始化时为 null
-         Path configDir = FabricLoader.getInstance().getConfigDir();
+         // 向平台层索取 config 目录；未初始化或加载失败时走下面的兜底
+         Path configDir = TellusPlatform.configDir();
          return configDir == null ? null : configDir.resolve(CONFIG_FILE);
       } catch (Throwable error) {
-         // 喵~防御：加载器未初始化时连 getInstance 都可能抛异常，统一降级成"无配置文件"
+         // 喵~防御：加载器未初始化时连取目录都可能抛异常，统一降级成"无配置文件"
          return null;
       }
    }
