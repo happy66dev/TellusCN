@@ -98,6 +98,15 @@ public class TellusCommon {
    private static final PlayerActionCooldown GEO_TELEPORT_COOLDOWN = new PlayerActionCooldown(System::currentTimeMillis);
    /** 地形渲染距离上报的每玩家冷却器；同上，冷却时长实时从配置读取 */
    private static final PlayerActionCooldown TERRAIN_VIEW_COOLDOWN = new PlayerActionCooldown(System::currentTimeMillis);
+   /** 客户端握手包的每玩家冷却器；握手包同样是 C2S 包，需要防止改包客户端按包率刷它 */
+   private static final PlayerActionCooldown CLIENT_HELLO_COOLDOWN = new PlayerActionCooldown(System::currentTimeMillis);
+   /**
+    * 客户端握手包的每玩家冷却时长，单位：毫秒。
+    *
+    * 说明：这不是给玩家调的游戏手感参数，而是防滥用的下限，所以不做成配置项。
+    *       正常客户端每次连接只会发一次握手包，500 毫秒的冷却对正常流程没有任何影响。
+    */
+   private static final long CLIENT_HELLO_COOLDOWN_MS = 500L;
    /**
     * 等待下发服务端握手包的玩家 → 重试截止时间戳（单位：毫秒）。
     *
@@ -180,10 +189,13 @@ public class TellusCommon {
                                  )
                            ))
                            .then(
+                              // 传送策略设置子树：/tellus config geotp policy <档位>
                               Commands.literal("geotp")
                                  .then(
+                                    // policy 子节点，下面三个字面量分别是三档策略
                                     Commands.literal("policy")
                                        .then(
+                                          // 档位一：仅管理员可传送（默认档）
                                           Commands.literal("op_only")
                                              .executes(
                                                 context -> setGeoTpPolicy(
@@ -192,6 +204,7 @@ public class TellusCommon {
                                              )
                                        )
                                        .then(
+                                          // 档位二：所有玩家都可传送
                                           Commands.literal("everyone")
                                              .executes(
                                                 context -> setGeoTpPolicy(
@@ -200,6 +213,7 @@ public class TellusCommon {
                                              )
                                        )
                                        .then(
+                                          // 档位三：完全关闭传送，所有人都不能传送
                                           Commands.literal("disabled")
                                              .executes(
                                                 context -> setGeoTpPolicy(
@@ -269,6 +283,7 @@ public class TellusCommon {
          // 清空联机相关的每玩家状态，避免服务器重载后残留上一局的冷却记录与待发握手
          GEO_TELEPORT_COOLDOWN.clear();
          TERRAIN_VIEW_COOLDOWN.clear();
+         CLIENT_HELLO_COOLDOWN.clear();
          PENDING_SERVER_HELLO.clear();
       });
       // 每 tick 尝试把还没发出的服务端握手包补发出去（客户端声明通道存在时序竞争，见 PENDING_SERVER_HELLO 的说明）
@@ -308,6 +323,7 @@ public class TellusCommon {
       runtime.onPlayerDisconnect(player -> {
          GEO_TELEPORT_COOLDOWN.release(player.getUUID());
          TERRAIN_VIEW_COOLDOWN.release(player.getUUID());
+         CLIENT_HELLO_COOLDOWN.release(player.getUUID());
          PENDING_SERVER_HELLO.remove(player.getUUID());
       });
       if (TellusPlatform.isModLoaded("distanthorizons")) {
@@ -760,11 +776,17 @@ public class TellusCommon {
     * 输入：客户端上报的协议版本与模组版本，以及发起握手的玩家。
     * 输出：无返回值。协议不匹配时把该玩家踢下线；匹配时立刻回发服务端握手包。
     * 边界条件：客户端在发出握手包时，它自己的通道声明必然已经完成（否则它发不出来），
-    *          因此这里回发是安全的，不需要走 pending 重试。
+    *          因此这里回发通常一次就能成功；万一失败仍会保留待发登记，交给每 tick 的补发逻辑继续重试。
+    *          冷却窗口内的重复包直接丢弃，防止改包客户端按包率刷它。
     */
    public static void handleClientHello(TellusClientHelloPayload payload, ServerPlayer player) {
       // 喵~防御：空值直接返回
       if (payload == null || player == null) {
+         return;
+      }
+      // 喵~防御：握手包是本模组为数不多的 C2S 包，改包客户端可以按包率刷它；
+      //          这里先做一次每玩家冷却，避免每个包都在主线程重新组装一次服务端握手包
+      if (!CLIENT_HELLO_COOLDOWN.tryAcquire(player.getUUID(), CLIENT_HELLO_COOLDOWN_MS)) {
          return;
       }
       // 取服务端实例，拿不到说明玩家所在世界还没绑定服务器
@@ -788,9 +810,13 @@ public class TellusCommon {
             PENDING_SERVER_HELLO.remove(player.getUUID());
             return;
          }
-         // 协议匹配：立刻回发服务端握手包，并清掉待发登记
-         TellusPlatform.sendServerHelloPayload(player, buildServerHelloPayload(player));
-         PENDING_SERVER_HELLO.remove(player.getUUID());
+         // 协议匹配：立刻回发服务端握手包
+         if (TellusPlatform.sendServerHelloPayload(player, buildServerHelloPayload(player))) {
+            // 发送成功，清掉待发登记，不用再补发
+            PENDING_SERVER_HELLO.remove(player.getUUID());
+         }
+         // 喵~防御：发送失败时**保留**登记，交给每 tick 的补发逻辑在重试窗口内继续尝试；
+         //          这里若顺手删掉登记，就等于把 pending 机制存在的意义（容忍发送失败）直接抵消了
       });
    }
 
@@ -864,6 +890,8 @@ public class TellusCommon {
    private static int setGeoTpPolicy(CommandSourceStack source, TellusTeleportPolicy policy) {
       // 写入配置并落盘，下一次传送校验立刻生效
       TellusServerConfig.setTeleportPolicy(policy);
+      // 策略变了要立刻同步给在线玩家，否则客户端上的传送按钮要重连才会更新
+      broadcastServerHello(source);
       // 把生效后的策略名回显给执行者，方便确认
       source.sendSuccess(
          () -> Component.translatable(
@@ -873,6 +901,30 @@ public class TellusCommon {
       );
       // 返回 1 表示命令执行成功
       return 1;
+   }
+
+   /**
+    * 把最新的服务端握手包重新下发给服务器上的所有在线玩家。
+    *
+    * 输入：命令来源，用来取当前服务器实例。
+    * 输出：无返回值。
+    * 边界条件：取不到服务器实例时静默跳过；对端没声明通道时平台层返回 false，这里直接忽略。
+    *
+    * 说明：服务端握手包原本只在玩家进服时下发一次，所以像「传送策略热改」这类运行期变化
+    *       必须主动重发，否则客户端的按钮状态会一直停留在进服那一刻，与「改完立刻生效」不符。
+    */
+   private static void broadcastServerHello(CommandSourceStack source) {
+      // 取当前服务器实例；取不到说明这条命令不在服务器上下文里执行
+      MinecraftServer server = source == null ? null : source.getServer();
+      // 喵~防御：没有服务器实例时什么都不做，避免空指针
+      if (server == null) {
+         return;
+      }
+      // 复制一份玩家列表再遍历，避免循环途中玩家离线改动底层集合
+      for (ServerPlayer onlinePlayer : List.copyOf(server.getPlayerList().getPlayers())) {
+         // 逐个重发；发不出去（对端没装模组）时平台层返回 false，这里无需特殊处理
+         TellusPlatform.sendServerHelloPayload(onlinePlayer, buildServerHelloPayload(onlinePlayer));
+      }
    }
 
    /**
@@ -906,18 +958,20 @@ public class TellusCommon {
             PENDING_SERVER_HELLO.remove(playerId);
             continue;
          }
-         // 尝试下发；成功（对端已声明通道）就移除登记，不再重试
-         if (TellusPlatform.sendServerHelloPayload(player, buildServerHelloPayload(player))) {
-            PENDING_SERVER_HELLO.remove(playerId);
-            continue;
-         }
-         // 超过重试窗口仍未成功，说明对端根本不认识这个通道（未装模组或版本过旧），放弃并记录
+         // 主人注意：先判超时再组装握手包。组装要查世界生成器、算权限、查模组版本，
+         //          若放在前面的实参位置，对原版客户端会白白连续算满整个重试窗口（约 200 tick）。
          if (nowMs > deadlineMs) {
+            // 超过重试窗口仍未成功，说明对端根本不认识这个通道（未装模组或版本过旧），放弃并记录
             PENDING_SERVER_HELLO.remove(playerId);
             LOGGER.debug(
                "Gave up sending the TellusCN handshake to {} (the client never declared the channel)",
                player.getName().getString()
             );
+            continue;
+         }
+         // 尝试下发；成功（对端已声明通道）就移除登记，不再重试
+         if (TellusPlatform.sendServerHelloPayload(player, buildServerHelloPayload(player))) {
+            PENDING_SERVER_HELLO.remove(playerId);
          }
       }
    }

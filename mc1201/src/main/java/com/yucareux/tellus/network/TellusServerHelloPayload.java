@@ -23,6 +23,9 @@ import net.minecraft.network.FriendlyByteBuf;
  *
  * 说明：MC 1.20.1 用的是 Fabric API v1 的 FabricPacket / PacketType 老接口，必须单独实现一份。
  *       **两版的字段顺序必须严格一致**，新增字段只能追加到末尾。
+ *
+ * 主人注意：末尾三个字段 worldScale / experimentalHeight / mirrorEnabled 目前是**预留的扩展位**，
+ *          客户端收到后不会读取，也没有任何生产调用方；删改时必须与 shared/post-1201 的同名版本同步。
  */
 public record TellusServerHelloPayload(
    int protocolVersion,

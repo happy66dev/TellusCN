@@ -24,9 +24,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * TellusServerConfig 单元测试
  *
  * 覆盖场景：缺省值、正常解析、非法策略名回退、冷却值非数字回退、冷却值范围夹取、
- * properties 往返序列化、文件不存在、文件读写往返、null 路径。
- * 该测试只调用 TellusServerConfig 的纯逻辑接缝（parse / toProperties / load / save / clampCooldownMs），
- * 刻意**不触碰**全局懒加载路径，因此不需要 Fabric / Forge 的 config 目录，也不依赖加载器初始化。
+ * properties 往返序列化、文件不存在、文件读写往返、null 路径，
+ * 以及三条走全局懒加载路径的回归用例（改策略不覆盖磁盘冷却值、坏转义不崩、首次读取自动生成模板）。
+ * 前半部分只调用纯逻辑接缝（parse / toProperties / load / save / clampCooldownMs）；
+ * 后半部分通过 -Dtellus.configDir 把全局配置目录指向 @TempDir，测完立即还原，不依赖加载器初始化。
  */
 class TellusServerConfigTest {
 
@@ -324,5 +325,112 @@ class TellusServerConfigTest {
 
       // 正常写入不应抛异常（受检的 IOException 由 assertDoesNotThrow 一并覆盖）
       assertDoesNotThrow(() -> TellusServerConfig.save(configPath, null));
+   }
+
+   // ============ 以下用例会走全局懒加载路径，靠 -Dtellus.configDir 把配置目录指向临时目录 ============
+
+   /**
+    * 允许抛受检 IOException 的断言片段，供 {@link #withConfigDir} 包装使用。
+    */
+   @FunctionalInterface
+   private interface ConfigDirAssertions {
+      /** 在临时配置目录下执行的断言逻辑 */
+      void run() throws IOException;
+   }
+
+   /**
+    * 把全局配置目录临时指向给定目录，并在结束后还原系统属性与内存状态。
+    *
+    * 输入：临时配置目录与一段断言逻辑。
+    * 输出：无返回值。
+    * 边界条件：无论断言是否失败都会在 finally 里还原，保证测试之间互不污染。
+    */
+   private static void withConfigDir(Path configDir, ConfigDirAssertions assertions) throws IOException {
+      // 记录调用前的系统属性，便于结束后还原
+      String previousConfigDir = System.getProperty("tellus.configDir");
+      try {
+         // 让 TellusPlatform.configDir() 指向临时目录
+         System.setProperty("tellus.configDir", configDir.toString());
+         // 清掉上一轮测试留下的内存缓存，让下一次访问重新读盘
+         TellusServerConfig.resetForTests();
+         // 执行断言逻辑
+         assertions.run();
+      } finally {
+         // 还原系统属性
+         if (previousConfigDir == null) {
+            System.clearProperty("tellus.configDir");
+         } else {
+            System.setProperty("tellus.configDir", previousConfigDir);
+         }
+         // 还原内存状态，避免影响其它用例
+         TellusServerConfig.resetForTests();
+      }
+   }
+
+   /**
+    * 回归测试：改传送策略不得把服主写在文件里的冷却值覆盖成默认值。
+    *
+    * 背景：setTeleportPolicy 会把内存中的三项配置整份落盘。如果本会话还没读过磁盘，
+    *       内存里的冷却值仍是默认的 3000 / 1000，一次改策略就会静默抹掉服主的自定义值。
+    */
+   @Test
+   void setTeleportPolicyKeepsCooldownsStoredOnDisk(@TempDir Path tempDir) throws IOException {
+      withConfigDir(tempDir, () -> {
+         // 先手工写一份带自定义冷却的配置文件，模拟服主自己编辑过
+         Path configPath = tempDir.resolve("tellus-server.properties");
+         Files.writeString(configPath, "geotp.policy=op_only\ngeotp.cooldown_ms=10000\nterrain_view.cooldown_ms=2000\n");
+
+         // 管理员把策略改成「所有人可用」
+         TellusServerConfig.setTeleportPolicy(TellusTeleportPolicy.EVERYONE);
+
+         // 从磁盘读回改写后的内容
+         TellusServerConfig.Values reloaded = TellusServerConfig.load(configPath);
+
+         // 策略应当已经被改成 EVERYONE
+         assertEquals(TellusTeleportPolicy.EVERYONE, reloaded.teleportPolicy());
+         // 服主写的传送冷却必须被保留，而不是被默认值 3000 覆盖
+         assertEquals(10000L, reloaded.teleportCooldownMs());
+         // 服主写的渲染距离上报冷却同样必须被保留，而不是被默认值 1000 覆盖
+         assertEquals(2000L, reloaded.terrainViewCooldownMs());
+      });
+   }
+
+   /**
+    * 回归测试：配置文件里含非法 Unicode 转义时，全局读取不应抛异常。
+    *
+    * 背景：Properties.load 遇到坏转义抛的是 IllegalArgumentException 而不是 IOException，
+    *       而配置读取发生在服务端 tick 里，异常冒泡会直接把服务器带崩。
+    */
+   @Test
+   void teleportPolicySurvivesMalformedUnicodeEscapeInConfig(@TempDir Path tempDir) throws IOException {
+      withConfigDir(tempDir, () -> {
+         // 写入一行含非法 Unicode 转义的配置（转义序列后面不是 4 位十六进制）
+         Path configPath = tempDir.resolve("tellus-server.properties");
+         Files.writeString(configPath, "backup.path=C:\\users\\admin\n");
+
+         // 全局读取不应抛异常，应当退回默认策略而不是崩服务端
+         assertEquals(TellusServerConfig.DEFAULT_GEOTP_POLICY, TellusServerConfig.teleportPolicy());
+      });
+   }
+
+   /**
+    * 首次读取全局配置时应当自动生成一份带默认值的模板文件，方便服主发现可配置项。
+    */
+   @Test
+   void firstGlobalReadCreatesDefaultConfigFile(@TempDir Path tempDir) throws IOException {
+      withConfigDir(tempDir, () -> {
+         // 触发一次全局配置读取
+         TellusServerConfig.teleportPolicy();
+
+         // 配置文件应当已经被自动创建出来
+         Path configPath = tempDir.resolve("tellus-server.properties");
+         assertTrue(Files.exists(configPath), "首次读取应当自动生成配置文件模板");
+
+         // 自动生成的内容应当是默认配置
+         TellusServerConfig.Values values = TellusServerConfig.load(configPath);
+         assertEquals(TellusServerConfig.DEFAULT_GEOTP_POLICY, values.teleportPolicy());
+         assertEquals(TellusServerConfig.DEFAULT_GEOTP_COOLDOWN_MS, values.teleportCooldownMs());
+         assertEquals(TellusServerConfig.DEFAULT_TERRAIN_VIEW_COOLDOWN_MS, values.terrainViewCooldownMs());
+      });
    }
 }

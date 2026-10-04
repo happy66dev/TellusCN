@@ -24,6 +24,10 @@ import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
  * 说明：本包是**逐玩家**发送的，所以同一个服务器里不同玩家看到的 playerCanTeleport 可能不同。
  *       本文件是「MC 1.21.1 及之后」的新 API 版本；MC 1.20.1 另有一份老 API 实现，
  *       两版的字段顺序必须严格一致，新增字段只能追加到末尾。
+ *
+ * 主人注意：末尾三个字段 worldScale / experimentalHeight / mirrorEnabled 目前是**预留的扩展位**，
+ *          客户端收到后不会读取，也没有任何生产调用方。保留它们是为了避免以后要用时再改协议版本；
+ *          若确认长期不用，可以考虑在下一次协议变更时一并移除。
  */
 public record TellusServerHelloPayload(
    int protocolVersion,

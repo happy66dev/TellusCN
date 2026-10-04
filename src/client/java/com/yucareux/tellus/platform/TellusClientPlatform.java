@@ -12,7 +12,14 @@ public final class TellusClientPlatform {
    private static volatile TellusClientPlatform.GeoTeleportTransport geoTeleportTransport = UNAVAILABLE;
    /** 探测「当前连接的服务端是否装了 TellusCN」的回调，由各版本客户端在初始化时注入 */
    private static volatile BooleanSupplier serverPresenceProbe = () -> false;
-   /** 是否已经收到服务端下发的 server_hello 握手响应；未握手时传送按钮退回旧语义 */
+   /**
+    * 是否已经收到服务端下发的 server_hello 握手响应；未握手时传送按钮退回旧语义。
+    *
+    * 主人注意：以下 serverProtocolVersion / serverTeleportPolicy / playerCanTeleport 三项，
+    *          目前**只有 serverTeleportPolicy 与 playerCanTeleport 被传送按钮使用**；
+    *          serverProtocolVersion 及其 getter 是预留给「未来要在界面上显示双端版本」用的，
+    *          当前没有任何生产调用方。若长期不用，可以考虑连同 getter 一起删掉。
+    */
    private static volatile boolean serverHelloReceived;
    /** 服务端声明的联机协议版本号，单位：无；未握手时等于最低支持版本 */
    private static volatile int serverProtocolVersion = TellusProtocol.MIN_SUPPORTED_PROTOCOL;
@@ -121,13 +128,13 @@ public final class TellusClientPlatform {
       return TellusProtocol.isCompatible(protocolVersion);
    }
 
-   /** 是否已收到服务端握手响应，单位：无。 */
+   /** 是否已收到服务端握手响应，单位：无；当前无生产调用方，预留给后续的界面提示。 */
    public static boolean isServerHelloReceived() {
       // 直接返回握手标记
       return serverHelloReceived;
    }
 
-   /** 服务端声明的联机协议版本号，单位：无；未握手时等于最低支持版本。 */
+   /** 服务端声明的联机协议版本号，单位：无；当前无生产调用方，预留给后续的版本不一致提示。 */
    public static int serverProtocolVersion() {
       // 直接返回缓存的协议版本号
       return serverProtocolVersion;

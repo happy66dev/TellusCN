@@ -252,6 +252,13 @@ public final class TellusServerConfig {
       }
       // 读取可能失败，用 try 包住
       try {
+         // 配置文件不存在时，先写出一份带默认值的模板，方便服主在 config 目录里发现这些可配置项
+         if (!Files.exists(configPath)) {
+            // 直接把内存中的默认值落盘，写出第一份模板
+            save(configPath, new Values(teleportPolicy, teleportCooldownMs, terrainViewCooldownMs));
+            // 内存里已经是默认值，不需要再从磁盘读回来
+            return;
+         }
          // 解析出配置快照
          Values values = load(configPath);
          // 写回内存字段，供后续 getter 读取
@@ -260,6 +267,9 @@ public final class TellusServerConfig {
          terrainViewCooldownMs = values.terrainViewCooldownMs();
       } catch (IOException error) {
          // 喵~防御：配置读不出来时保留默认值，绝不让服务端因为一个损坏的配置文件起不来
+      } catch (RuntimeException error) {
+         // 喵~防御：Properties.load 遇到非法的「反斜杠+codepoint」式转义会抛 IllegalArgumentException（不是 IOException），
+         //          而本方法会在服务端 tick 中被调用，异常冒泡会直接崩掉服务器，因此这里一并兜住并退回默认值
       }
    }
 
@@ -309,32 +319,38 @@ public final class TellusServerConfig {
       return terrainViewCooldownMs;
    }
 
-   /** 设置传送策略并立刻落盘 */
+   /**
+    * 设置传送策略并立刻落盘。
+    *
+    * 主人注意：这里必须**先 ensureLoaded() 再把内存配置整份落盘**。否则当本会话还没读过磁盘时，
+    *  teleportCooldownMs / terrainViewCooldownMs 还停留在默认值，一次改策略就会把服主
+    *  写在文件里的自定义冷却值静默覆盖掉。
+    */
    public static void setTeleportPolicy(TellusTeleportPolicy policy) {
+      // 先把磁盘上的既有配置读进内存，避免下面整份落盘时用默认值覆盖服主的设置
+      ensureLoaded();
       // 喵~防御：null 会让后续 wireId() 抛空指针，统一回退到默认策略
       teleportPolicy = policy == null ? DEFAULT_GEOTP_POLICY : policy;
-      // 标记已加载，防止后续访问又把磁盘上的旧值覆盖回来
-      loaded = true;
       // 立刻写回磁盘，让配置在重启后依然生效
       saveToDisk();
    }
 
    /** 设置传送冷却（单位毫秒）并立刻落盘 */
    public static void setTeleportCooldownMs(long cooldownMs) {
+      // 先把磁盘上的既有配置读进内存，避免下面整份落盘时把其它两项也覆盖成默认值
+      ensureLoaded();
       // 写入前先夹取到合法范围
       teleportCooldownMs = clampCooldownMs(cooldownMs);
-      // 标记已加载，防止后续访问又把磁盘上的旧值覆盖回来
-      loaded = true;
       // 立刻写回磁盘，让配置在重启后依然生效
       saveToDisk();
    }
 
    /** 设置渲染距离上报冷却（单位毫秒）并立刻落盘 */
    public static void setTerrainViewCooldownMs(long cooldownMs) {
+      // 先把磁盘上的既有配置读进内存，避免下面整份落盘时把其它两项也覆盖成默认值
+      ensureLoaded();
       // 写入前先夹取到合法范围
       terrainViewCooldownMs = clampCooldownMs(cooldownMs);
-      // 标记已加载，防止后续访问又把磁盘上的旧值覆盖回来
-      loaded = true;
       // 立刻写回磁盘，让配置在重启后依然生效
       saveToDisk();
    }
