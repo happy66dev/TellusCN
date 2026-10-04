@@ -88,7 +88,7 @@ These options are available in the "Customize World Generation" screen when crea
 
 ### Ecological Settings (work in progress)
 These options are currently locked and not adjustable yet. They describe what will be configurable in a future update.
-- **Tree Density**: Will control how many trees spawn in eligible biomes.
+- **Tree Density**: Will control how many trees spawn in eligible biomes. The data-driven density pass already exists but is off by default; set the JVM system property `-Dtellus.treeDensity.enabled=true` to enable it. When enabled, individual tree placement cells are kept or dropped according to the real-world canopy cover sampled from the ETH canopy-height and ESA WorldCover rasters, so closed forest, open woodland, and scrub stop looking identical. Chunk generation and Distant Horizons fast LODs share one anchor grid and one decision function, so distant trees stay aligned with full chunks. Leave it off if you want byte-identical output to earlier builds.
 - **Aquatic Vegetation**: Will enable kelp and seagrass in water.
 
 ### Geological Settings
