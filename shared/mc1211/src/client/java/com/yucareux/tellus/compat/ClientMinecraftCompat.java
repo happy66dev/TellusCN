@@ -12,6 +12,7 @@ import java.util.function.Function;
 import net.minecraft.Util;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.multiplayer.ClientPacketListener;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.AbstractWidget;
 import net.minecraft.client.gui.components.CycleButton;
@@ -30,6 +31,28 @@ import net.minecraft.world.level.levelgen.WorldDimensions;
 /** Client rendering API differences specific to Minecraft 1.21.1. */
 public final class ClientMinecraftCompat {
    private ClientMinecraftCompat() {
+   }
+
+   /**
+    * 让客户端主动断开当前服务器连接。
+    *
+    * 输入：断开原因 reason，会原样显示在断线提示界面上。
+    * 输出：无返回值。
+    * 边界条件：reason 为 null，或当前根本没有连接时，直接返回不做任何操作。
+    */
+   public static void disconnectFromServer(Component reason) {
+      // 喵~防御：没有断开原因就没必要断线，直接返回避免空指针
+      if (reason == null) {
+         return;
+      }
+      // 取出当前这条连接的包监听器，它持有底层网络连接
+      ClientPacketListener packetListener = Minecraft.getInstance().getConnection();
+      // 喵~防御：连接可能刚刚被拆除，此时静静返回即可
+      if (packetListener == null) {
+         return;
+      }
+      // 调用底层连接断开，并把原因文本交给原版断线界面渲染
+      packetListener.getConnection().disconnect(reason);
    }
 
    public static ResourceLocation resourceLocation(String namespace, String path) {
