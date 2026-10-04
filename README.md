@@ -16,7 +16,7 @@ Survival note: Some survival features are still missing (including certain struc
 
 Internet & data note: Tellus requires an active internet connection and will not work offline. It downloads terrain, land cover, climate, and weather data on demand; expect ongoing data usage that varies with how much of the world you explore.
 
-Server support note: Tellus must be installed on the server, but is not required on clients. Official server support is not available yet; for now you should create the world in singleplayer first, then move that world to the server (with Tellus installed) so new chunks generate with Tellus.
+Server support note: Tellus must be installed on the server, but is not required on clients. Official server support is not available yet; for now you should create the world in singleplayer first, then move that world to the server (with Tellus installed) so new chunks generate with Tellus. Clients without TellusCN can still join and play, but they will not receive weather, terrain download status, or the handshake, and cannot use the GeoTP teleport UI. The server needs internet access, because all terrain and weather data is fetched server-side. TellusCN also ships a server-side config (`config/tellus-server.properties`) controlling the GeoTP teleport policy and per-player rate limits, and disconnects players whose TellusCN protocol version does not match — see TELLUS_CN_SETUP.md section 8 for the multiplayer deployment guide.
 
 *Note: generative AI was used during the creation of this mod.*
 

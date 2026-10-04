@@ -56,11 +56,14 @@ public final class ForgeTellusPlatformService implements TellusPlatformService {
       // 喵~防御：Forge 目标的 ModList API 未经本机实测，任何异常都兜底成 "unknown"，绝不返回 null
       try {
          // 先按 TellusCN 的模组 id 查找，查不到时退回上游模组 id
-         return ModList.get()
-            .getModContainerById("telluscn")
-            .or(() -> ModList.get().getModContainerById("tellus"))
-            .map(container -> container.getModInfo().getVersion().toString())
-            .orElse("unknown");
+         // 说明：这里用 var 接收是为了避开 Optional<? extends ModContainer> 的捕获类型推断问题
+         var modContainer = ModList.get().getModContainerById("telluscn");
+         if (modContainer.isEmpty()) {
+            // 上游模组 id 兜底查找
+            modContainer = ModList.get().getModContainerById("tellus");
+         }
+         // 取到容器就读出版本号，取不到按未知处理
+         return modContainer.isEmpty() ? "unknown" : modContainer.get().getModInfo().getVersion().toString();
       } catch (Throwable error) {
          // 版本号只用于展示与日志，取不到不应影响任何功能
          return "unknown";
