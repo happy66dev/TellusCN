@@ -8,7 +8,7 @@ import net.fabricmc.fabric.api.networking.v1.PacketType;
 import net.minecraft.network.FriendlyByteBuf;
 
 public record ManagedTerrainStatusPayload(ManagedTerrainDownloadStatus status) implements FabricPacket {
-   public static final PacketType<ManagedTerrainStatusPayload> TYPE = PacketType.create(Tellus.id("managed_terrain_status"), ManagedTerrainStatusPayload::new);
+   public static final PacketType<ManagedTerrainStatusPayload> TYPE = PacketType.create(Tellus.id(TellusProtocol.CHANNEL_MANAGED_TERRAIN_STATUS), ManagedTerrainStatusPayload::new);
 
    public ManagedTerrainStatusPayload(FriendlyByteBuf buffer) {
       this(readStatus(buffer));

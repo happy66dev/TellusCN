@@ -3,6 +3,7 @@ package com.yucareux.tellus.platform;
 import com.yucareux.tellus.network.GeoTpOpenMapPayload;
 import com.yucareux.tellus.network.ManagedTerrainStatusPayload;
 import com.yucareux.tellus.network.TellusNeoForgeNetworking;
+import com.yucareux.tellus.network.TellusServerHelloPayload;
 import com.yucareux.tellus.network.TellusWeatherPayload;
 import java.nio.file.Path;
 import net.neoforged.fml.ModList;
@@ -42,6 +43,30 @@ public final class NeoForgeTellusPlatformService implements TellusPlatformServic
    @Override
    public void sendManagedTerrainStatusPayload(ServerPlayer player, ManagedTerrainStatusPayload payload) {
       TellusNeoForgeNetworking.sendToPlayer(player, payload);
+   }
+
+   @Override
+   public boolean sendServerHelloPayload(ServerPlayer player, TellusServerHelloPayload payload) {
+      // 由网络层判断对端是否认识该 payload，发不出去时返回 false，调用方稍后重试
+      return TellusNeoForgeNetworking.sendToPlayer(player, payload);
+   }
+
+   @Override
+   public String modVersion() {
+      // 喵~防御：NeoForge 目标的 ModList API 未经本机实测，任何异常都兜底成 "unknown"，绝不返回 null
+      try {
+         // 先按 TellusCN 的模组 id 查找
+         var container = ModList.get().getModContainerById("telluscn");
+         // 查不到时退回上游模组 id
+         if (container.isEmpty()) {
+            container = ModList.get().getModContainerById("tellus");
+         }
+         // 取模组版本字符串；仍然取不到就用 unknown
+         return container.map(entry -> entry.getModInfo().getVersion().toString()).orElse("unknown");
+      } catch (Throwable error) {
+         // 版本号只用于展示与日志，取不到不应影响任何功能
+         return "unknown";
+      }
    }
 
    @Override

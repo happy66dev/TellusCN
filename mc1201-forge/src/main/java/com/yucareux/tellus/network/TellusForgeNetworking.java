@@ -69,11 +69,24 @@ public final class TellusForgeNetworking {
       );
    }
 
-   public static void sendToPlayer(ServerPlayer player, Object payload) {
+   /**
+    * 向指定玩家发送一个 payload。
+    *
+    * 输入：目标玩家与 payload。
+    * 输出：真正发出返回 true；对端未声明 Tellus 频道而跳过返回 false。
+    * 边界条件：连接为 null 或对端没装模组时一律返回 false，由调用方决定是否重试。
+    */
+   public static boolean sendToPlayer(ServerPlayer player, Object payload) {
+      // 取该玩家的底层网络连接，用来判断对端是否声明了 Tellus 频道
       Connection connection = player.connection.connection;
-      if (CHANNEL.isRemotePresent(connection)) {
-         CHANNEL.send(PacketDistributor.PLAYER.with(() -> player), payload);
+      // 喵~防御：对端没声明频道时盲发会出错，这里直接跳过并告知调用方
+      if (!CHANNEL.isRemotePresent(connection)) {
+         return false;
       }
+      // 频道就绪，真正发出
+      CHANNEL.send(PacketDistributor.PLAYER.with(() -> player), payload);
+      // 告知调用方已发出
+      return true;
    }
 
    public static void sendToServer(Object payload) {

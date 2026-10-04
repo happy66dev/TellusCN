@@ -8,7 +8,7 @@ import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 
 public record ManagedTerrainStatusPayload(ManagedTerrainDownloadStatus status) implements CustomPacketPayload {
-   public static final Type<ManagedTerrainStatusPayload> TYPE = new Type<>(Tellus.id("managed_terrain_status"));
+   public static final Type<ManagedTerrainStatusPayload> TYPE = new Type<>(Tellus.id(TellusProtocol.CHANNEL_MANAGED_TERRAIN_STATUS));
    public static final StreamCodec<FriendlyByteBuf, ManagedTerrainStatusPayload> CODEC = new StreamCodec<>() {
       @Override public ManagedTerrainStatusPayload decode(FriendlyByteBuf buffer) { return new ManagedTerrainStatusPayload(readStatus(buffer)); }
       @Override public void encode(FriendlyByteBuf buffer, ManagedTerrainStatusPayload value) { writeStatus(buffer, value.status()); }

@@ -7,7 +7,7 @@ import net.fabricmc.fabric.api.networking.v1.PacketType;
 import net.minecraft.network.FriendlyByteBuf;
 
 public record GeoTpOpenMapPayload(double latitude, double longitude) implements FabricPacket {
-   public static final PacketType<GeoTpOpenMapPayload> TYPE = PacketType.create(Tellus.id("geotp_open_map"), GeoTpOpenMapPayload::new);
+   public static final PacketType<GeoTpOpenMapPayload> TYPE = PacketType.create(Tellus.id(TellusProtocol.CHANNEL_GEOTP_OPEN_MAP), GeoTpOpenMapPayload::new);
 
    public GeoTpOpenMapPayload(FriendlyByteBuf buffer) {
       this(buffer.readDouble(), buffer.readDouble());

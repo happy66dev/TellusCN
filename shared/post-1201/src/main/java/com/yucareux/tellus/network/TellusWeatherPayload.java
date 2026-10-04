@@ -20,7 +20,7 @@ public record TellusWeatherPayload(
 ) implements CustomPacketPayload {
    
    public static final CustomPacketPayload.Type<TellusWeatherPayload> TYPE = new CustomPacketPayload.Type<>(
-      Tellus.id("realtime_weather")
+      Tellus.id(TellusProtocol.CHANNEL_REALTIME_WEATHER)
    );
    private static final int GRID_POINTS = 9;
    public static final StreamCodec<FriendlyByteBuf, TellusWeatherPayload> CODEC = new StreamCodec<FriendlyByteBuf, TellusWeatherPayload>() {

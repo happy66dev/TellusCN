@@ -7,7 +7,7 @@ import net.fabricmc.fabric.api.networking.v1.PacketType;
 import net.minecraft.network.FriendlyByteBuf;
 
 public record ManagedTerrainViewPayload(int renderRadiusChunks) implements FabricPacket {
-   public static final PacketType<ManagedTerrainViewPayload> TYPE = PacketType.create(Tellus.id("managed_terrain_view"), ManagedTerrainViewPayload::new);
+   public static final PacketType<ManagedTerrainViewPayload> TYPE = PacketType.create(Tellus.id(TellusProtocol.CHANNEL_MANAGED_TERRAIN_VIEW), ManagedTerrainViewPayload::new);
 
    public ManagedTerrainViewPayload(FriendlyByteBuf buffer) {
       this(buffer.readVarInt());

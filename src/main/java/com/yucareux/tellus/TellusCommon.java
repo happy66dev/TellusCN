@@ -8,6 +8,8 @@ import com.mojang.brigadier.arguments.BoolArgumentType;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.serialization.DynamicOps;
 import com.mojang.serialization.JsonOps;
+import com.yucareux.tellus.config.MirrorConfig;
+import com.yucareux.tellus.config.TellusServerConfig;
 import com.yucareux.tellus.integration.distant_horizons.DistantHorizonsIntegration;
 import com.yucareux.tellus.integration.distant_horizons.managed.ManagedTerrainDownloadManager;
 import com.yucareux.tellus.integration.voxy.TellusVoxyPregenManager;
@@ -18,8 +20,13 @@ import com.yucareux.tellus.network.GeoTpOpenMapPayload;
 import com.yucareux.tellus.network.GeoTpTeleportPayload;
 import com.yucareux.tellus.network.ManagedTerrainStatusPayload;
 import com.yucareux.tellus.network.ManagedTerrainViewPayload;
+import com.yucareux.tellus.network.TellusClientHelloPayload;
+import com.yucareux.tellus.network.TellusProtocol;
+import com.yucareux.tellus.network.TellusServerHelloPayload;
+import com.yucareux.tellus.network.TellusTeleportPolicy;
 import com.yucareux.tellus.platform.TellusPlatform;
 import com.yucareux.tellus.platform.TellusRuntimePlatform;
+import com.yucareux.tellus.server.PlayerActionCooldown;
 import com.yucareux.tellus.world.realtime.TellusRealtimeManager;
 import com.yucareux.tellus.world.realtime.TellusRealtimeState;
 import com.yucareux.tellus.world.realtime.WeatherTemperaturePolicy;
@@ -37,8 +44,11 @@ import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import net.minecraft.ChatFormatting;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
@@ -84,6 +94,21 @@ public class TellusCommon {
    private static final ManagedTerrainDownloadManager MANAGED_TERRAIN_DOWNLOAD_MANAGER = new ManagedTerrainDownloadManager();
    public static final Logger LOGGER = LoggerFactory.getLogger("tellus");
 
+   /** 传送请求的每玩家冷却器；冷却时长每次调用时从 TellusServerConfig 实时读取，因此命令热改立刻生效 */
+   private static final PlayerActionCooldown GEO_TELEPORT_COOLDOWN = new PlayerActionCooldown(System::currentTimeMillis);
+   /** 地形渲染距离上报的每玩家冷却器；同上，冷却时长实时从配置读取 */
+   private static final PlayerActionCooldown TERRAIN_VIEW_COOLDOWN = new PlayerActionCooldown(System::currentTimeMillis);
+   /**
+    * 等待下发服务端握手包的玩家 → 重试截止时间戳（单位：毫秒）。
+    *
+    * 说明：Fabric 客户端在收到 GameJoin 包之前无法向服务端声明自己注册了哪些通道，
+    *       而服务端的玩家加入事件与它几乎同时发生，因此不能在加入的那一 tick 就假设通道已就绪。
+    *       这里先登记，再由每 tick 的派发逻辑重试，直到发出或超时。
+    */
+   private static final Map<UUID, Long> PENDING_SERVER_HELLO = new ConcurrentHashMap<>();
+   /** 握手包的重试窗口，单位：毫秒；超过这个时间仍未发出就放弃，避免对不兼容客户端无限重试 */
+   private static final long SERVER_HELLO_RETRY_WINDOW_MS = 10_000L;
+
 
    public static void validateRuntime() {
       ExperimentalHeightSupport.validateActiveRuntimeProfileOrThrow();
@@ -95,7 +120,7 @@ public class TellusCommon {
                ((Commands.literal("tellus")
                         .then(
                            (Commands.literal("map")
-                                 .requires(TellusMinecraftCompat::hasGamemasterPermission))
+                                 .requires(TellusCommon::canOpenGeoTpMap))
                               .executes(context -> openGeoTpMap((CommandSourceStack)context.getSource()))
                         ))
                      .then(
@@ -154,6 +179,36 @@ public class TellusCommon {
                                        )
                                  )
                            ))
+                           .then(
+                              Commands.literal("geotp")
+                                 .then(
+                                    Commands.literal("policy")
+                                       .then(
+                                          Commands.literal("op_only")
+                                             .executes(
+                                                context -> setGeoTpPolicy(
+                                                   (CommandSourceStack)context.getSource(), TellusTeleportPolicy.OP_ONLY
+                                                )
+                                             )
+                                       )
+                                       .then(
+                                          Commands.literal("everyone")
+                                             .executes(
+                                                context -> setGeoTpPolicy(
+                                                   (CommandSourceStack)context.getSource(), TellusTeleportPolicy.EVERYONE
+                                                )
+                                             )
+                                       )
+                                       .then(
+                                          Commands.literal("disabled")
+                                             .executes(
+                                                context -> setGeoTpPolicy(
+                                                   (CommandSourceStack)context.getSource(), TellusTeleportPolicy.DISABLED
+                                                )
+                                             )
+                                       )
+                                 )
+                           )
                         .then(
                            ((((Commands.literal("voxy")
                                           .then(Commands.literal("status").executes(context -> showVoxyPregenStatus((CommandSourceStack)context.getSource()))))
@@ -211,7 +266,13 @@ public class TellusCommon {
          REALTIME_MANAGER.onServerStopping(server);
          VOXY_PREGEN_MANAGER.shutdown();
          MANAGED_TERRAIN_DOWNLOAD_MANAGER.reset();
+         // 清空联机相关的每玩家状态，避免服务器重载后残留上一局的冷却记录与待发握手
+         GEO_TELEPORT_COOLDOWN.clear();
+         TERRAIN_VIEW_COOLDOWN.clear();
+         PENDING_SERVER_HELLO.clear();
       });
+      // 每 tick 尝试把还没发出的服务端握手包补发出去（客户端声明通道存在时序竞争，见 PENDING_SERVER_HELLO 的说明）
+      runtime.onServerTick(TellusCommon::dispatchPendingServerHellos);
       runtime.onServerTick(REALTIME_MANAGER::onServerTick);
       runtime.onServerTick(VOXY_PREGEN_MANAGER::onServerTick);
       runtime.onServerTick(MANAGED_TERRAIN_DOWNLOAD_MANAGER::onServerTick);
@@ -238,7 +299,17 @@ public class TellusCommon {
          }
       });
       runtime.onPlayerJoin(REALTIME_MANAGER::onPlayerJoin);
+      // 玩家一进游戏就登记「待发服务端握手包」：此刻客户端的通道声明可能还没到，交给每 tick 的重试逻辑
+      runtime.onPlayerJoin((server, player) -> PENDING_SERVER_HELLO.put(
+         player.getUUID(), System.currentTimeMillis() + SERVER_HELLO_RETRY_WINDOW_MS
+      ));
       runtime.onPlayerDisconnect(MANAGED_TERRAIN_DOWNLOAD_MANAGER::onPlayerDisconnect);
+      // 玩家离线时清掉本局的冷却记录与待发握手，避免内存里残留无用条目
+      runtime.onPlayerDisconnect(player -> {
+         GEO_TELEPORT_COOLDOWN.release(player.getUUID());
+         TERRAIN_VIEW_COOLDOWN.release(player.getUUID());
+         PENDING_SERVER_HELLO.remove(player.getUUID());
+      });
       if (TellusPlatform.isModLoaded("distanthorizons")) {
          DistantHorizonsIntegration.bootstrap();
       }
@@ -613,7 +684,20 @@ public class TellusCommon {
       return String.format(Locale.ROOT, "UTC%+03d:%02d", hours, minutes);
    }
 
+   /**
+    * 处理服务端收到的经纬度传送请求。
+    *
+    * 输入：客户端发来的传送包与发起请求的玩家。
+    * 输出：无返回值；满足条件时把玩家传送到目标地表坐标。
+    * 边界条件：先做频率限制，再做权限 / 策略校验；两者任一不通过都只发一条提示并放弃。
+    *          顺序刻意是「先限流后鉴权」，这样未授权玩家刷包时不会反复触发权限判断。
+    */
    public static void handleGeoTeleport(GeoTpTeleportPayload payload, ServerPlayer player) {
+      // 喵~防御：payload 或玩家为空说明调用链出了问题，直接返回而不是继续解引用
+      if (payload == null || player == null) {
+         return;
+      }
+      // 坐标必须是有限值，否则下面的地表换算会产生非法坐标
       if (Double.isFinite(payload.latitude()) && Double.isFinite(payload.longitude())) {
          MinecraftServer server = MinecraftVersionCompat.serverLevel(player).getServer();
          if (server == null) {
@@ -621,7 +705,18 @@ public class TellusCommon {
          }
 
          server.execute(() -> {
-            if (!TellusMinecraftCompat.hasGamemasterPermission(player.createCommandSourceStack())) {
+            // 频率限制：冷却期内直接拒绝并提示，防止改包客户端反复刷传送请求
+            if (!GEO_TELEPORT_COOLDOWN.tryAcquire(player.getUUID(), TellusServerConfig.teleportCooldownMs())) {
+               player.sendSystemMessage(Component.translatable("tellus.geotp.rate_limited"));
+               return;
+            }
+            // 策略为「完全禁用」时连 OP 也不放行，用专门的提示语说明是服主关掉了功能
+            if (TellusServerConfig.teleportPolicy() == TellusTeleportPolicy.DISABLED) {
+               player.sendSystemMessage(Component.translatable("tellus.geotp.disabled"));
+               return;
+            }
+            // 策略为「仅 OP」时校验权限；「所有人可用」会在 canUseGeoTeleport 内直接放行
+            if (!canUseGeoTeleport(player)) {
                player.sendSystemMessage(Component.translatable("tellus.command.geotp.no_permission"));
                return;
             }
@@ -639,8 +734,241 @@ public class TellusCommon {
       }
    }
 
+   /**
+    * 处理客户端上报的地形渲染距离。
+    *
+    * 输入：客户端发来的距离包与上报的玩家。
+    * 输出：无返回值；通过校验后把请求交给下载管理器（管理器自身会把距离夹取到 32..4096）。
+    * 边界条件：冷却期内静默丢弃，**不发提示**——这是每 2 秒一次的高频包，
+    *          若每次都回一条消息，反而会放大恶意刷包的伤害。
+    */
    public static void handleManagedTerrainView(ManagedTerrainViewPayload payload, ServerPlayer player) {
+      // 喵~防御：payload 或玩家为空时直接返回
+      if (payload == null || player == null) {
+         return;
+      }
+      // 频率限制：冷却期内静默丢弃，不做任何回包
+      if (!TERRAIN_VIEW_COOLDOWN.tryAcquire(player.getUUID(), TellusServerConfig.terrainViewCooldownMs())) {
+         return;
+      }
       MANAGED_TERRAIN_DOWNLOAD_MANAGER.updateViewDistance(player, payload.renderRadiusChunks());
+   }
+
+   /**
+    * 处理客户端握手包。
+    *
+    * 输入：客户端上报的协议版本与模组版本，以及发起握手的玩家。
+    * 输出：无返回值。协议不匹配时把该玩家踢下线；匹配时立刻回发服务端握手包。
+    * 边界条件：客户端在发出握手包时，它自己的通道声明必然已经完成（否则它发不出来），
+    *          因此这里回发是安全的，不需要走 pending 重试。
+    */
+   public static void handleClientHello(TellusClientHelloPayload payload, ServerPlayer player) {
+      // 喵~防御：空值直接返回
+      if (payload == null || player == null) {
+         return;
+      }
+      // 取服务端实例，拿不到说明玩家所在世界还没绑定服务器
+      MinecraftServer server = MinecraftVersionCompat.serverLevel(player).getServer();
+      if (server == null) {
+         return;
+      }
+      // 切回主线程执行，避免在网络线程里操作世界与玩家状态
+      server.execute(() -> {
+         // 协议不兼容：按主人的要求直接踢出，并在断开原因里写清双方版本，方便玩家自行核对
+         if (!TellusProtocol.isCompatible(payload.protocolVersion())) {
+            TellusMinecraftCompat.disconnectPlayer(
+               player,
+               Component.translatable(
+                  "tellus.multiplayer.protocol_mismatch",
+                  Integer.toString(payload.protocolVersion()),
+                  Integer.toString(TellusProtocol.PROTOCOL_VERSION)
+               )
+            );
+            // 已被踢下线，清掉待发登记，避免重试逻辑继续对着一个已断开的连接发包
+            PENDING_SERVER_HELLO.remove(player.getUUID());
+            return;
+         }
+         // 协议匹配：立刻回发服务端握手包，并清掉待发登记
+         TellusPlatform.sendServerHelloPayload(player, buildServerHelloPayload(player));
+         PENDING_SERVER_HELLO.remove(player.getUUID());
+      });
+   }
+
+   /**
+    * 判断某个玩家本人当前是否有权使用传送。
+    *
+    * 输入：目标玩家。
+    * 输出：有权返回 true，否则 false。
+    * 边界条件：玩家为 null、策略为 DISABLED、或策略为 OP_ONLY 而该玩家不是 OP，都返回 false。
+    *
+    * 说明：本方法同时被传送校验与握手包使用，保证「服务端实际放行」与「下发给客户端的提示」
+    *       永远基于同一套判定，不会出现「按钮亮着但服务端拒绝」这类逻辑漂移。
+    */
+   public static boolean canUseGeoTeleport(ServerPlayer player) {
+      // 喵~防御：空玩家无从判断权限
+      if (player == null) {
+         return false;
+      }
+      // 读一次当前策略，避免多次读取期间配置被改导致判定不一致
+      TellusTeleportPolicy policy = TellusServerConfig.teleportPolicy();
+      // 完全禁用时任何人都不能传送
+      if (policy == TellusTeleportPolicy.DISABLED) {
+         return false;
+      }
+      // 所有人可用时无需再查权限
+      if (policy == TellusTeleportPolicy.EVERYONE) {
+         return true;
+      }
+      // 默认档位：仅 OP
+      return TellusMinecraftCompat.hasGamemasterPermission(player.createCommandSourceStack());
+   }
+
+   /**
+    * 判断某个命令来源是否可以打开传送地图界面。
+    *
+    * 输入：命令来源（可能是玩家，也可能是命令方块 / 控制台）。
+    * 输出：允许打开返回 true，否则 false。
+    * 边界条件：来源为 null、策略为 DISABLED、或策略为 OP_ONLY 而来源没有权限，都返回 false。
+    *
+    * 说明：命令来源未必是玩家，所以这里不能复用 canUseGeoTeleport（它要求 ServerPlayer）。
+    */
+   public static boolean canOpenGeoTpMap(CommandSourceStack source) {
+      // 喵~防御：空来源直接拒绝
+      if (source == null) {
+         return false;
+      }
+      // 读一次当前策略
+      TellusTeleportPolicy policy = TellusServerConfig.teleportPolicy();
+      // 完全禁用时谁都不能开地图
+      if (policy == TellusTeleportPolicy.DISABLED) {
+         return false;
+      }
+      // 所有人可用时无需再查权限
+      if (policy == TellusTeleportPolicy.EVERYONE) {
+         return true;
+      }
+      // 默认档位：仅 OP
+      return TellusMinecraftCompat.hasGamemasterPermission(source);
+   }
+
+   /**
+    * 设置传送策略并落盘。
+    *
+    * 输入：命令来源与新的策略。
+    * 输出：命令返回值（恒为 1，表示执行成功）。
+    * 边界条件：策略为 null 时回退到默认档位，由 TellusServerConfig 内部保证。
+    *
+    * 主人注意：本命令的注册刻意**只要求 OP、且不读取传送策略**，
+    *          否则把策略设成 DISABLED 之后连 OP 都无法再改回来，会形成自锁。
+    */
+   private static int setGeoTpPolicy(CommandSourceStack source, TellusTeleportPolicy policy) {
+      // 写入配置并落盘，下一次传送校验立刻生效
+      TellusServerConfig.setTeleportPolicy(policy);
+      // 把生效后的策略名回显给执行者，方便确认
+      source.sendSuccess(
+         () -> Component.translatable(
+            "tellus.command.config.geotp_policy_set", TellusServerConfig.teleportPolicy().configName()
+         ),
+         true
+      );
+      // 返回 1 表示命令执行成功
+      return 1;
+   }
+
+   /**
+    * 把还没发出的服务端握手包补发出去。
+    *
+    * 输入：当前服务器实例。
+    * 输出：无返回值。
+    * 边界条件：玩家已离线时直接清掉登记；超过重试窗口仍发不出去（对端不认这个通道）时放弃并记一条 debug 日志。
+    *
+    * 说明：Fabric 客户端的通道声明包与「玩家加入」事件几乎同时发生，
+    *       因此不能在加入那一刻就假设通道就绪，必须靠每 tick 重试。
+    *       这里遍历的是快照，避免在迭代过程中修改 Map 触发并发问题。
+    */
+   private static void dispatchPendingServerHellos(MinecraftServer server) {
+      // 没有待发任务时立刻返回，避免每个 tick 都做无谓的遍历
+      if (PENDING_SERVER_HELLO.isEmpty() || server == null) {
+         return;
+      }
+      // 取当前时间戳，单位：毫秒，用于判断是否超过重试窗口
+      long nowMs = System.currentTimeMillis();
+      // 复制一份条目快照再遍历，允许在循环内安全地移除条目
+      for (Map.Entry<UUID, Long> entry : List.copyOf(PENDING_SERVER_HELLO.entrySet())) {
+         // 待发玩家身份
+         UUID playerId = entry.getKey();
+         // 该玩家的重试截止时间戳，单位：毫秒
+         long deadlineMs = entry.getValue();
+         // 按 UUID 取出在线玩家对象；已离线时为 null
+         ServerPlayer player = server.getPlayerList().getPlayer(playerId);
+         // 喵~防御：玩家已经离线，清掉登记即可
+         if (player == null) {
+            PENDING_SERVER_HELLO.remove(playerId);
+            continue;
+         }
+         // 尝试下发；成功（对端已声明通道）就移除登记，不再重试
+         if (TellusPlatform.sendServerHelloPayload(player, buildServerHelloPayload(player))) {
+            PENDING_SERVER_HELLO.remove(playerId);
+            continue;
+         }
+         // 超过重试窗口仍未成功，说明对端根本不认识这个通道（未装模组或版本过旧），放弃并记录
+         if (nowMs > deadlineMs) {
+            PENDING_SERVER_HELLO.remove(playerId);
+            LOGGER.debug(
+               "Gave up sending the TellusCN handshake to {} (the client never declared the channel)",
+               player.getName().getString()
+            );
+         }
+      }
+   }
+
+   /**
+    * 组装发给某个玩家的服务端握手包。
+    *
+    * 输入：目标玩家。
+    * 输出：填好协议版本、模组版本、传送策略、该玩家本人能否传送、世界缩放等信息的握手包。
+    * 边界条件：玩家不在 Tellus 地球世界时，世界缩放与实验高度退回默认值，其余字段照常下发。
+    */
+   private static TellusServerHelloPayload buildServerHelloPayload(ServerPlayer player) {
+      // 先尝试取该玩家所在世界的地球生成器设置；不是地球世界时为 null
+      EarthGeneratorSettings settings = resolvePlayerEarthSettings(player);
+      // 世界缩放：拿不到设置时退回官方默认值，保证客户端不会因为 0 而算崩
+      double worldScale = settings == null ? EarthGeneratorSettings.DEFAULT.worldScale() : settings.worldScale();
+      // 是否开启实验性提升高度：拿不到设置时按关闭处理
+      boolean experimentalHeight = settings != null && settings.experimentalIncreaseHeight();
+      // 逐个字段组装握手包
+      return new TellusServerHelloPayload(
+         TellusProtocol.PROTOCOL_VERSION,
+         TellusPlatform.modVersion(),
+         TellusServerConfig.teleportPolicy(),
+         canUseGeoTeleport(player),
+         worldScale,
+         experimentalHeight,
+         MirrorConfig.isEnabled()
+      );
+   }
+
+   /**
+    * 取某个玩家所在世界的地球生成器设置。
+    *
+    * 输入：目标玩家。
+    * 输出：玩家所在世界的 EarthChunkGenerator 设置；不是地球世界或玩家为空时返回 null。
+    * 边界条件：绝不抛异常，任何异常都按「不是地球世界」处理。
+    */
+   private static EarthGeneratorSettings resolvePlayerEarthSettings(ServerPlayer player) {
+      // 喵~防御：空玩家直接返回 null
+      if (player == null) {
+         return null;
+      }
+      // 取玩家所在的服务端世界，失败时按「不是地球世界」处理
+      try {
+         ServerLevel level = MinecraftVersionCompat.serverLevel(player);
+         return level.getChunkSource().getGenerator() instanceof EarthChunkGenerator earthGenerator
+            ? earthGenerator.settings()
+            : null;
+      } catch (RuntimeException error) {
+         return null;
+      }
    }
 
    private static EarthChunkGenerator resolveEarthGenerator(CommandSourceStack source) {

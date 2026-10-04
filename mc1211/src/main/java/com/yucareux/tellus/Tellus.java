@@ -5,6 +5,8 @@ import com.yucareux.tellus.network.GeoTpOpenMapPayload;
 import com.yucareux.tellus.network.GeoTpTeleportPayload;
 import com.yucareux.tellus.network.ManagedTerrainStatusPayload;
 import com.yucareux.tellus.network.ManagedTerrainViewPayload;
+import com.yucareux.tellus.network.TellusClientHelloPayload;
+import com.yucareux.tellus.network.TellusServerHelloPayload;
 import com.yucareux.tellus.network.TellusWeatherPayload;
 import com.yucareux.tellus.platform.FabricTellusRuntimePlatform;
 import com.yucareux.tellus.worldgen.EarthBiomeSource;
@@ -33,11 +35,18 @@ public final class Tellus extends TellusCommon implements ModInitializer {
       PayloadTypeRegistry.playS2C().register(GeoTpOpenMapPayload.TYPE, Objects.requireNonNull(GeoTpOpenMapPayload.CODEC.cast(), "geoTpOpenMapCodec"));
       PayloadTypeRegistry.playS2C().register(TellusWeatherPayload.TYPE, Objects.requireNonNull(TellusWeatherPayload.CODEC.cast(), "tellusWeatherCodec"));
       PayloadTypeRegistry.playS2C().register(ManagedTerrainStatusPayload.TYPE, Objects.requireNonNull(ManagedTerrainStatusPayload.CODEC.cast(), "managedTerrainStatusCodec"));
+      // 联机握手：客户端上报自己的协议版本，服务端回发自己的协议版本与传送策略
+      PayloadTypeRegistry.playC2S().register(TellusClientHelloPayload.TYPE, Objects.requireNonNull(TellusClientHelloPayload.CODEC.cast(), "tellusClientHelloCodec"));
+      PayloadTypeRegistry.playS2C().register(TellusServerHelloPayload.TYPE, Objects.requireNonNull(TellusServerHelloPayload.CODEC.cast(), "tellusServerHelloCodec"));
       ServerPlayNetworking.registerGlobalReceiver(
          GeoTpTeleportPayload.TYPE, (payload, context) -> TellusCommon.handleGeoTeleport(payload, context.player())
       );
       ServerPlayNetworking.registerGlobalReceiver(
          ManagedTerrainViewPayload.TYPE, (payload, context) -> TellusCommon.handleManagedTerrainView(payload, context.player())
+      );
+      // 接收客户端的握手包：协议不匹配时会把该玩家踢下线，匹配则回发服务端握手包
+      ServerPlayNetworking.registerGlobalReceiver(
+         TellusClientHelloPayload.TYPE, (payload, context) -> TellusCommon.handleClientHello(payload, context.player())
       );
       TellusCommon.initializeRuntime(new FabricTellusRuntimePlatform());
    }

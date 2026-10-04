@@ -3,6 +3,7 @@ package com.yucareux.tellus;
 import com.yucareux.tellus.compat.MinecraftRelease;
 import com.yucareux.tellus.network.GeoTpTeleportPayload;
 import com.yucareux.tellus.network.ManagedTerrainViewPayload;
+import com.yucareux.tellus.network.TellusClientHelloPayload;
 import com.yucareux.tellus.platform.FabricTellusRuntimePlatform;
 import com.yucareux.tellus.worldgen.EarthBiomeSource;
 import com.yucareux.tellus.worldgen.EarthChunkGenerator;
@@ -30,6 +31,11 @@ public final class Tellus extends TellusCommon implements ModInitializer {
       ServerPlayNetworking.registerGlobalReceiver(
          ManagedTerrainViewPayload.TYPE,
          (payload, player, responseSender) -> TellusCommon.handleManagedTerrainView(payload, player)
+      );
+      // 接收客户端的握手包：协议不匹配时会把该玩家踢下线，匹配则回发服务端握手包
+      ServerPlayNetworking.registerGlobalReceiver(
+         TellusClientHelloPayload.TYPE,
+         (payload, player, responseSender) -> TellusCommon.handleClientHello(payload, player)
       );
       TellusCommon.initializeRuntime(new FabricTellusRuntimePlatform());
    }
