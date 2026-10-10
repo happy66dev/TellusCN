@@ -31,6 +31,10 @@ Server support note: Tellus must be installed on the server, but is not required
 - Distant Horizons integration for long-distance terrain rendering
 - In-game map teleport UI for choosing real-world locations
 
+## Future Plans
+
+- **Per-location time and weather (design draft)**: In multiplayer on a single seamless Overworld, in-game time and weather are currently one shared, server-wide value sampled from the midpoint of all online players. A planned overhaul will let time and weather — including gameplay effects such as mob spawning, sky brightness, rain physics, and lightning — vary by each location's real-world coordinates, so players far apart can experience different local conditions at the same moment. The design keeps the seamless single world (no per-region dimensions), adds a position-aware environment layer that routes vanilla time/weather/brightness reads through per-coordinate lookups, uses continuous-longitude local time and coarse weather cells with soft transitions, and ships behind a `realtimeLocalized` toggle (off by default) for mod compatibility. Full design and finalized decisions: [docs/realtime-localized-time-weather-spec.md](docs/realtime-localized-time-weather-spec.md).
+
 ## Third-Party Code
 
 Tellus includes code derived from Arnis.
