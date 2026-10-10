@@ -86,10 +86,9 @@ These options are available in the "Customize World Generation" screen when crea
 - **Min Altitude**: Lower world limit in blocks. Set to Automatic to let Tellus compute a safe floor based on your scale settings.
 - **Water**: Uses Overture Maps `ocean`/`sea` polygons as the sole ocean and coastline authority. Rivers and lakes retain their own Overture feature kinds, and ocean floors use OpenWaters bathymetry with a corrective coastal safety ramp.
 
-### Ecological Settings (work in progress)
-These options are currently locked and not adjustable yet. They describe what will be configurable in a future update.
-- **Tree Density**: Will control how many trees spawn in eligible biomes.
-- **Aquatic Vegetation**: Will enable kelp and seagrass in water.
+### Ecological Settings
+- **Tree Density**: Controls how many trees spawn in eligible biomes, as a percentage slider. At 100% (the default) individual tree placement cells are kept or dropped according to the real-world canopy cover sampled from the ETH canopy-height and ESA WorldCover rasters, so closed forest, open woodland, and scrub stop looking identical. Lower values thin trees further (0% removes procedural trees entirely); 200% keeps every cell, matching the dense look of earlier builds. The value is chosen in the "Customize World Generation" screen and saved with the world. Chunk generation and Distant Horizons fast LODs share one anchor grid and one decision function, so distant trees stay aligned with full chunks.
+- **Aquatic Vegetation** (work in progress): This option is currently locked and not adjustable yet. It will enable kelp and seagrass in water.
 
 ### Geological Settings
 The cave and underground generation system is still work in progress, so expect changes here.

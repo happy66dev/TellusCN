@@ -16,6 +16,8 @@ import com.yucareux.tellus.world.data.osm.TellusOsmInfrastructureSource;
 import com.yucareux.tellus.world.data.osm.TellusOsmRoadSource;
 import com.yucareux.tellus.world.data.osm.TellusOsmSandSource;
 import com.yucareux.tellus.world.data.osm.TellusOsmWaterSource;
+import com.yucareux.tellus.worldgen.tree.TellusProceduralTreeGenerator;
+import com.yucareux.tellus.worldgen.tree.TreeDensityPolicy;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -66,8 +68,76 @@ public final class TellusWorldgenSources {
    private static final ThreadPoolExecutor LOD_PREFETCH_EXECUTOR = createLodPrefetchExecutor();
    private static final ExecutorService TERRAIN_DETAIL_EXECUTOR = createTerrainDetailExecutor();
    private static final ConcurrentMap<EarthGeneratorSettings, WaterSurfaceResolver> WATER_RESOLVERS = new ConcurrentHashMap<>();
+   // 树木密度缓存的最大条目数，单位：条；超出后整体清空，避免长时间运行占用过多内存喵。
+   private static final int TREE_DENSITY_CACHE_LIMIT = 65536;
+   // 树木密度按放置格缓存，键是放置格坐标与比例尺；密度只取决于世界坐标与比例尺、与世界种子无关，
+   // 所以这份缓存跨存档复用也是安全的喵。
+   private static final ConcurrentMap<Long, TreeDensityPolicy.Density> TREE_DENSITY_CACHE = new ConcurrentHashMap<>();
 
    private TellusWorldgenSources() {
+   }
+
+   /**
+    * 采样某个位置的真实世界树木密度喵。
+    *
+    * <p>整体思路：用"一个树木放置格的物理宽度"作为统计窗口，分别向冠层高度栅格与
+    * 土地覆盖栅格各取一次覆盖率，再交给 {@link TreeDensityPolicy} 融合成密度喵。
+    * 完整区块生成与远景 LOD 都必须走这一个入口，否则两边的树量会对不上喵。</p>
+    *
+    * <p>输入：世界坐标与地图比例尺。<br>
+    * 输出：融合后的密度；任何一路数据缺失都会被安全降级。边界条件：比例尺非法时
+    * 立即返回不可用密度，调用方据此按"保留"处理。削减强度由各调用方按世界设置的
+    * 树木密度倍率叠加，本函数只负责产出"自然密度"喵。</p>
+    *
+    * @param blockX    采样点在世界坐标中的 X，单位：方块喵
+    * @param blockZ    采样点在世界坐标中的 Z，单位：方块喵
+    * @param worldScale 地图比例尺，即一个方块代表多少米喵
+    * @return 融合后的树木密度喵
+    */
+   public static TreeDensityPolicy.Density sampleTreeDensity(int blockX, int blockZ, double worldScale) {
+      // 喵~防御：比例尺非法（NaN、非正、无穷）时退化为不可用，避免窗口宽度变成非法值喵。
+      if (!Double.isFinite(worldScale) || worldScale <= 0.0) {
+         return TreeDensityPolicy.Density.unavailable();
+      }
+
+      // 把采样点归到它所属的放置格，作为缓存键的一部分喵。
+      int cellX = Math.floorDiv(blockX, TellusProceduralTreeGenerator.PLACEMENT_CELL_SIZE);
+      // 放置格的 Z 索引，单位：格喵。
+      int cellZ = Math.floorDiv(blockZ, TellusProceduralTreeGenerator.PLACEMENT_CELL_SIZE);
+      // 缓存键：把两个 32 位格坐标与比例尺的位模式拼成一个 64 位键，避免额外分配对象喵。
+      long cacheKey = ((long)cellX << 32) ^ (cellZ & 0xFFFFFFFFL) ^ Double.doubleToLongBits(worldScale);
+      // 先查缓存；同一放置格内的重复调用（完整区块与 LOD 都会重复问）直接复用结果喵。
+      TreeDensityPolicy.Density cached = TREE_DENSITY_CACHE.get(cacheKey);
+      if (cached != null) {
+         return cached;
+      }
+
+      // 统计窗口取一个放置格的物理宽度，单位：米；这样密度反映的正是"这一格所在林分的疏密"喵。
+      double windowMeters = TellusProceduralTreeGenerator.PLACEMENT_CELL_SIZE * worldScale;
+      // 取该位置的冠层采样，并顺带拿到窗口覆盖率喵。
+      TellusCanopyHeightSource.CanopySample canopy = CANOPY_HEIGHT.sampleCanopy(
+         blockX, blockZ, worldScale, worldScale, windowMeters
+      );
+      // 冠层覆盖率只在采样可用时才有效，否则标记为不可用喵。
+      boolean canopyAvailable = canopy != null && canopy.available();
+      // 冠层覆盖率，单位：无量纲比例；不可用时传 0，融合函数会忽略它喵。
+      double canopyFraction = canopyAvailable ? canopy.coverFraction() : 0.0;
+      // 取土地覆盖栅格给出的森林覆盖率，单位：无量纲比例；负数表示未知喵。
+      double worldCoverFraction = LAND_COVER.sampleTreeCoverFraction(blockX, blockZ, worldScale, windowMeters);
+      // 覆盖率大于等于 0 才视为可用，-1 哨兵值代表未知喵。
+      boolean worldCoverAvailable = worldCoverFraction >= 0.0;
+      // 把两路信号融合成最终密度喵。
+      TreeDensityPolicy.Density density = TreeDensityPolicy.fuse(
+         canopyAvailable, canopyFraction, worldCoverAvailable, worldCoverFraction
+      );
+      // 主人注意：这份缓存没有淘汰策略，只在超过上限时整体清空喵；如果将来把密度采样接进
+      // 每帧预览渲染，请改成带 LRU 的实现，否则可能每秒清空一次缓存反而更慢喵。
+      if (TREE_DENSITY_CACHE.size() >= TREE_DENSITY_CACHE_LIMIT) {
+         TREE_DENSITY_CACHE.clear();
+      }
+      // 写入缓存后再返回，保证同一放置格在完整区块与 LOD 得到完全一致的密度喵。
+      TREE_DENSITY_CACHE.put(cacheKey, density);
+      return density;
    }
 
    static TellusLandCoverSource landCover() {

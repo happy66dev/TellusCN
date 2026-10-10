@@ -457,6 +457,8 @@ public class EarthCustomizeScreen extends EarthCustomizeScreenVersionCompat {
       boolean climateBasedBuiltUpTerrain = this.findToggleValue("climate_based_built_up_terrain", EarthGeneratorSettings.DEFAULT.climateBasedBuiltUpTerrain());
       boolean customTrees = this.findToggleValue("custom_trees", EarthGeneratorSettings.DEFAULT.customTrees());
       boolean hugeRedMushrooms = this.findToggleValue("huge_red_mushrooms", EarthGeneratorSettings.DEFAULT.hugeRedMushrooms());
+      // 读取树木密度滑条（界面是 0..200 的百分比），再除以 100 换算成 [0,2] 的强度倍率喵。
+      double treeDensity = this.findSliderValue("trees_density", EarthGeneratorSettings.DEFAULT.treeDensity() * 100.0) / 100.0;
       boolean randomBiomes = this.findToggleValue("random_biomes", EarthGeneratorSettings.DEFAULT.randomBiomes());
       double randomBiomeDensity = this.findSliderValue("random_biome_density", EarthGeneratorSettings.DEFAULT.randomBiomeDensity() * 100.0) / 100.0;
       List<String> randomBiomeIds = this.selectedRandomBiomeIds();
@@ -579,7 +581,8 @@ public class EarthCustomizeScreen extends EarthCustomizeScreenVersionCompat {
          undergroundDepth,
          customTrees,
          automaticHeightScaling,
-         hugeRedMushrooms
+         hugeRedMushrooms,
+         treeDensity
       );
    }
 
@@ -629,6 +632,8 @@ public class EarthCustomizeScreen extends EarthCustomizeScreenVersionCompat {
       this.setToggleValue("climate_based_built_up_terrain", initialSettings.climateBasedBuiltUpTerrain());
       this.setToggleValue("custom_trees", initialSettings.customTrees());
       this.setToggleValue("huge_red_mushrooms", initialSettings.hugeRedMushrooms());
+      // 把已有存档里的树木密度倍率（[0,2]）还原成界面上的百分比滑条（0..200）喵。
+      this.setSliderValue("trees_density", initialSettings.treeDensity() * 100.0);
       this.setToggleValue("random_biomes", initialSettings.randomBiomes());
       this.setSliderValue("random_biome_density", initialSettings.randomBiomeDensity() * 100.0);
       this.randomBiomeSeed = initialSettings.randomBiomeSeed();
@@ -810,7 +815,7 @@ public class EarthCustomizeScreen extends EarthCustomizeScreenVersionCompat {
                slider("random_biome_density", EarthGeneratorSettings.DEFAULT.randomBiomeDensity() * 100.0, 0.0, 40.0, 1.0).withDisplay(EarthCustomizeScreen::formatPercent),
                toggle("custom_trees", EarthGeneratorSettings.DEFAULT.customTrees()),
                toggle("huge_red_mushrooms", EarthGeneratorSettings.DEFAULT.hugeRedMushrooms()),
-               slider("trees_density", 100.0, 0.0, 200.0, 5.0).withDisplay(EarthCustomizeScreen::formatPercent).locked(true),
+               slider("trees_density", EarthGeneratorSettings.DEFAULT.treeDensity() * 100.0, 0.0, 200.0, 5.0).withDisplay(EarthCustomizeScreen::formatPercent),
                toggle("aquatic_vegetation", true).locked(true)
             )
          )

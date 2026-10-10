@@ -45,6 +45,7 @@ import com.yucareux.tellus.worldgen.building.TellusBuildingLighting;
 import com.yucareux.tellus.worldgen.building.TellusBuildingMaterials;
 import com.yucareux.tellus.worldgen.building.TellusBuildingProfiles;
 import com.yucareux.tellus.worldgen.tree.TellusProceduralTreeGenerator;
+import com.yucareux.tellus.worldgen.tree.TreeDensityPolicy;
 import it.unimi.dsi.fastutil.ints.IntArrayList;
 import java.io.InterruptedIOException;
 import java.io.IOException;
@@ -4300,11 +4301,53 @@ public final class TellusLodGenerator implements IDhApiWorldGenerator {
          return true;
       } else if (underwater || !profile.hasCanopy()) {
          return false;
+      } else if (!shouldKeepTreeAtDensity(settings, worldX, worldZ, worldSeed)) {
+         // 密度不足时直接不生成该列树冠，保证远景树量与完整区块一致喵。
+         return false;
       } else if (coverClass == ESA_TREE_COVER) {
          return true;
       } else {
          return shouldAllowRandomBiomeCanopy(settings, coverClass, worldX, worldZ, worldSeed);
       }
+   }
+
+   /**
+    * 用真实世界树木密度判定该 LOD 列所属的放置格是否保留树喵。
+    *
+    * <p>整体思路：先算出该列落在哪个放置格里，再用与完整区块完全相同的锚点函数
+    * 取出该格的锚点位置与种子，然后对锚点位置采样密度并做确定性判定。
+    * 因为判定只依赖放置格，同一格内的所有 LOD 列会得到相同结果，也就与完整区块对齐喵。</p>
+    *
+    * <p>边界条件：非程序化树木模式、或数据缺失且树木密度倍率为 1.0 时一律返回 true，
+    * 保证行为与改动前一致喵。</p>
+    *
+    * @param settings  当前世界生成设置喵
+    * @param worldX    当前 LOD 列的世界 X 坐标，单位：方块喵
+    * @param worldZ    当前 LOD 列的世界 Z 坐标，单位：方块喵
+    * @param worldSeed 世界种子喵
+    * @return true 表示保留该格的树冠喵
+    */
+   private static boolean shouldKeepTreeAtDensity(
+      EarthGeneratorSettings settings, int worldX, int worldZ, long worldSeed
+   ) {
+      // 喵~防御：只有程序化树木有确定性锚点格；原版 feature 树不参与密度削减，保持原样喵。
+      if (!settings.customTrees()) {
+         return true;
+      }
+      // 当前列所属的放置格 X 索引，单位：格喵。
+      int cellX = Math.floorDiv(worldX, TellusProceduralTreeGenerator.PLACEMENT_CELL_SIZE);
+      // 当前列所属的放置格 Z 索引，单位：格喵。
+      int cellZ = Math.floorDiv(worldZ, TellusProceduralTreeGenerator.PLACEMENT_CELL_SIZE);
+      // 取出与完整区块完全相同的锚点，保证判定用的位置与种子两边一致喵。
+      TellusProceduralTreeGenerator.TreeAnchor anchor =
+         TellusProceduralTreeGenerator.anchorForCell(cellX, cellZ, worldSeed);
+      // 主人注意：密度采样在完整生成路径与 LOD 路径都会走同一个按放置格的缓存，
+      // 所以同一格只真正读一次栅格；但稀疏判定开启时 LOD 仍会比满密度时略慢，建议先在单人世界验证观感喵。
+      TreeDensityPolicy.Density density = TellusWorldgenSources.sampleTreeDensity(
+         anchor.worldX(), anchor.worldZ(), settings.worldScale()
+      );
+      // 用锚点种子与世界设置里的树木密度倍率做确定性判定，结果与完整区块的同格判定完全一致喵。
+      return TreeDensityPolicy.keepsTree(density, settings.treeDensity(), anchor.seed());
    }
 
    private static boolean shouldAllowRandomBiomeCanopy(EarthGeneratorSettings settings, int coverClass, int worldX, int worldZ, long worldSeed) {

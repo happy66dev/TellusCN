@@ -48,6 +48,7 @@ import com.yucareux.tellus.worldgen.caves.TellusCaveDepthMapper;
 import com.yucareux.tellus.worldgen.caves.TellusNoiseSettingsAdapter;
 import com.yucareux.tellus.worldgen.caves.TellusVanillaCarverRunner;
 import com.yucareux.tellus.worldgen.tree.TellusProceduralTreeGenerator;
+import com.yucareux.tellus.worldgen.tree.TreeDensityPolicy;
 import it.unimi.dsi.fastutil.ints.IntArrayList;
 import it.unimi.dsi.fastutil.longs.Long2ByteOpenHashMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
@@ -4780,7 +4781,9 @@ public final class EarthChunkGenerator extends EarthChunkGeneratorVersionCompat 
                            Holder<Biome> biome = decorationContext != null ? decorationContext.biome(localX, localZ) : level.getBiome(position);
                            if (!biome.is(Biomes.MANGROVE_SWAMP)) {
                               List<ConfiguredFeature<?, ?>> features = treeFeaturesForBiome(biome, this.settings.hugeRedMushrooms());
-                              if (!features.isEmpty() && this.shouldPlaceTreesForCover(coverClass, biome, worldX, worldZ, seed)) {
+                              if (!features.isEmpty()
+                                 && this.shouldPlaceTreesForCover(coverClass, biome, worldX, worldZ, seed)
+                                 && this.keepsTreeAtDensity(worldX, worldZ, seed)) {
                                  if (!groundState.is(BlockTags.DIRT)) {
                                     level.setBlock(ground, GRASS_BLOCK_STATE, 260);
                                  }
@@ -4869,7 +4872,10 @@ public final class EarthChunkGenerator extends EarthChunkGeneratorVersionCompat 
 
             Holder<Biome> biome = context.sampleBiome(worldX, worldZ, expectedSurface + 1);
             List<ConfiguredFeature<?, ?>> features = treeFeaturesForBiome(biome, this.settings.hugeRedMushrooms());
-            if (biome.is(Biomes.MANGROVE_SWAMP) || features.isEmpty() || !this.shouldPlaceTreesForCover(coverClass, biome, worldX, worldZ, seed)) {
+            if (biome.is(Biomes.MANGROVE_SWAMP)
+               || features.isEmpty()
+               || !this.shouldPlaceTreesForCover(coverClass, biome, worldX, worldZ, seed)
+               || !this.keepsTreeAtDensity(worldX, worldZ, seed)) {
                continue;
             }
 
@@ -4970,8 +4976,35 @@ public final class EarthChunkGenerator extends EarthChunkGeneratorVersionCompat 
       }
    }
 
-   private boolean isNearWater(int worldX, int worldZ, int radius) {
-      for (int dz = -radius; dz <= radius; dz++) {
+   /**
+    * 用真实世界的树冠覆盖度判定这个放置格是否保留一棵树喵。
+    *
+    * <p>输入：放置格的世界坐标与锚点种子。输出：true 表示保留、false 表示跳过喵。</p>
+    *
+    * <p>边界条件：削减强度来自世界设置里的树木密度倍率，默认 1.0（按真实覆盖度稀疏）；
+    * 倍率为 2.0 时等价于"永远保留"，与旧版观感逐字节一致；数据缺失时
+    * {@link TellusWorldgenSources#sampleTreeDensity} 返回不可用密度，
+    * 而不可用密度在倍率 1.0 下 {@link TreeDensityPolicy#keepsTree} 恒为 true喵。</p>
+    *
+    * @param worldX 放置格锚点的世界 X 坐标，单位：方块喵
+    * @param worldZ 放置格锚点的世界 Z 坐标，单位：方块喵
+    * @param seed   该放置格的锚点种子，必须与树形规划使用同一个种子喵
+    * @return true 表示保留该格，false 表示按密度削减掉喵
+    */
+   private boolean keepsTreeAtDensity(int worldX, int worldZ, long seed) {
+      // 喵~防御：只有程序化树木走确定性锚点格，才谈得上按密度削减；原版 feature 树保持原样喵。
+      if (!this.settings.customTrees()) {
+         return true;
+      }
+      // 采样真实世界的"自然密度"；削减强度稍后用世界设置里的倍率叠加喵。
+      TreeDensityPolicy.Density density = TellusWorldgenSources.sampleTreeDensity(
+         worldX, worldZ, this.settings.worldScale()
+      );
+      // 用世界设置里的树木密度倍率叠加判定；数据缺失且倍率为 1.0 时恒返回 true，保持旧行为喵。
+      return TreeDensityPolicy.keepsTree(density, this.settings.treeDensity(), seed);
+   }
+
+   private boolean isNearWater(int worldX, int worldZ, int radius) {      for (int dz = -radius; dz <= radius; dz++) {
          int z = worldZ + dz;
 
          for (int dx = -radius; dx <= radius; dx++) {

@@ -68,6 +68,12 @@ public final class TellusCanopyHeightSource implements TellusCacheHandle {
       8
    );
    private static final long FAILURE_RETRY_NANOS = TimeUnit.SECONDS.toNanos(30L);
+   // 判定"这个像素算有树冠"的最小高度，单位：米；与树木生成器把低于此值的格子降级为灌木的阈值保持一致喵。
+   private static final int COVER_HEIGHT_THRESHOLD_METERS = 2;
+   // 覆盖率采样窗口在单轴上的最少像素数，单位：个；低于 3 个样本的覆盖率噪声过大喵。
+   private static final int MIN_COVER_WINDOW_PIXELS = 3;
+   // 覆盖率采样窗口在单轴上的最多像素数，单位：个；上限用来把每个放置格的开销钉死在常数级喵。
+   private static final int MAX_COVER_WINDOW_PIXELS = 9;
 
    private final String serviceUrl = configuredServiceUrl();
    private final Path cacheRoot = TellusPlatform.gameDir().resolve("tellus/cache/canopy-height-eth-2020-v1/arcgis-living-atlas");
@@ -99,6 +105,29 @@ public final class TellusCanopyHeightSource implements TellusCacheHandle {
       return this.sampleCanopy(blockX, blockZ, worldScale, previewResolutionMeters, managedLookupMode());
    }
 
+   /**
+    * 采样冠层高度，并按指定的物理窗口宽度额外统计树冠覆盖率喵。
+    *
+    * <p>当 {@code coverWindowMeters} 大于 0 时，覆盖率会在一个与该米数相当、但采样点数被钉死在
+    * 常数级的稀疏窗口上统计，这样即使地图比例尺变大也不会让单格开销爆掉喵。
+    * 高度统计仍然只使用原来的 3×3 邻域，保证树高结果与旧版完全一致喵。</p>
+    *
+    * @param blockX                采样点在世界坐标中的 X，单位：方块喵
+    * @param blockZ                采样点在世界坐标中的 Z，单位：方块喵
+    * @param worldScale            地图比例尺，即一个方块代表多少米喵
+    * @param previewResolutionMeters 预览模式下的采样分辨率，单位：米；正常生成时等于 worldScale喵
+    * @param coverWindowMeters     覆盖率统计窗口的物理宽度，单位：米；小于等于 0 时退化为使用 3×3 邻域喵
+    * @return 冠层采样结果，含高度统计与树冠覆盖率喵
+    */
+   public CanopySample sampleCanopy(
+      double blockX, double blockZ, double worldScale, double previewResolutionMeters, double coverWindowMeters
+   ) {
+      // 使用托管的查找模式，与正常生成路径保持一致喵。
+      return this.sampleCanopy(
+         blockX, blockZ, worldScale, previewResolutionMeters, coverWindowMeters, managedLookupMode()
+      );
+   }
+
    public CanopySample sampleCanopyLocalOnly(
       double blockX, double blockZ, double worldScale, double previewResolutionMeters
    ) {
@@ -118,6 +147,18 @@ public final class TellusCanopyHeightSource implements TellusCacheHandle {
       double previewResolutionMeters,
       LookupMode lookupMode
    ) {
+      // 不指定窗口时按旧行为处理，覆盖率直接来自原来的 3×3 邻域喵。
+      return this.sampleCanopy(blockX, blockZ, worldScale, previewResolutionMeters, 0.0, lookupMode);
+   }
+
+   private CanopySample sampleCanopy(
+      double blockX,
+      double blockZ,
+      double worldScale,
+      double previewResolutionMeters,
+      double coverWindowMeters,
+      LookupMode lookupMode
+   ) {
       GeoPoint point = geoPoint(blockX, blockZ, worldScale);
       if (point == null || !withinCoverage(point.longitude(), point.latitude())) {
          return CanopySample.unavailable();
@@ -132,6 +173,8 @@ public final class TellusCanopyHeightSource implements TellusCacheHandle {
       int[] values = new int[9];
       int valueCount = 0;
       int centerHeight = -1;
+      // 3×3 邻域内达到"有树冠"阈值的像素个数，单位：个；它是覆盖率的分子喵。
+      int coverPixelCount = 0;
       for (int dy = -1; dy <= 1; dy++) {
          for (int dx = -1; dx <= 1; dx++) {
             int value = this.sampleGlobalPixel(level, center.globalPixelX() + dx, center.globalPixelY() + dy, lookupMode);
@@ -140,6 +183,10 @@ public final class TellusCanopyHeightSource implements TellusCacheHandle {
             }
             if (value >= 0) {
                values[valueCount++] = value;
+               // 顺手统计有树冠的像素：这一步不产生任何额外 IO，只是把原本读到的数值利用起来喵。
+               if (value >= COVER_HEIGHT_THRESHOLD_METERS) {
+                  coverPixelCount++;
+               }
             }
          }
       }
@@ -157,7 +204,93 @@ public final class TellusCanopyHeightSource implements TellusCacheHandle {
       double percentile90 = percentile(values, valueCount, 0.9);
       double maximum = values[valueCount - 1];
       double centerValue = centerHeight >= 0 ? centerHeight : median;
-      return new CanopySample(true, centerValue, sum / valueCount, median, percentile75, percentile90, maximum, level, valueCount);
+      // 3×3 邻域得出的树冠覆盖率，单位：无量纲比例；它是窗口版覆盖率不可用时的兜底喵。
+      double coverFraction = (double)coverPixelCount / valueCount;
+      if (coverWindowMeters > 0.0) {
+         // 当调用方要求按放置格的物理尺寸统计覆盖率时，改用稀疏大窗口；返回负值表示这窗口里没有任何有效像素喵。
+         double windowCoverFraction = this.sampleWindowCoverFraction(
+            level, center.globalPixelX(), center.globalPixelY(), coverWindowMeters, lookupMode
+         );
+         if (windowCoverFraction >= 0.0) {
+            coverFraction = windowCoverFraction;
+         }
+      }
+      return new CanopySample(
+         true, centerValue, sum / valueCount, median, percentile75, percentile90, maximum, level, valueCount, coverFraction
+      );
+   }
+
+   /**
+    * 在一个稀疏大窗口上统计树冠覆盖率喵。
+    *
+    * <p>整体思路：先把窗口的物理宽度换算成该层级下的像素跨度，再把采样点数夹到
+    * [MIN_COVER_WINDOW_PIXELS, MAX_COVER_WINDOW_PIXELS] 个，用等距步长铺开取点，
+    * 这样无论地图比例尺多大，单次统计的像素读取次数都有上界喵。</p>
+    *
+    * <p>输入：层级、窗口中心像素坐标、窗口物理宽度（米）。<br>
+    * 输出：树冠覆盖率，单位：无量纲比例；窗口内没有任何有效像素时返回 -1。边界条件：
+    * 层级超出原生范围时步长会自然退化，仍然只会读到该层级已有的像素喵。</p>
+    *
+    * @param level             当前采样所用的栅格层级喵
+    * @param centerPixelX      窗口中心的全局像素 X 坐标喵
+    * @param centerPixelY      窗口中心的全局像素 Y 坐标喵
+    * @param coverWindowMeters 窗口的物理宽度，单位：米喵
+    * @param lookupMode        瓦片查找模式，决定是否允许联网补取瓦片喵
+    * @return 覆盖率，单位：无量纲比例；无有效像素时为 -1喵
+    */
+   private double sampleWindowCoverFraction(
+      int level, long centerPixelX, long centerPixelY, double coverWindowMeters, LookupMode lookupMode
+   ) {
+      // 该层级单个像素代表的物理宽度，单位：米喵。
+      double resolutionMeters = resolutionMetersAtLevel(level);
+      // 喵~防御：解析度异常（NaN 或非正）时直接放弃窗口统计，让调用方回退到 3×3 结果喵。
+      if (!(resolutionMeters > 0.0)) {
+         return -1.0;
+      }
+      // 窗口横跨的像素个数，单位：个；至少为 1，避免除零喵。
+      double windowPixels = Math.max(1.0, coverWindowMeters / resolutionMeters);
+      // 把采样点数夹到常数上界，保证每个放置格的开销不随比例尺膨胀喵。
+      int gridSteps = (int)Math.round(windowPixels);
+      gridSteps = Math.max(MIN_COVER_WINDOW_PIXELS, Math.min(MAX_COVER_WINDOW_PIXELS, gridSteps));
+      // 采样点在窗口内的对称半跨度，单位：个采样点喵。
+      double halfSpan = (gridSteps - 1) / 2.0;
+      // 相邻采样点之间的像素步长，单位：像素；窗口像素数小于采样点数时退化为逐像素喵。
+      double stride = windowPixels > gridSteps ? windowPixels / gridSteps : 1.0;
+      // 窗口内有效像素计数（分子分母共用），单位：个喵。
+      int validCount = 0;
+      // 窗口内有树冠的像素计数，单位：个喵。
+      int coveredCount = 0;
+      for (int gridY = 0; gridY < gridSteps; gridY++) {
+         // 当前采样行的像素偏移，单位：像素喵。
+         long offsetY = Math.round((gridY - halfSpan) * stride);
+         for (int gridX = 0; gridX < gridSteps; gridX++) {
+            // 当前采样列的像素偏移，单位：像素喵。
+            long offsetX = Math.round((gridX - halfSpan) * stride);
+            // 读取该偏移处的冠层高度，单位：米；负值表示无数据喵。
+            int value = this.sampleGlobalPixel(level, centerPixelX + offsetX, centerPixelY + offsetY, lookupMode);
+            if (value >= 0) {
+               validCount++;
+               if (value >= COVER_HEIGHT_THRESHOLD_METERS) {
+                  coveredCount++;
+               }
+            }
+         }
+      }
+      // 喵~防御：窗口内一个有效像素都没有时返回 -1，让调用方保留 3×3 的兜底覆盖率喵。
+      return validCount == 0 ? -1.0 : (double)coveredCount / validCount;
+   }
+
+   /**
+    * 计算某一层级下单个像素代表的物理宽度喵。
+    *
+    * @param level 栅格层级喵
+    * @return 像素宽度，单位：米喵
+    */
+   static double resolutionMetersAtLevel(int level) {
+      // 每降一级，像素物理尺寸翻倍，所以用 2 的 (原生层级 - 当前层级) 次方做缩放喵。
+      double levelScale = Math.pow(2.0, NATIVE_LEVEL - level);
+      // 原生像素宽度乘以缩放系数即得当前层级的像素宽度喵。
+      return NATIVE_RESOLUTION_METERS * levelScale;
    }
 
    public void prefetchTiles(
@@ -620,10 +753,12 @@ public final class TellusCanopyHeightSource implements TellusCacheHandle {
       double percentile90Meters,
       double maximumHeightMeters,
       int sourceLevel,
-      int validSampleCount
+      int validSampleCount,
+      double coverFraction
    ) {
-      private static CanopySample unavailable() {
-         return new CanopySample(false, Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, -1, 0);
+      static CanopySample unavailable() {
+         // 不可用时把覆盖率记为 0，调用方据此走"无数据、不削减树木"的回退路径喵。
+         return new CanopySample(false, Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, -1, 0, 0.0);
       }
    }
 
