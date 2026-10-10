@@ -4,6 +4,8 @@ import com.yucareux.tellus.network.GeoTpOpenMapPayload;
 import com.yucareux.tellus.network.GeoTpTeleportPayload;
 import com.yucareux.tellus.network.ManagedTerrainStatusPayload;
 import com.yucareux.tellus.network.ManagedTerrainViewPayload;
+import com.yucareux.tellus.network.TellusClientHelloPayload;
+import com.yucareux.tellus.network.TellusServerHelloPayload;
 import com.yucareux.tellus.network.TellusWeatherPayload;
 import java.util.Objects;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
@@ -33,6 +35,16 @@ public final class FabricNetworkingVersionCompat {
       PayloadTypeRegistry.playS2C().register(
          ManagedTerrainStatusPayload.TYPE,
          Objects.requireNonNull(ManagedTerrainStatusPayload.CODEC.cast(), "managedTerrainStatusCodec")
+      );
+      // 客户端握手包：客户端 → 服务端方向
+      PayloadTypeRegistry.playC2S().register(
+         TellusClientHelloPayload.TYPE,
+         Objects.requireNonNull(TellusClientHelloPayload.CODEC.cast(), "tellusClientHelloCodec")
+      );
+      // 服务端握手包：服务端 → 客户端方向
+      PayloadTypeRegistry.playS2C().register(
+         TellusServerHelloPayload.TYPE,
+         Objects.requireNonNull(TellusServerHelloPayload.CODEC.cast(), "tellusServerHelloCodec")
       );
    }
 }

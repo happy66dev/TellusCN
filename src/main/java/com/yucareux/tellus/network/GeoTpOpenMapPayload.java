@@ -9,7 +9,7 @@ import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 
 public record GeoTpOpenMapPayload(double latitude, double longitude) implements CustomPacketPayload {
    
-   public static final CustomPacketPayload.Type<GeoTpOpenMapPayload> TYPE = new CustomPacketPayload.Type<>(Tellus.id("geotp_open_map"));
+   public static final CustomPacketPayload.Type<GeoTpOpenMapPayload> TYPE = new CustomPacketPayload.Type<>(Tellus.id(TellusProtocol.CHANNEL_GEOTP_OPEN_MAP));
    public static final StreamCodec<FriendlyByteBuf, GeoTpOpenMapPayload> CODEC = StreamCodec.composite(
       ByteBufCodecs.DOUBLE, GeoTpOpenMapPayload::latitude, ByteBufCodecs.DOUBLE, GeoTpOpenMapPayload::longitude, GeoTpOpenMapPayload::fromBoxed
    );

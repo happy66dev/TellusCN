@@ -2,6 +2,7 @@ package com.yucareux.tellus.mixin.client;
 
 import com.yucareux.tellus.client.LoadingAttributionLayout;
 import com.yucareux.tellus.client.LoadingTerrainScreenTiming;
+import com.yucareux.tellus.platform.TellusClientPlatform;
 import com.yucareux.tellus.worldgen.EarthChunkGenerator;
 import java.util.ArrayList;
 import java.util.List;
@@ -148,10 +149,20 @@ public abstract class LevelLoadingScreenMixin {
       }
    }
 
+   /**
+    * 判断当前加载界面是不是在进一个 Tellus 地球世界。
+    *
+    * 输入：无，内部读取单机服务器或联机时的服务端探测结果。
+    * 输出：true 表示应当显示 Tellus 的数据来源署名。
+    * 边界条件：单机时没有服务端引用会回退到联机判断；联机且服务端没装 TellusCN 时返回 false。
+    * 说明：联机时客户端拿不到服务端的世界生成器实例（世界还没构建完成），因此退一步用
+    *      「服务端是否声明了 TellusCN 通道」来判断，这是目前在加载阶段能做的最可靠近似。
+    */
    private static boolean tellus$isLoadingTellusWorld() {
       MinecraftServer server = Minecraft.getInstance().getSingleplayerServer();
       if (server == null) {
-         return false;
+         // 联机进服：服务端装了 TellusCN 就认为是地球世界，从而照常显示数据来源署名
+         return TellusClientPlatform.isServerPresent();
       }
 
       ServerLevel overworld = server.getLevel(Level.OVERWORLD);

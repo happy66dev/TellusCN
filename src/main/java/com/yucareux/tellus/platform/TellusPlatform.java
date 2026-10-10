@@ -2,6 +2,7 @@ package com.yucareux.tellus.platform;
 
 import com.yucareux.tellus.network.GeoTpOpenMapPayload;
 import com.yucareux.tellus.network.ManagedTerrainStatusPayload;
+import com.yucareux.tellus.network.TellusServerHelloPayload;
 import com.yucareux.tellus.network.TellusWeatherPayload;
 import java.nio.file.Path;
 import java.util.Objects;
@@ -44,6 +45,28 @@ public final class TellusPlatform {
 
    public static void sendManagedTerrainStatusPayload(ServerPlayer player, ManagedTerrainStatusPayload payload) {
       SERVICE.sendManagedTerrainStatusPayload(Objects.requireNonNull(player, "player"), Objects.requireNonNull(payload, "payload"));
+   }
+
+   /**
+    * 向指定玩家下发服务端握手包。
+    *
+    * 输入：目标玩家与握手包。
+    * 输出：真正发出返回 true；对端未声明通道而跳过返回 false，调用方应稍后重试。
+    */
+   public static boolean sendServerHelloPayload(ServerPlayer player, TellusServerHelloPayload payload) {
+      // 逐个做非空校验后转发给平台实现
+      return SERVICE.sendServerHelloPayload(Objects.requireNonNull(player, "player"), Objects.requireNonNull(payload, "payload"));
+   }
+
+   /**
+    * 取当前安装的 TellusCN 模组版本字符串。
+    *
+    * 输入：无。
+    * 输出：版本字符串，保证非 null（取不到时实现类返回 "unknown"）。
+    */
+   public static String modVersion() {
+      // 直接转发给平台实现
+      return SERVICE.modVersion();
    }
 
    public static void registerDistantHorizonsLifecycle(Runnable onServerStart, Runnable onServerStop, Runnable onPlayerJoin) {

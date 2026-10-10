@@ -20,7 +20,7 @@ public record TellusWeatherPayload(
    float[] snowIndex
 ) implements FabricPacket {
    
-   public static final PacketType<TellusWeatherPayload> TYPE = PacketType.create(Tellus.id("realtime_weather"), TellusWeatherPayload::new);
+   public static final PacketType<TellusWeatherPayload> TYPE = PacketType.create(Tellus.id(TellusProtocol.CHANNEL_REALTIME_WEATHER), TellusWeatherPayload::new);
    private static final int GRID_POINTS = 9;
 
    public TellusWeatherPayload(FriendlyByteBuf buffer) {
