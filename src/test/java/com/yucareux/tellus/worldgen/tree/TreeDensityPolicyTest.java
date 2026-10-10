@@ -299,4 +299,114 @@ class TreeDensityPolicyTest {
       // 负无穷必须夹到 0喵。
       assertEquals(0.0, TreeDensityPolicy.clampUnit(Double.NEGATIVE_INFINITY), EPSILON, "负无穷必须夹到 0");
    }
+
+   /**
+    * 中性倍率 1.0 必须恰好等于自然保留概率，保证默认滑条位置不改变观感喵。
+    */
+   @Test
+   void effectiveKeepChanceAtNeutralEqualsNaturalChance() {
+      // 取一个中等密度，自然概率既不是 0 也不是 1喵。
+      Density medium = Density.of(0.5);
+      // 倍率 1.0 下的有效概率必须等于不带倍率的自然概率喵。
+      assertEquals(
+         TreeDensityPolicy.keepChance(medium),
+         TreeDensityPolicy.effectiveKeepChance(medium, 1.0),
+         EPSILON,
+         "中性倍率必须等于自然保留概率"
+      );
+   }
+
+   /**
+    * 倍率 0 必须把保留概率压到 0（完全不长树），即使自然概率很高也一样喵。
+    */
+   @Test
+   void effectiveKeepChanceAtZeroMultiplierIsZero() {
+      // 高密度自然概率接近 1，但倍率 0 必须把它压到 0喵。
+      assertEquals(0.0, TreeDensityPolicy.effectiveKeepChance(Density.of(0.95), 0.0), EPSILON, "倍率 0 必须让保留概率归零");
+   }
+
+   /**
+    * 倍率 2 必须把保留概率拉满到 1（保留全部），即使自然概率很低也一样喵。
+    */
+   @Test
+   void effectiveKeepChanceAtMaxMultiplierIsOne() {
+      // 低密度自然概率很低，但倍率 2 必须把它拉满到 1喵。
+      assertEquals(1.0, TreeDensityPolicy.effectiveKeepChance(Density.of(0.05), 2.0), EPSILON, "倍率 2 必须让保留概率拉满");
+   }
+
+   /**
+    * 非法倍率（NaN、负数、超过 2）必须被安静地处理，绝不产生越界概率或 NaN喵。
+    */
+   @Test
+   void effectiveKeepChanceClampsIllegalMultipliers() {
+      // 取一个中等密度做基准喵。
+      Density medium = Density.of(0.5);
+      // NaN 倍率必须回退到中性 1.0，有效概率等于自然概率喵。
+      assertEquals(
+         TreeDensityPolicy.keepChance(medium),
+         TreeDensityPolicy.effectiveKeepChance(medium, Double.NaN),
+         EPSILON,
+         "NaN 倍率必须回退到中性值"
+      );
+      // 负倍率必须被夹到 0，有效概率归零喵。
+      assertEquals(0.0, TreeDensityPolicy.effectiveKeepChance(medium, -5.0), EPSILON, "负倍率必须被夹到 0");
+      // 超过 2 的倍率必须被夹到 2，有效概率拉满喵。
+      assertEquals(1.0, TreeDensityPolicy.effectiveKeepChance(medium, 99.0), EPSILON, "超界倍率必须被夹到 2");
+   }
+
+   /**
+    * 有效保留概率必须随倍率单调不减，这样滑条拉大一定不会让树变少喵。
+    */
+   @Test
+   void effectiveKeepChanceIsMonotonicInMultiplier() {
+      // 取一个中等密度做基准喵。
+      Density medium = Density.of(0.5);
+      // 记录上一次的有效概率，初始取一个不可能的负值喵。
+      double previousChance = -1.0;
+      // 从倍率 0 到 2 以 0.1 为步长遍历喵。
+      for (int step = 0; step <= 20; step++) {
+         // 当前倍率，单位：无量纲比例喵。
+         double multiplier = step / 10.0;
+         // 当前有效保留概率喵。
+         double chance = TreeDensityPolicy.effectiveKeepChance(medium, multiplier);
+         // 概率必须随倍率单调不减喵。
+         assertTrue(chance >= previousChance - EPSILON, "有效概率必须随倍率单调不减，倍率=" + multiplier);
+         // 记录本次概率供下一轮比较喵。
+         previousChance = chance;
+      }
+   }
+
+   /**
+    * 不带倍率的旧接口必须与倍率 1.0 的新接口逐种子一致，保证历史行为不变喵。
+    */
+   @Test
+   void legacyKeepsTreeMatchesNeutralMultiplier() {
+      // 取一个中等密度，判定才有随机性可言喵。
+      Density medium = Density.of(0.5);
+      // 遍历大量种子，两个接口的结果必须完全一致喵。
+      for (int index = 0; index < 2000; index++) {
+         // 旧接口与倍率 1.0 的新接口必须对每个种子都给出相同结果喵。
+         assertEquals(
+            TreeDensityPolicy.keepsTree(medium, index),
+            TreeDensityPolicy.keepsTree(medium, 1.0, index),
+            "旧接口必须等价于中性倍率"
+         );
+      }
+   }
+
+   /**
+    * 倍率 0 必须丢弃每一个格子，倍率 2 必须保留每一个格子喵。
+    */
+   @Test
+   void keepsTreeHonoursExtremeMultipliers() {
+      // 取一个中等密度做基准喵。
+      Density medium = Density.of(0.5);
+      // 遍历多个种子验证两端行为喵。
+      for (int index = 0; index < 256; index++) {
+         // 倍率 0 时必须丢弃该格喵。
+         assertFalse(TreeDensityPolicy.keepsTree(medium, 0.0, index), "倍率 0 必须丢弃每一个格子");
+         // 倍率 2 时必须保留该格喵。
+         assertTrue(TreeDensityPolicy.keepsTree(medium, 2.0, index), "倍率 2 必须保留每一个格子");
+      }
+   }
 }

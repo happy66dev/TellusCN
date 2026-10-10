@@ -80,7 +80,9 @@ public record EarthGeneratorSettings(
    int undergroundDepth,
    boolean customTrees,
    boolean automaticHeightScaling,
-   boolean hugeRedMushrooms
+   boolean hugeRedMushrooms,
+   // 树木密度强度：0=不长树，1=按真实树冠覆盖度自然稀疏，2=保留全部（旧版观感）喵~
+   double treeDensity
 ) {
    public static final double DEFAULT_SPAWN_LATITUDE = 27.9881;
    public static final double DEFAULT_SPAWN_LONGITUDE = 86.925;
@@ -110,6 +112,12 @@ public record EarthGeneratorSettings(
    private static final double MIN_RANDOM_BIOME_DENSITY = 0.0;
    private static final double MAX_RANDOM_BIOME_DENSITY = 0.4;
    public static final boolean DEFAULT_AUTOMATIC_HEIGHT_SCALING = true;
+   // 树木密度强度默认值：1.0 表示按真实树冠覆盖度自然稀疏喵~
+   public static final double DEFAULT_TREE_DENSITY = 1.0;
+   // 树木密度强度下限：0 表示完全不长树喵~
+   public static final double MIN_TREE_DENSITY = 0.0;
+   // 树木密度强度上限：2 表示保留全部树木、等同旧版观感喵~
+   public static final double MAX_TREE_DENSITY = 2.0;
    public static final EarthGeneratorSettings DEFAULT = new EarthGeneratorSettings(
       30.0,
       1.0,
@@ -174,7 +182,8 @@ public record EarthGeneratorSettings(
       DEFAULT_UNDERGROUND_DEPTH,
       true,
       DEFAULT_AUTOMATIC_HEIGHT_SCALING,
-      false
+      false,
+      DEFAULT_TREE_DENSITY
    );
    private static final MapCodec<EarthGeneratorSettings.BaseToggles> BASE_TOGGLES_CODEC = RecordCodecBuilder.mapCodec(
       instance -> instance.group(
@@ -333,6 +342,10 @@ public record EarthGeneratorSettings(
    private static final MapCodec<Boolean> HUGE_RED_MUSHROOMS_CODEC = Codec.BOOL
       .fieldOf("huge_red_mushrooms")
       .orElse(DEFAULT.hugeRedMushrooms());
+   // 树木密度强度编解码器：数值范围限定在 [MIN_TREE_DENSITY, MAX_TREE_DENSITY]，缺省回退到默认值喵~
+   private static final MapCodec<Double> TREE_DENSITY_CODEC = Codec.doubleRange(MIN_TREE_DENSITY, MAX_TREE_DENSITY)
+      .fieldOf("tree_density")
+      .orElse(DEFAULT.treeDensity());
    private static final MapCodec<Boolean> REALTIME_TIME_CODEC = Codec.BOOL.fieldOf("realtime_time").orElse(DEFAULT.realtimeTime());
    private static final MapCodec<Boolean> REALTIME_WEATHER_CODEC = Codec.BOOL.fieldOf("realtime_weather").orElse(DEFAULT.realtimeWeather());
    private static final MapCodec<Boolean> HISTORICAL_SNOW_CODEC = Codec.BOOL.fieldOf("historical_snow").orElse(DEFAULT.historicalSnow());
@@ -445,7 +458,9 @@ public record EarthGeneratorSettings(
             builder = EarthGeneratorSettings.CAVES_REACH_SURFACE_CODEC.encode(input.cavesReachSurface(), ops, builder);
             builder = EarthGeneratorSettings.UNDERGROUND_DEPTH_CODEC.encode(input.undergroundDepth(), ops, builder);
             builder = EarthGeneratorSettings.CUSTOM_TREES_CODEC.encode(input.customTrees(), ops, builder);
-            return EarthGeneratorSettings.HUGE_RED_MUSHROOMS_CODEC.encode(input.hugeRedMushrooms(), ops, builder);
+            builder = EarthGeneratorSettings.HUGE_RED_MUSHROOMS_CODEC.encode(input.hugeRedMushrooms(), ops, builder);
+            // 把树木密度强度写入存档，确保重开世界时沿用玩家选择喵~
+            return EarthGeneratorSettings.TREE_DENSITY_CODEC.encode(input.treeDensity(), ops, builder);
          }
 
          public <T> Stream<T> keys(DynamicOps<T> ops) {
@@ -483,6 +498,7 @@ public record EarthGeneratorSettings(
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.UNDERGROUND_DEPTH_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.CUSTOM_TREES_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.HUGE_RED_MUSHROOMS_CODEC.keys(ops));
+            baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.TREE_DENSITY_CODEC.keys(ops));
             Stream<T> structureKeys = Stream.concat(baseKeys, EarthGeneratorSettings.STRUCTURE_CODEC.keys(ops));
             return Stream.concat(structureKeys, EarthGeneratorSettings.TRAIL_RUINS_CODEC.keys(ops));
          }
@@ -516,6 +532,8 @@ public record EarthGeneratorSettings(
             DataResult<Integer> undergroundDepth = EarthGeneratorSettings.UNDERGROUND_DEPTH_CODEC.decode(ops, input);
             DataResult<Boolean> customTrees = EarthGeneratorSettings.CUSTOM_TREES_CODEC.decode(ops, input);
             DataResult<Boolean> hugeRedMushrooms = EarthGeneratorSettings.HUGE_RED_MUSHROOMS_CODEC.decode(ops, input);
+            // 从存档读取树木密度强度，缺省时回退到默认值喵~
+            DataResult<Double> treeDensity = EarthGeneratorSettings.TREE_DENSITY_CODEC.decode(ops, input);
             DataResult<Boolean> experimentalIncreaseHeight = EarthGeneratorSettings.EXPERIMENTAL_INCREASE_HEIGHT_CODEC.decode(ops, input);
             DataResult<Boolean> automaticHeightScaling = EarthGeneratorSettings.AUTOMATIC_HEIGHT_SCALING_CODEC.decode(ops, input);
             DataResult<Optional<String>> experimentalHeightCoordinateProfile = EarthGeneratorSettings.EXPERIMENTAL_HEIGHT_COORDINATE_PROFILE_CODEC
@@ -596,7 +614,11 @@ public record EarthGeneratorSettings(
             DataResult<EarthGeneratorSettings> withCustomTrees = withUndergroundDepth.apply2(
                EarthGeneratorSettings::applyCustomTrees, customTrees
             );
-            return withCustomTrees.apply2(EarthGeneratorSettings::applyHugeRedMushrooms, hugeRedMushrooms);
+            DataResult<EarthGeneratorSettings> withHugeRedMushrooms = withCustomTrees.apply2(
+               EarthGeneratorSettings::applyHugeRedMushrooms, hugeRedMushrooms
+            );
+            // 把解析出的树木密度强度合并进最终设置对象喵~
+            return withHugeRedMushrooms.apply2(EarthGeneratorSettings::applyTreeDensity, treeDensity);
          }
 
          public <T> Stream<T> keys(DynamicOps<T> ops) {
@@ -634,6 +656,7 @@ public record EarthGeneratorSettings(
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.UNDERGROUND_DEPTH_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.CUSTOM_TREES_CODEC.keys(ops));
             baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.HUGE_RED_MUSHROOMS_CODEC.keys(ops));
+            baseKeys = Stream.concat(baseKeys, EarthGeneratorSettings.TREE_DENSITY_CODEC.keys(ops));
             Stream<T> structureKeys = Stream.concat(baseKeys, EarthGeneratorSettings.STRUCTURE_CODEC.keys(ops));
             return Stream.concat(structureKeys, EarthGeneratorSettings.TRAIL_RUINS_CODEC.keys(ops));
          }
@@ -705,9 +728,12 @@ public record EarthGeneratorSettings(
       int undergroundDepth,
       boolean customTrees,
       boolean automaticHeightScaling,
-      boolean hugeRedMushrooms
+      boolean hugeRedMushrooms,
+      double treeDensity
    ) {
       worldScale = clampWorldScale(worldScale);
+      // 喵~防御：把树木密度强度夹到合法区间 [0,2]，并把 NaN 回退到默认值，避免概率计算被污染喵~
+      treeDensity = Double.isNaN(treeDensity) ? DEFAULT_TREE_DENSITY : Mth.clamp(treeDensity, MIN_TREE_DENSITY, MAX_TREE_DENSITY);
       randomBiomeDensity = Mth.clamp(randomBiomeDensity, MIN_RANDOM_BIOME_DENSITY, MAX_RANDOM_BIOME_DENSITY);
       randomBiomeIds = MinecraftVersionCompat.normalizeRandomBiomeSelection(randomBiomeIds);
       voxyChunkPregenMaxRadius = Mth.clamp(voxyChunkPregenMaxRadius, 0, MAX_VOXY_PREGEN_RADIUS);
@@ -790,6 +816,8 @@ public record EarthGeneratorSettings(
       this.customTrees = customTrees;
       this.automaticHeightScaling = automaticHeightScaling;
       this.hugeRedMushrooms = hugeRedMushrooms;
+      // 保存已夹紧的树木密度强度，供世界生成按比例稀疏树木喵~
+      this.treeDensity = treeDensity;
    }
 
    public double effectiveTerrestrialHeightScale() {
@@ -1036,6 +1064,12 @@ public record EarthGeneratorSettings(
       return settings.withHugeRedMushrooms(Objects.requireNonNull(hugeRedMushrooms, "hugeRedMushrooms"));
    }
 
+   // 把解析出的树木密度强度套用到设置对象，null 视为非法输入直接报错喵~
+   private static EarthGeneratorSettings applyTreeDensity(EarthGeneratorSettings settings, Double treeDensity) {
+      // 喵~防御：treeDensity 为 null 时抛出带字段名的异常，避免静默写入默认值掩盖解析错误喵~
+      return settings.withTreeDensity(Objects.requireNonNull(treeDensity, "treeDensity"));
+   }
+
    public EarthGeneratorSettings withNetworkSettings(boolean managedTerrainDownloads, boolean showOverlay) {
       return this.withNetworkSettings(managedTerrainDownloads, showOverlay, this.cavesReachSurface);
    }
@@ -1057,7 +1091,8 @@ public record EarthGeneratorSettings(
          this.randomBiomeSeed, this.randomBiomeIds, this.experimentalIncreaseHeight, managedTerrainDownloads, showOverlay, cavesReachSurface,
          this.undergroundDepth, this.customTrees,
          this.automaticHeightScaling,
-         this.hugeRedMushrooms
+         this.hugeRedMushrooms,
+         this.treeDensity
       );
    }
 
@@ -1078,7 +1113,8 @@ public record EarthGeneratorSettings(
          this.randomBiomeSeed, this.randomBiomeIds, this.experimentalIncreaseHeight, this.tellusManagedTerrainDownloads,
          this.showTerrainDownloadOverlay, this.cavesReachSurface, undergroundDepth, this.customTrees,
          this.automaticHeightScaling,
-         this.hugeRedMushrooms
+         this.hugeRedMushrooms,
+         this.treeDensity
       );
    }
 
@@ -1097,7 +1133,8 @@ public record EarthGeneratorSettings(
          this.distantHorizonsRenderMode, this.demSelection, this.enableRoads, this.enableBuildings, this.enableWater,
          this.thinShellTerrain, this.climateBasedBuiltUpTerrain, this.randomBiomes, this.randomBiomeDensity,
          this.randomBiomeSeed, this.randomBiomeIds, this.experimentalIncreaseHeight, this.tellusManagedTerrainDownloads,
-         this.showTerrainDownloadOverlay, this.cavesReachSurface, this.undergroundDepth, customTrees, this.automaticHeightScaling, this.hugeRedMushrooms
+         this.showTerrainDownloadOverlay, this.cavesReachSurface, this.undergroundDepth, customTrees, this.automaticHeightScaling, this.hugeRedMushrooms,
+         this.treeDensity
       );
    }
 
@@ -1117,7 +1154,30 @@ public record EarthGeneratorSettings(
          this.thinShellTerrain, this.climateBasedBuiltUpTerrain, this.randomBiomes, this.randomBiomeDensity,
          this.randomBiomeSeed, this.randomBiomeIds, this.experimentalIncreaseHeight, this.tellusManagedTerrainDownloads,
          this.showTerrainDownloadOverlay, this.cavesReachSurface, this.undergroundDepth, this.customTrees,
-         this.automaticHeightScaling, hugeRedMushrooms
+         this.automaticHeightScaling, hugeRedMushrooms,
+         this.treeDensity
+      );
+   }
+
+   // 返回一个仅替换树木密度强度的新设置对象，其余字段原样保留喵~
+   public EarthGeneratorSettings withTreeDensity(double treeDensity) {
+      return new EarthGeneratorSettings(
+         this.worldScale, this.terrestrialHeightScale, this.oceanicHeightScale, this.heightOffset,
+         this.spawnLatitude, this.spawnLongitude, this.minAltitude, this.maxAltitude,
+         this.riverLakeShorelineBlend, this.oceanShorelineBlend, this.shorelineBlendCliffLimit, this.caveGeneration, this.oreDistribution, this.geologicalStonePatches, this.lavaPools,
+         this.addStrongholds, this.addVillages, this.addMineshafts, this.addOceanMonuments, this.addWoodlandMansions,
+         this.addDesertTemples, this.addJungleTemples, this.addPillagerOutposts, this.addRuinedPortals, this.addShipwrecks,
+         this.addOceanRuins, this.addBuriedTreasure, this.addIgloos, this.addWitchHuts, this.addAncientCities,
+         this.addTrialChambers, this.addTrailRuins, this.deepDark, this.geodes, this.distantHorizonsWaterResolver,
+         this.distantHorizonsOsmFeatures, this.distantHorizonsOsmRoadMaxDetail, this.distantHorizonsOsmBuildingMaxDetail,
+         this.distantHorizonsOsmNonBlockingFetch, this.realtimeTime, this.realtimeWeather, this.historicalSnow,
+         this.voxyChunkPregenEnabled, this.voxyChunkPregenMaxRadius, this.voxyChunkPregenChunksPerTick,
+         this.distantHorizonsRenderMode, this.demSelection, this.enableRoads, this.enableBuildings, this.enableWater,
+         this.thinShellTerrain, this.climateBasedBuiltUpTerrain, this.randomBiomes, this.randomBiomeDensity,
+         this.randomBiomeSeed, this.randomBiomeIds, this.experimentalIncreaseHeight, this.tellusManagedTerrainDownloads,
+         this.showTerrainDownloadOverlay, this.cavesReachSurface, this.undergroundDepth, this.customTrees,
+         this.automaticHeightScaling, this.hugeRedMushrooms,
+         treeDensity
       );
    }
 
@@ -1198,7 +1258,8 @@ public record EarthGeneratorSettings(
          this.undergroundDepth,
          this.customTrees,
          this.automaticHeightScaling,
-         this.hugeRedMushrooms
+         this.hugeRedMushrooms,
+         this.treeDensity
       );
    }
 
@@ -1279,7 +1340,8 @@ public record EarthGeneratorSettings(
          this.undergroundDepth,
          this.customTrees,
          this.automaticHeightScaling,
-         this.hugeRedMushrooms
+         this.hugeRedMushrooms,
+         this.treeDensity
       );
    }
 
@@ -1348,7 +1410,8 @@ public record EarthGeneratorSettings(
          this.undergroundDepth,
          this.customTrees,
          this.automaticHeightScaling,
-         this.hugeRedMushrooms
+         this.hugeRedMushrooms,
+         this.treeDensity
       );
    }
 
@@ -1417,7 +1480,8 @@ public record EarthGeneratorSettings(
          this.undergroundDepth,
          this.customTrees,
          this.automaticHeightScaling,
-         this.hugeRedMushrooms
+         this.hugeRedMushrooms,
+         this.treeDensity
       );
    }
 
@@ -1486,7 +1550,8 @@ public record EarthGeneratorSettings(
          this.undergroundDepth,
          this.customTrees,
          this.automaticHeightScaling,
-         this.hugeRedMushrooms
+         this.hugeRedMushrooms,
+         this.treeDensity
       );
    }
 
@@ -1555,7 +1620,8 @@ public record EarthGeneratorSettings(
          this.undergroundDepth,
          this.customTrees,
          this.automaticHeightScaling,
-         this.hugeRedMushrooms
+         this.hugeRedMushrooms,
+         this.treeDensity
       );
    }
 
@@ -1624,7 +1690,8 @@ public record EarthGeneratorSettings(
          this.undergroundDepth,
          this.customTrees,
          this.automaticHeightScaling,
-         this.hugeRedMushrooms
+         this.hugeRedMushrooms,
+         this.treeDensity
       );
    }
 
@@ -1693,7 +1760,8 @@ public record EarthGeneratorSettings(
          this.undergroundDepth,
          this.customTrees,
          this.automaticHeightScaling,
-         this.hugeRedMushrooms
+         this.hugeRedMushrooms,
+         this.treeDensity
       );
    }
 
@@ -1762,7 +1830,8 @@ public record EarthGeneratorSettings(
          this.undergroundDepth,
          this.customTrees,
          this.automaticHeightScaling,
-         this.hugeRedMushrooms
+         this.hugeRedMushrooms,
+         this.treeDensity
       );
    }
 
@@ -1831,7 +1900,8 @@ public record EarthGeneratorSettings(
          this.undergroundDepth,
          this.customTrees,
          this.automaticHeightScaling,
-         this.hugeRedMushrooms
+         this.hugeRedMushrooms,
+         this.treeDensity
       );
    }
 
@@ -1900,7 +1970,8 @@ public record EarthGeneratorSettings(
          this.undergroundDepth,
          this.customTrees,
          this.automaticHeightScaling,
-         this.hugeRedMushrooms
+         this.hugeRedMushrooms,
+         this.treeDensity
       );
    }
 
@@ -1969,7 +2040,8 @@ public record EarthGeneratorSettings(
          this.undergroundDepth,
          this.customTrees,
          this.automaticHeightScaling,
-         this.hugeRedMushrooms
+         this.hugeRedMushrooms,
+         this.treeDensity
       );
    }
 
@@ -2056,7 +2128,8 @@ public record EarthGeneratorSettings(
          this.undergroundDepth,
          this.customTrees,
          this.automaticHeightScaling,
-         this.hugeRedMushrooms
+         this.hugeRedMushrooms,
+         this.treeDensity
       );
    }
 
@@ -2160,7 +2233,8 @@ public record EarthGeneratorSettings(
          this.undergroundDepth,
          this.customTrees,
          this.automaticHeightScaling,
-         this.hugeRedMushrooms
+         this.hugeRedMushrooms,
+         this.treeDensity
       );
    }
 
@@ -2229,7 +2303,8 @@ public record EarthGeneratorSettings(
          this.undergroundDepth,
          this.customTrees,
          automaticHeightScaling,
-         this.hugeRedMushrooms
+         this.hugeRedMushrooms,
+         this.treeDensity
       );
    }
 
@@ -2933,7 +3008,8 @@ public record EarthGeneratorSettings(
             EarthGeneratorSettings.DEFAULT.undergroundDepth(),
             EarthGeneratorSettings.DEFAULT.customTrees(),
             EarthGeneratorSettings.DEFAULT.automaticHeightScaling(),
-            EarthGeneratorSettings.DEFAULT.hugeRedMushrooms()
+            EarthGeneratorSettings.DEFAULT.hugeRedMushrooms(),
+            EarthGeneratorSettings.DEFAULT.treeDensity()
          );
       }
    }

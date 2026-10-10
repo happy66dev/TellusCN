@@ -5008,9 +5008,10 @@ public final class EarthChunkGenerator extends ChunkGenerator {
     *
     * <p>输入：放置格的世界坐标与锚点种子。输出：true 表示保留、false 表示跳过喵。</p>
     *
-    * <p>边界条件：树木密度开关默认关闭，关闭时 {@link TellusWorldgenSources#sampleTreeDensity}
-    * 会立即返回不可用密度，而不可用密度下 {@link TreeDensityPolicy#keepsTree} 恒为 true，
-    * 因此关闭状态下本方法等价于"永远保留"，行为与改动前逐字节一致喵。</p>
+    * <p>边界条件：削减强度来自世界设置里的树木密度倍率，默认 1.0（按真实覆盖度稀疏）；
+    * 倍率为 2.0 时等价于"永远保留"，与旧版观感逐字节一致；数据缺失时
+    * {@link TellusWorldgenSources#sampleTreeDensity} 返回不可用密度，
+    * 而不可用密度在倍率 1.0 下 {@link TreeDensityPolicy#keepsTree} 恒为 true喵。</p>
     *
     * @param worldX 放置格锚点的世界 X 坐标，单位：方块喵
     * @param worldZ 放置格锚点的世界 Z 坐标，单位：方块喵
@@ -5022,12 +5023,12 @@ public final class EarthChunkGenerator extends ChunkGenerator {
       if (!this.settings.customTrees()) {
          return true;
       }
-      // 采样真实世界密度；开关关闭时这次调用不会产生任何栅格读取喵。
+      // 采样真实世界的"自然密度"；削减强度稍后用世界设置里的倍率叠加喵。
       TreeDensityPolicy.Density density = TellusWorldgenSources.sampleTreeDensity(
          worldX, worldZ, this.settings.worldScale()
       );
-      // 密度不可用（开关关闭或数据缺失）时恒返回 true，保证旧行为不被改变喵。
-      return TreeDensityPolicy.keepsTree(density, seed);
+      // 用世界设置里的树木密度倍率叠加判定；数据缺失且倍率为 1.0 时恒返回 true，保持旧行为喵。
+      return TreeDensityPolicy.keepsTree(density, this.settings.treeDensity(), seed);
    }
 
    private boolean isNearWater(int worldX, int worldZ, int radius) {

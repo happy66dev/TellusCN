@@ -31,6 +31,12 @@ public final class TreeDensityPolicy {
    private static final double MAXIMUM_KEEP_CHANCE = 1.0;
    // 密度到保留概率的曲线指数，单位：无量纲；取大于 1 让"中等密度"偏稀疏，更接近真实疏林观感喵。
    private static final double KEEP_CHANCE_EXPONENT = 1.3;
+   // 树木密度强度的中性值，单位：无量纲比例；1.0 表示完全按真实树冠覆盖度稀疏，不额外加减喵。
+   private static final double NEUTRAL_MULTIPLIER = 1.0;
+   // 树木密度强度的下限，单位：无量纲比例；0 表示把保留概率压到 0、完全不长树喵。
+   private static final double MIN_MULTIPLIER = 0.0;
+   // 树木密度强度的上限，单位：无量纲比例；2 表示把保留概率拉满到 1、保留全部树木（旧版观感）喵。
+   private static final double MAX_MULTIPLIER = 2.0;
    // 保留判定所用随机数的盐值，单位：无量纲常数；换掉它会让全世界的树重新洗牌，非必要不要改喵。
    private static final long KEEP_ROLL_SALT = 0x5A17C3E9B4D208F7L;
    // splitmix64 的黄金比例增量常数，单位：无量纲常数；用于打散输入种子的低位规律喵。
@@ -138,7 +144,41 @@ public final class TreeDensityPolicy {
    }
 
    /**
-    * 判定某个放置格是否保留一棵树喵。
+    * 在自然密度的基础上，按玩家设定的强度倍率换算出最终的保留概率喵。
+    *
+    * <p>强度倍率语义：0 表示完全不长树；1 表示完全按真实树冠覆盖度稀疏（中性）；2 表示保留全部、等同旧版观感喵。</p>
+    * <p>映射思路：以自然保留概率 base 为锚点，在 [0,1] 区间把倍率线性插值到两端——
+    * 倍率在 [0,1] 之间时在"0 概率"与 base 之间插值；在 [1,2] 之间时在 base 与"1 概率"之间插值喵。</p>
+    *
+    * @param density    融合后的树木密度喵
+    * @param multiplier 玩家设定的强度倍率，单位：无量纲比例；越界或 NaN 会被夹到 [0,2]，NaN 视为中性 1.0喵
+    * @return 最终保留概率，单位：无量纲比例，取值范围 [0,1]喵
+    */
+   public static double effectiveKeepChance(Density density, double multiplier) {
+      // 自然密度对应的保留概率；density 为 null 或不可用时 base 固定为 1.0（不削减）喵。
+      double base = keepChance(density);
+      // 喵~防御：NaN 无法参与比较，先回退到中性倍率 1.0，避免概率一路变成 NaN喵。
+      double safeMultiplier = Double.isNaN(multiplier) ? NEUTRAL_MULTIPLIER : multiplier;
+      // 喵~防御：把倍率夹到 [0,2]，防止极端输入把概率推出合法范围喵。
+      if (safeMultiplier <= MIN_MULTIPLIER) {
+         safeMultiplier = MIN_MULTIPLIER;
+      } else if (safeMultiplier >= MAX_MULTIPLIER) {
+         safeMultiplier = MAX_MULTIPLIER;
+      }
+      // 倍率不超过中性值时，在"0 概率"与自然概率之间按倍率线性插值（倍率越小越稀疏）喵。
+      double chance;
+      if (safeMultiplier <= NEUTRAL_MULTIPLIER) {
+         chance = base * safeMultiplier;
+      } else {
+         // 倍率超过中性值时，在自然概率与"满概率 1.0"之间按超出部分线性插值（倍率越大越密）喵。
+         chance = base + (1.0 - base) * (safeMultiplier - NEUTRAL_MULTIPLIER);
+      }
+      // 喵~防御：最终结果夹到 [0,1]，保证它可以安全地当作概率使用喵。
+      return clampUnit(chance);
+   }
+
+   /**
+    * 判定某个放置格是否保留一棵树喵（中性强度，等价于强度倍率为 1.0）喵。
     *
     * <p>同一个 (density, seed) 组合永远返回同一个结果，这是完整区块与远景 LOD 对齐的前提喵。</p>
     *
@@ -147,16 +187,28 @@ public final class TreeDensityPolicy {
     * @return true 表示保留，false 表示该格不长树喵
     */
    public static boolean keepsTree(Density density, long seed) {
-      // 无数据时一律保留，保证开关打开但在无覆盖区域（例如南北极）行为与旧版一致喵。
-      if (density == null || !density.available()) {
-         return true;
-      }
-      // 概率为 1.0 时直接短路，省掉一次哈希计算喵。
-      double chance = keepChance(density);
+      // 不带强度的旧接口直接委托给中性倍率版本，保证历史行为与单测结果不变喵。
+      return keepsTree(density, NEUTRAL_MULTIPLIER, seed);
+   }
+
+   /**
+    * 判定某个放置格是否保留一棵树，并叠加玩家设定的强度倍率喵。
+    *
+    * <p>同一个 (density, multiplier, seed) 组合永远返回同一个结果，这是完整区块与远景 LOD 对齐的前提喵。</p>
+    *
+    * @param density    融合后的树木密度喵
+    * @param multiplier 玩家设定的强度倍率，单位：无量纲比例，取值范围 [0,2]喵
+    * @param seed       该放置格的确定性种子，来自锚点计算，必须与树形规划使用同一个种子喵
+    * @return true 表示保留，false 表示该格不长树喵
+    */
+   public static boolean keepsTree(Density density, double multiplier, long seed) {
+      // 先把自然密度与强度倍率合成最终保留概率喵。
+      double chance = effectiveKeepChance(density, multiplier);
+      // 概率不小于 1.0 时直接短路保留，省掉一次哈希计算喵。
       if (chance >= MAXIMUM_KEEP_CHANCE) {
          return true;
       }
-      // 概率不大于 0 时直接短路，省掉一次哈希计算喵。
+      // 概率不大于 0 时直接短路丢弃，省掉一次哈希计算喵。
       if (chance <= 0.0) {
          return false;
       }

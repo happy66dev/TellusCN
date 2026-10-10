@@ -68,9 +68,6 @@ public final class TellusWorldgenSources {
    private static final ThreadPoolExecutor LOD_PREFETCH_EXECUTOR = createLodPrefetchExecutor();
    private static final ExecutorService TERRAIN_DETAIL_EXECUTOR = createTerrainDetailExecutor();
    private static final ConcurrentMap<EarthGeneratorSettings, WaterSurfaceResolver> WATER_RESOLVERS = new ConcurrentHashMap<>();
-   // 树木密度开关，单位：布尔；默认关闭，保证关闭时行为与改动前逐字节一致喵。
-   private static final boolean TREE_DENSITY_ENABLED =
-      Boolean.parseBoolean(System.getProperty("tellus.treeDensity.enabled", "false"));
    // 树木密度缓存的最大条目数，单位：条；超出后整体清空，避免长时间运行占用过多内存喵。
    private static final int TREE_DENSITY_CACHE_LIMIT = 65536;
    // 树木密度按放置格缓存，键是放置格坐标与比例尺；密度只取决于世界坐标与比例尺、与世界种子无关，
@@ -88,8 +85,9 @@ public final class TellusWorldgenSources {
     * 完整区块生成与远景 LOD 都必须走这一个入口，否则两边的树量会对不上喵。</p>
     *
     * <p>输入：世界坐标与地图比例尺。<br>
-    * 输出：融合后的密度；任何一路数据缺失都会被安全降级。边界条件：开关关闭时
-    * 立即返回不可用密度且不触发任何采样，因此关闭状态下这条路径的开销为零喵。</p>
+    * 输出：融合后的密度；任何一路数据缺失都会被安全降级。边界条件：比例尺非法时
+    * 立即返回不可用密度，调用方据此按"保留"处理。削减强度由各调用方按世界设置的
+    * 树木密度倍率叠加，本函数只负责产出"自然密度"喵。</p>
     *
     * @param blockX    采样点在世界坐标中的 X，单位：方块喵
     * @param blockZ    采样点在世界坐标中的 Z，单位：方块喵
@@ -97,10 +95,6 @@ public final class TellusWorldgenSources {
     * @return 融合后的树木密度喵
     */
    public static TreeDensityPolicy.Density sampleTreeDensity(int blockX, int blockZ, double worldScale) {
-      // 喵~防御：开关关闭时直接短路，不产生任何栅格读取，保证行为与旧版完全一致喵。
-      if (!TREE_DENSITY_ENABLED) {
-         return TreeDensityPolicy.Density.unavailable();
-      }
       // 喵~防御：比例尺非法（NaN、非正、无穷）时退化为不可用，避免窗口宽度变成非法值喵。
       if (!Double.isFinite(worldScale) || worldScale <= 0.0) {
          return TreeDensityPolicy.Density.unavailable();
